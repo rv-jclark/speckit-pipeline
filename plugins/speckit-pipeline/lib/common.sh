@@ -139,3 +139,47 @@ state_phase_finish() { # ... <state_file> <phase> <status> <cost> <turns> <durat
 fmt_cost() { [ -n "${1:-}" ] && printf '$%s' "$1" || printf 'cost unmeasured'; }
 
 state_total_cost() { jq '[.phases[].cost_usd // 0] | add // 0' "$1"; }
+
+# ----------------------------------------------- spec-kit's own write targets --
+# The plan phase legitimately writes the AGENT CONTEXT file at the repo root —
+# spec-kit's `update-agent-context.sh` maintains it, complete with the
+# <!-- SPECKIT START/END --> plan pointer. A scope of specs/ and .specify/ alone
+# therefore fails a plan that did exactly what it is supposed to do, which is
+# what the first real two-phase run reported: STATUS ok, 26 turns, every artifact
+# written, marked `failed` over CLAUDE.md.
+#
+# The list is DERIVED from that script rather than copied out of it. It names 25
+# possible files (CLAUDE.md, GEMINI.md, AGENTS.md, .cursor/rules/..., and so on),
+# and a hand-maintained copy would silently go stale the first time the vendored
+# spec-kit is refreshed — reintroducing this same false failure for whichever
+# agent got added. Enumerate the primitive, not a snapshot of it.
+agent_context_paths() { # agent_context_paths <repo_root>
+  local script="$1/.specify/scripts/bash/update-agent-context.sh"
+  [ -f "$script" ] || return 0
+  sed -nE 's/^[A-Z_]+_FILE="\$REPO_ROOT\/(.+)"$/\1/p' "$script" | sort -u
+}
+
+# ------------------------------------------------------- the claude binary -----
+# The engine does not assume it is driving `claude` itself. An organisation that
+# blocks permission bypass may need a wrapper that answers the prompts, so the
+# executable is configurable — and then PROBED, because a wrapper that silently
+# ignores --max-budget-usd leaves a phase with no ceiling while the summary still
+# reports one. "The ceiling was applied" and "the flag was accepted" are the same
+# claim only if somebody checked.
+
+claude_bin_help=""
+
+probe_claude_bin() { # probe_claude_bin <bin>  -> 0 if runnable
+  command -v "$1" >/dev/null 2>&1 || return 1
+  claude_bin_help=$("$1" --help 2>&1) || true
+  [ -n "$claude_bin_help" ] || return 2   # runnable but said nothing we can read
+  return 0
+}
+
+# Does the probed binary advertise this flag? Returns 1 for "no", 2 for "cannot
+# tell" — an unreadable probe is a failure of the CHECK, not of the binary, and
+# must not be reported as a missing flag.
+claude_bin_supports() { # claude_bin_supports <--flag>
+  [ -n "$claude_bin_help" ] || return 2
+  case "$claude_bin_help" in *"$1"*) return 0;; *) return 1;; esac
+}

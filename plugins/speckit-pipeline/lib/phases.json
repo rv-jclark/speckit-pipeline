@@ -20,10 +20,17 @@
     "  write_scope    path prefixes this phase may modify. null = unrestricted.",
     "                 Enforced AFTER the phase by comparing git status, because a",
     "                 detected escape is verifiable where a path-scoped tool deny is not.",
-    "  takes_description  true = the feature description is passed as the skill argument"
+    "  takes_description  true = the feature description is passed as the skill argument",
+    "",
+    "defaults.claude_bin is the executable each phase runs. Point it at a wrapper",
+    "(--claude-bin, or SPEC_RUN_CLAUDE_BIN) when the plain CLI cannot get through",
+    "your organisation's permission prompts. Whatever you name is probed for the",
+    "flags this engine passes, and a flag it does not accept is reported rather",
+    "than dropped: a ceiling that was never applied must not read as one that was."
   ],
 
   "defaults": {
+    "claude_bin": "claude",
     "permission_mode": "acceptEdits",
     "max_turns": 80,
     "write_scope": ["specs/", ".specify/"],

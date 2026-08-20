@@ -29,7 +29,7 @@ t_skip() { skipped=$((skipped+1)); printf '  \033[33m-\033[0m %s (skipped: %s)\n
 # A floor on the tally, because the failure above is invisible by construction:
 # nothing else in a passing run distinguishes "every assertion ran" from "most of
 # them printed and were never counted".
-TALLY_FLOOR=65
+TALLY_FLOOR=80
 
 assert_contains() { # <haystack> <needle> <label>
   case "$1" in *"$2"*) t_pass "$3";; *) t_fail "$3" "expected to contain: $2";; esac
@@ -64,6 +64,14 @@ if command -v shellcheck >/dev/null 2>&1; then
 else
   t_skip "shellcheck" "not installed — brew install shellcheck"
 fi
+
+# bash 3.2 is what macOS ships, so it is the floor. Grep for the constructs that
+# silently do nothing there rather than trusting whoever edits this next.
+b4=$(grep -nE '(^|[^[:alnum:]_])(mapfile|readarray)([^[:alnum:]_]|$)|declare -A|\$\{[A-Za-z_]+(,,|\^\^)' \
+       "$SPEC_RUN" "$SPEC_BOOTSTRAP" "$PKG/lib/common.sh" "$PKG/lib/verify.sh" \
+       "$ROOT/bin/spec-run" "$ROOT/bin/spec-bootstrap" 2>/dev/null | grep -v '^\s*#' || true)
+assert_eq "$b4" "" "no bash-4-only construct in the shipped scripts (macOS ships 3.2)"
+t_note "running under bash ${BASH_VERSION}"
 
 # ================================================================== config ====
 printf '\nphase config\n'
@@ -243,6 +251,92 @@ assert_contains "$(cat "$BS/.specify/templates/spec-template.md")" "drifted" \
 out=$("$SPEC_BOOTSTRAP" --force "$BS" 2>&1)
 assert_not_contains "$(cat "$BS/.specify/templates/spec-template.md")" "drifted" \
   "--force replaces it"
+
+# ------------------------------------------------- spec-kit's own write targets
+printf '\nagent context scope\n'
+acp=$(agent_context_paths "$BS" | tr '\n' ' ')
+assert_contains "$acp" "CLAUDE.md" "the agent context file is derived from spec-kit's own script"
+assert_contains "$acp" "AGENTS.md" "and so are the other agents' context files"
+n_acp=$(agent_context_paths "$BS" | grep -c . || true)
+[ "${n_acp:-0}" -ge 15 ] && t_pass "the derivation finds the whole list ($n_acp paths)" \
+  || t_fail "the derivation finds the whole list" "only $n_acp paths; the sed pattern has drifted"
+# Derived, never copied: the script names 25 possible files, and a hand-kept copy
+# goes stale the first time the vendored spec-kit is refreshed — reintroducing
+# this exact false failure for whichever agent was added.
+
+# NOT mapfile: macOS ships bash 3.2, where it does not exist. It failed silently
+# enough that the NEXT assertion passed with an unbound array — i.e. vacuously,
+# for the third time in this suite. Nothing in this project may use bash 4.
+ACP=()
+while IFS= read -r _p; do [ -n "$_p" ] && ACP+=("$_p"); done < <(agent_context_paths "$BS")
+
+# Snapshot BEFORE the write, or the write is already in the baseline and the
+# check is correctly silent — which is how the first version of this test failed
+# while the code was right.
+scope_snapshot "$BS" "$WORK/snap2" "${SCOPE[@]}"
+printf 'agent context\n' > "$BS/CLAUDE.md"
+v=$(scope_violations_since "$BS" "$WORK/snap2" "${SCOPE[@]}")
+assert_contains "$v" "CLAUDE.md" "without the derived paths, a legitimate CLAUDE.md write IS flagged"
+v=$(scope_violations_since "$BS" "$WORK/snap2" "${SCOPE[@]}" "${ACP[@]}")
+assert_not_contains "$v" "CLAUDE.md" "with them, it is not"
+# The pair matters: the first assertion is what makes the second meaningful. A
+# real plan run cost $0.65 and reported STATUS ok with every artifact written,
+# and was marked `failed` over precisely this file.
+
+# ------------------------------------------------------- custom claude binary --
+printf '\ncustom phase runner\n'
+FAKE="$WORK/fakebin"; mkdir -p "$FAKE"
+cat > "$FAKE/claude-edits" <<'FAKEEOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = "--help" ]; then
+  # advertises everything the engine passes
+  echo "--print --model --effort --output-format --session-id --max-turns"
+  echo "--max-budget-usd --disallowed-tools --append-system-prompt"
+  echo "--permission-mode --strict-mcp-config"
+  exit 0
+fi
+echo '{"total_cost_usd":0.01,"num_turns":1,"duration_ms":10,"result":"STATUS: ok"}'
+FAKEEOF
+cat > "$FAKE/claude-quiet" <<'FAKEEOF'
+#!/usr/bin/env bash
+[ "${1:-}" = "--help" ] && exit 0     # runnable, but says nothing readable
+echo '{}'
+FAKEEOF
+cat > "$FAKE/claude-partial" <<'FAKEEOF'
+#!/usr/bin/env bash
+[ "${1:-}" = "--help" ] && { echo "--print --model --output-format"; exit 0; }
+echo '{}'
+FAKEEOF
+chmod +x "$FAKE"/claude-*
+
+argv=$(PATH="$FAKE:$PATH" "$SPEC_RUN" --repo "$BS" --feature-dir "$BS/specs/001-t" \
+        --only plan --claude-bin claude-edits --dry-run 2>&1)
+assert_contains "$argv" "claude-edits -p" "--claude-bin runs the named executable, not claude"
+
+argv=$(PATH="$FAKE:$PATH" SPEC_RUN_CLAUDE_BIN=claude-edits "$SPEC_RUN" --repo "$BS" \
+        --feature-dir "$BS/specs/001-t" --only plan --dry-run 2>&1)
+assert_contains "$argv" "claude-edits -p" "SPEC_RUN_CLAUDE_BIN is honoured too"
+
+out=$("$SPEC_RUN" --repo "$BS" --feature-dir "$BS/specs/001-t" --only plan \
+        --claude-bin definitely-not-installed --dry-run 2>&1); rc=$?
+assert_eq "$rc" "1" "a phase runner that is not on PATH exits 1 before any spend"
+assert_contains "$out" "not on PATH" "and says so, naming the command"
+
+out=$(PATH="$FAKE:$PATH" "$SPEC_RUN" --repo "$BS" --feature-dir "$BS/specs/001-t" \
+        --only plan --claude-bin claude-partial --dry-run 2>&1)
+assert_contains "$out" "does not advertise --max-budget-usd" \
+  "a runner missing a ceiling flag is reported, not silently uncapped"
+assert_contains "$out" "claude-partial -p" "but the run still proceeds — a warning, not a refusal"
+# The distinction this project keeps insisting on: a ceiling that was never
+# applied must not read like one that was.
+
+out=$(PATH="$FAKE:$PATH" "$SPEC_RUN" --repo "$BS" --feature-dir "$BS/specs/001-t" \
+        --only plan --claude-bin claude-quiet --dry-run 2>&1)
+assert_contains "$out" "UNVERIFIED" "an unreadable probe reports the CHECK failed, not the flags"
+assert_not_contains "$out" "does not advertise" \
+  "and it does NOT then accuse the runner of missing every flag"
+# "The check passed", "the check failed" and "the check never ran" are three
+# states. Collapsing the last two here would have produced eleven false findings.
 
 # ============================================================== invocation ====
 printf '\ninvocation (--dry-run)\n'

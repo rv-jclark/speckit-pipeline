@@ -103,6 +103,51 @@ Phases that talk to nothing external run with `--strict-mcp-config` and an empty
 server list: a phase should not pay for a tool list it cannot use. Implementation
 keeps its MCP servers.
 
+## Permissions, and a custom phase runner
+
+Each phase runs `--permission-mode acceptEdits` (configurable in
+`phases.json`). In print mode there is **no interactive prompt**: a tool call the
+harness will not allow is *denied and reported to the model*, which then either
+works around it or gives up — it does not hang waiting for a human. Measured on
+the smoke runs, spec-kit's own `create-new-feature.sh` and
+`update-agent-context.sh` both ran fine under `acceptEdits`.
+
+If your organisation blocks permission bypass and you drive Claude through a
+wrapper that answers the prompts, point the engine at it:
+
+```bash
+spec-run --claude-bin claude-edits "..."     # or SPEC_RUN_CLAUDE_BIN=claude-edits
+                                             # or defaults.claude_bin in phases.json
+```
+
+The named command is **probed once** before the first phase is billed for
+anything, and every flag the engine passes is checked against its `--help`. A
+flag the runner does not advertise is **reported and still passed** — because a
+wrapper that quietly ignores `--max-budget-usd` leaves a phase with no ceiling
+while the summary still shows one, and "the ceiling was applied" and "the flag
+was accepted" are only the same claim if somebody checked. Three outcomes, kept
+distinct: the flag is advertised, the flag is missing, or the probe produced
+nothing readable — in which case the run says flag support is **UNVERIFIED**
+rather than accusing the runner of missing all eleven.
+
+### Can a phase ask you something mid-run?
+
+No — and that is the real cost of the process boundary. A headless phase has no
+channel to ask and wait, so its questions arrive **at the end**:
+
+- the handoff contract requires every phase to close with
+  `STATUS: ok | needs_input | failed — <sentence>` plus the specific questions a
+  human must answer;
+- the parent reads that from the phase's JSON, prints it under *"the phase's own
+  account"*, and **writes it to `specs/<feature>/.pipeline/<phase>.result.json`**
+  so it survives terminal scrollback;
+- the phase's session id is recorded, so `claude --resume <id>` puts you in the
+  thread that asked, with its full context intact.
+
+What a phase cannot do is pause halfway and wait for you. If a decision is
+genuinely needed *before* the work, that is what `clarify` is for — it is
+configured `gate: always`, because asking is its entire job.
+
 ## Verification
 
 **A phase's own report is never the authority.** A process can exit 0 without
@@ -189,6 +234,8 @@ guarantee is bigger than it is.
 - **No `--json-schema` on the phase result.** The artifact is the authority, so a
   second, unverified report channel would add risk without adding information.
   The phase's prose is kept only to show you when something goes wrong.
+- **A phase cannot be interrupted with a question.** See above; questions arrive
+  at the end, or `clarify` asks them up front.
 - **All phases share one working tree,** because the handoff is the files. If you
   want isolation, make the worktree yourself and point `--repo` at it.
 - **`--bare` is deliberately unused.** It would trim the phase's context, but it
@@ -211,7 +258,7 @@ reports success over a directory the rest of the pipeline cannot find.
 ## Tests
 
 ```bash
-./tests/run.sh          # shellcheck + 70 fixture assertions
+./tests/run.sh          # shellcheck + 84 fixture assertions
 ```
 
 No test spends money: the invocation assertions run under `--dry-run` and check
@@ -225,6 +272,10 @@ about, because each one passed while checking nothing:
   hash compared empty-to-empty, and two scope assertions passed because
   *everything* looked changed. The library now refuses to load without its
   dependency rather than miscomparing.
+- `mapfile` is bash 4; macOS ships **bash 3.2**, so it failed silently and left
+  an array unbound, which made the *next* assertion pass with fewer arguments
+  than it meant to check. A grep-based guard now fails the suite on any bash-4
+  construct in the shipped scripts.
 - The harness named its counter `ok()`, which `common.sh` also defines. The
   library's definition won partway through the run, so ~80 assertions printed
   ticks and incremented nothing: the suite reported **"9 passed, 0 failed"** and

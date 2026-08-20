@@ -42,6 +42,11 @@ USAGE
 
 OPTIONS
   --repo <path>          repository root (default: git toplevel of cwd)
+  --claude-bin <cmd>     executable to run each phase with, instead of `claude`.
+                         Also settable as SPEC_RUN_CLAUDE_BIN, or claude_bin in
+                         phases.json. Use it for a wrapper that handles your
+                         organisation's permission prompts. The named command is
+                         probed, and any flag it does not advertise is reported.
   --feature-dir <path>   skip discovery, use this feature directory
   --config <file>        alternate phases.json
   --from <phase>         start at this phase
@@ -71,7 +76,7 @@ EOF
 
 # ----------------------------------------------------------------- args -------
 
-REPO=""; FEATURE_DIR=""; DESCRIPTION=""
+REPO=""; FEATURE_DIR=""; DESCRIPTION=""; CLAUDE_BIN="${SPEC_RUN_CLAUDE_BIN:-}"
 FROM=""; STOP_AFTER=""; WITH=""; ONLY=""; GATE_OVERRIDE=""
 BUDGET=""; FORCE=0; DRY_RUN=0; LIST=0
 declare -a MODEL_OVERRIDES=() EFFORT_OVERRIDES=()
@@ -79,6 +84,7 @@ declare -a MODEL_OVERRIDES=() EFFORT_OVERRIDES=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --repo)         REPO="${2:-}"; shift 2 || exit 3;;
+    --claude-bin)   CLAUDE_BIN="${2:-}"; shift 2 || exit 3;;
     --feature-dir)  FEATURE_DIR="${2:-}"; shift 2 || exit 3;;
     --config)       CONFIG="${2:-}"; shift 2 || exit 3;;
     --from)         FROM="${2:-}"; shift 2 || exit 3;;
@@ -121,7 +127,27 @@ if [ -z "$REPO" ]; then
 fi
 REPO=$(cd -- "$REPO" && pwd)
 
+[ -n "$CLAUDE_BIN" ] || CLAUDE_BIN=$(jqd "$CONFIG" '.defaults.claude_bin' claude)
+export SPEC_RUN_CLAUDE_BIN="$CLAUDE_BIN"
+
 preflight "$REPO" || exit 1
+
+# Probe once, before the first phase is billed for anything.
+probe_claude_bin "$CLAUDE_BIN"; probe_rc=$?
+case "$probe_rc" in
+  0) ;;
+  1) die "phase runner not on PATH: $CLAUDE_BIN" \
+        "pass --claude-bin <cmd>, set SPEC_RUN_CLAUDE_BIN, or fix defaults.claude_bin";;
+  2) warn "$CLAUDE_BIN produced no readable --help; flag support is UNVERIFIED for this run"
+     warn "  every ceiling below is passed but unconfirmed — treat them as unproven, not absent";;
+esac
+if [ "$probe_rc" -eq 0 ]; then
+  for _f in --print --model --effort --output-format --session-id --max-turns \
+            --max-budget-usd --disallowed-tools --append-system-prompt \
+            --permission-mode --strict-mcp-config; do
+    claude_bin_supports "$_f" || warn "$CLAUDE_BIN does not advertise $_f — it is still passed, but its effect is unconfirmed"
+  done
+fi
 
 # Optional phases only run when asked for; --only replaces the selection entirely.
 _in_list() { case ",$1," in *",$2,"*) return 0;; *) return 1;; esac; }
@@ -294,7 +320,7 @@ run_phase() { # run_phase <phase_json>
   [ -n "$sid" ] || sid=$(new_uuid)
 
   # ---- assemble argv
-  local -a argv=(claude -p "$prompt"
+  local -a argv=("$CLAUDE_BIN" -p "$prompt"
     --model "$model"
     --effort "$effort"
     --output-format json
@@ -329,6 +355,14 @@ run_phase() { # run_phase <phase_json>
     while IFS= read -r p; do [ -n "$p" ] && prefixes+=("$p"); done < \
       <(jq -r '.[]' <<<"$scope_json")
   fi
+  # Whatever spec-kit's own update-agent-context.sh may write is in scope for any
+  # phase that has a scope at all: it is the pipeline's file, not the phase going
+  # off-piste.
+  if [ "${#prefixes[@]}" -gt 0 ]; then
+    while IFS= read -r p; do [ -n "$p" ] && prefixes+=("$p"); done < \
+      <(agent_context_paths "$REPO")
+  fi
+
   local snap=""
   if [ "${#prefixes[@]}" -gt 0 ]; then
     snap=$(mktemp)
@@ -387,6 +421,13 @@ run_phase() { # run_phase <phase_json>
   IFS=$'\t' read -r status note < <(verify_phase "$id" "${FEATURE_DIR:-/nonexistent}" "$artifact")
 
   [ -n "$unmeasured" ] && note="$note; $unmeasured"
+
+  # The phase's own account — including any question it wants answered — goes to
+  # disk. A headless phase cannot ask mid-run and wait, so its questions arrive
+  # at the end; leaving them in terminal scrollback is how they get lost.
+  if [ -n "$FEATURE_DIR" ] && [ -d "$FEATURE_DIR/.pipeline" ]; then
+    printf '%s\n' "$out" > "$FEATURE_DIR/.pipeline/$id.result.json" 2>/dev/null || true
+  fi
 
   # ---- scope check, against the tree as it was when this phase started
   local violations=""
