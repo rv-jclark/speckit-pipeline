@@ -132,22 +132,19 @@ export SPEC_RUN_CLAUDE_BIN="$CLAUDE_BIN"
 
 preflight "$REPO" || exit 1
 
-# Probe once, before the first phase is billed for anything.
+# Check the runner exists and runs, before the first phase is billed for
+# anything. Flag support is NOT probed — see lib/common.sh for why the probe that
+# tried was removed rather than kept as a warning nobody could rely on.
 probe_claude_bin "$CLAUDE_BIN"; probe_rc=$?
 case "$probe_rc" in
   0) ;;
   1) die "phase runner not on PATH: $CLAUDE_BIN" \
         "pass --claude-bin <cmd>, set SPEC_RUN_CLAUDE_BIN, or fix defaults.claude_bin";;
-  2) warn "$CLAUDE_BIN produced no readable --help; flag support is UNVERIFIED for this run"
-     warn "  every ceiling below is passed but unconfirmed — treat them as unproven, not absent";;
+  2) warn "$CLAUDE_BIN is on PATH but exited non-zero on --help"
+     warn "  the run continues; if it also rejects the flags each phase passes, the"
+     warn "  phase will fail immediately and say so, with its stderr kept in"
+     warn "  .pipeline/<phase>.result.json";;
 esac
-if [ "$probe_rc" -eq 0 ]; then
-  for _f in --print --model --effort --output-format --session-id --max-turns \
-            --max-budget-usd --disallowed-tools --append-system-prompt \
-            --permission-mode --strict-mcp-config; do
-    claude_bin_supports "$_f" || warn "$CLAUDE_BIN does not advertise $_f — it is still passed, but its effect is unconfirmed"
-  done
-fi
 
 # Optional phases only run when asked for; --only replaces the selection entirely.
 _in_list() { case ",$1," in *",$2,"*) return 0;; *) return 1;; esac; }
@@ -314,10 +311,9 @@ run_phase() { # run_phase <phase_json>
            grep -v '^Bash(gh pr create:\*)$' | paste -sd, -)
   fi
 
-  # ---- session id, reused across attempts so --resume lands in the same thread
+  # ---- a FRESH session id for this attempt (see state_phase_push_session)
   local sid
-  sid=$(state_phase_get "${STATE:-/dev/null}" "$id" session_id "")
-  [ -n "$sid" ] || sid=$(new_uuid)
+  sid=$(new_uuid)
 
   # ---- assemble argv
   local -a argv=("$CLAUDE_BIN" -p "$prompt"
@@ -342,7 +338,17 @@ run_phase() { # run_phase <phase_json>
     return 0
   fi
 
-  [ -n "$STATE" ] && state_phase_start "$STATE" "$id" "$sid" "$model" "$effort"
+  if [ -n "$STATE" ]; then
+    state_phase_start "$STATE" "$id" "$sid" "$model" "$effort"
+    state_phase_push_session "$STATE" "$id" "$sid"
+  fi
+
+  # ---- the artifact's state BEFORE the phase, so "nothing happened" is
+  # distinguishable from "happened and verified". Without this, a phase that
+  # exits instantly verifies clean against its predecessor's output.
+  local sha_before=""
+  [ -n "${artifact:-}" ] && [ "$artifact" != null ] && \
+    sha_before=$(file_sha "${FEATURE_DIR:-}/$artifact")
 
   # ---- declared write scope, and a snapshot of what is ALREADY dirty outside it
   local scope_json
@@ -391,19 +397,21 @@ run_phase() { # run_phase <phase_json>
     fi
   fi
 
-  local cost turns dur result unmeasured=""
-  if jq -e . <<<"$out" >/dev/null 2>&1; then
-    cost=$(jq -r '.total_cost_usd // empty' <<<"$out")
-    turns=$(jq -r '.num_turns // empty'     <<<"$out")
-    dur=$(jq -r '.duration_ms // empty'     <<<"$out")
-    result=$(jq -r '.result // empty'       <<<"$out")
+  local cost turns dur result unmeasured="" json="" errcap=""
+  errcap=$(head -c 4000 "$errf" 2>/dev/null || true)
+  json=$(extract_json "$out") || json=""
+  if [ -n "$json" ]; then
+    cost=$(jq -r '.total_cost_usd // empty' <<<"$json")
+    turns=$(jq -r '.num_turns // empty'     <<<"$json")
+    dur=$(jq -r '.duration_ms // empty'     <<<"$json")
+    result=$(jq -r '.result // empty'       <<<"$json")
   else
     # The check failed, not necessarily the phase. Say which, and leave the
     # figures EMPTY so they record as null rather than as a measured zero.
     unmeasured="the phase's output was not parseable JSON, so cost and turns are UNMEASURED (not zero)"
     cost=""; turns=""; dur=""
     result=$(printf '%s\n%s' "$(printf '%s' "$out" | head -c 1200)" \
-                              "$(head -c 800 "$errf")")
+                              "$(printf '%s' "$errcap" | head -c 800)")
   fi
   rm -f "$errf"
   [ -n "$cost" ] && RUN_TOTAL=$(awk -v a="$RUN_TOTAL" -v b="$cost" 'BEGIN{printf "%.4f", a+b}')
@@ -420,13 +428,35 @@ run_phase() { # run_phase <phase_json>
   local status note
   IFS=$'\t' read -r status note < <(verify_phase "$id" "${FEATURE_DIR:-/nonexistent}" "$artifact")
 
+  # No parseable result AND an artifact that did not move: the phase did not run.
+  # Verification against a file its previous attempt wrote is not evidence — this
+  # is precisely the tidy pass over work that never happened, and it was measured
+  # here (2 seconds, empty output, "ok" over the prior attempt's plan.md).
+  if [ -n "$unmeasured" ] && [ -n "${artifact:-}" ] && [ "$artifact" != null ]; then
+    local sha_after
+    sha_after=$(file_sha "${FEATURE_DIR:-}/$artifact")
+    if [ "$sha_after" = "$sha_before" ]; then
+      status=failed
+      note="the phase returned no parseable result and did not change $artifact — it appears not to have run at all (exit $rc)"
+      unmeasured=""
+    fi
+  fi
   [ -n "$unmeasured" ] && note="$note; $unmeasured"
 
   # The phase's own account — including any question it wants answered — goes to
   # disk. A headless phase cannot ask mid-run and wait, so its questions arrive
   # at the end; leaving them in terminal scrollback is how they get lost.
   if [ -n "$FEATURE_DIR" ] && [ -d "$FEATURE_DIR/.pipeline" ]; then
-    printf '%s\n' "$out" > "$FEATURE_DIR/.pipeline/$id.result.json" 2>/dev/null || true
+    # An envelope, not the raw stdout: stderr is where a runner explains itself
+    # (an unknown option, a refused permission), and writing stdout alone threw
+    # away the only account of what went wrong. exit_code is kept for the same
+    # reason — it is evidence, even though it is never the verdict.
+    jq -n --arg phase "$id" --arg rc "$rc" --arg out "$out" --arg err "$errcap" \
+          --argjson parsed "${json:-null}" \
+      '{phase:$phase, exit_code:($rc|tonumber? // null), parsed:$parsed,
+        stdout:$out, stderr:$err}' \
+      > "$FEATURE_DIR/.pipeline/$id.result.json" 2>/dev/null || \
+      printf '%s\n%s\n' "$out" "$errcap" > "$FEATURE_DIR/.pipeline/$id.result.json" 2>/dev/null || true
   fi
 
   # ---- scope check, against the tree as it was when this phase started

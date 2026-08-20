@@ -120,15 +120,26 @@ spec-run --claude-bin claude-edits "..."     # or SPEC_RUN_CLAUDE_BIN=claude-edi
                                              # or defaults.claude_bin in phases.json
 ```
 
-The named command is **probed once** before the first phase is billed for
-anything, and every flag the engine passes is checked against its `--help`. A
-flag the runner does not advertise is **reported and still passed** — because a
-wrapper that quietly ignores `--max-budget-usd` leaves a phase with no ceiling
-while the summary still shows one, and "the ceiling was applied" and "the flag
-was accepted" are only the same claim if somebody checked. Three outcomes, kept
-distinct: the flag is advertised, the flag is missing, or the probe produced
-nothing readable — in which case the run says flag support is **UNVERIFIED**
-rather than accusing the runner of missing all eleven.
+The named command is checked for two things before the first phase is billed:
+that it **exists**, and that it **runs**. Flag support is deliberately *not*
+probed. The version that tried was vacuously permissive — passing a flag
+alongside `--help` short-circuits before option validation, so a flag that cannot
+exist came back "accepted", and a second probe form disagreed with the first
+about the same input. A check whose verdict depends on how you phrase it gets
+reported as a guarantee and isn't one, so it was removed rather than softened
+into a warning.
+
+That failure is caught where it actually happens instead. A runner that rejects a
+flag exits without doing any work, so the phase's artifact does not move and the
+non-run rule fails it by name — with the runner's own stderr, stdout and exit
+code preserved in `.pipeline/<phase>.result.json`. You get the exact flag it
+objected to, in its own words, which is strictly more than the probe was telling
+you.
+
+One measured aside on why documentation is a bad basis for this: `--max-turns` is
+accepted by `claude` 2.1.238 and appears **nowhere** in its `--help`. The
+help-reading probe duly warned that a ceiling was missing while it was being
+applied.
 
 ### Can a phase ask you something mid-run?
 
@@ -174,6 +185,17 @@ attributed correctly. (Both of those are corrections: the first version compared
 against clean, and on the first real run it blamed a phase for the 14 skill files
 `spec-bootstrap` had just installed and for the caller's own log file, failing a
 `specify` that had done everything right.)
+
+And a **non-run check**. If a phase returns no parseable result *and* leaves its
+artifact byte-identical, it is recorded `failed` — "the phase returned no
+parseable result and did not change plan.md — it appears not to have run at
+all". This is not hypothetical: reusing a `--session-id` that already exists
+makes the CLI refuse and exit in about two seconds, and the plan phase then
+verified clean against the `plan.md` its *previous* attempt had written. Two
+seconds, empty output, reported `ok`. The pre/post artifact hash is what
+separates "verified" from "nothing happened", and each attempt now gets a fresh
+session id (the history is kept in `state.json`, so earlier threads stay
+resumable).
 
 State is recorded at `specs/<feature>/.pipeline/state.json` — status, session id,
 model, effort, cost, turns and artifact hash per phase — with a tab-separated
@@ -228,12 +250,18 @@ guarantee is bigger than it is.
 - **The scope check detects, it does not prevent.** A specify phase that writes
   source is caught after the fact, not stopped mid-write. Prevention would need
   path-scoped tool denials, which are not verified here.
+- **A runner's flag support is unverified.** See above: it is detected at first
+  use, not predicted.
 - **`--max-budget-usd` is documented as bounding API spend.** On subscription
   auth, confirm it enforces before treating it as the safety rail; `--max-turns`
   is the fallback ceiling and is always set.
 - **No `--json-schema` on the phase result.** The artifact is the authority, so a
   second, unverified report channel would add risk without adding information.
   The phase's prose is kept only to show you when something goes wrong.
+- **A no-op is indistinguishable from an idempotent success** when the phase
+  *does* return a parseable result. The non-run check only fires when both
+  signals agree, which is deliberate: firing on an unchanged artifact alone would
+  fail every legitimate re-run.
 - **A phase cannot be interrupted with a question.** See above; questions arrive
   at the end, or `clarify` asks them up front.
 - **All phases share one working tree,** because the handoff is the files. If you
@@ -258,7 +286,7 @@ reports success over a directory the rest of the pipeline cannot find.
 ## Tests
 
 ```bash
-./tests/run.sh          # shellcheck + 84 fixture assertions
+./tests/run.sh          # shellcheck + 86 fixture assertions
 ```
 
 No test spends money: the invocation assertions run under `--dry-run` and check

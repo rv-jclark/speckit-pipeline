@@ -29,7 +29,7 @@ t_skip() { skipped=$((skipped+1)); printf '  \033[33m-\033[0m %s (skipped: %s)\n
 # A floor on the tally, because the failure above is invisible by construction:
 # nothing else in a passing run distinguishes "every assertion ran" from "most of
 # them printed and were never counted".
-TALLY_FLOOR=80
+TALLY_FLOOR=85
 
 assert_contains() { # <haystack> <needle> <label>
   case "$1" in *"$2"*) t_pass "$3";; *) t_fail "$3" "expected to contain: $2";; esac
@@ -288,23 +288,26 @@ printf '\ncustom phase runner\n'
 FAKE="$WORK/fakebin"; mkdir -p "$FAKE"
 cat > "$FAKE/claude-edits" <<'FAKEEOF'
 #!/usr/bin/env bash
-if [ "${1:-}" = "--help" ]; then
-  # advertises everything the engine passes
-  echo "--print --model --effort --output-format --session-id --max-turns"
-  echo "--max-budget-usd --disallowed-tools --append-system-prompt"
-  echo "--permission-mode --strict-mcp-config"
-  exit 0
-fi
+# accepts anything, like a passthrough wrapper
+for a in "$@"; do [ "$a" = "--help" ] && exit 0; done
 echo '{"total_cost_usd":0.01,"num_turns":1,"duration_ms":10,"result":"STATUS: ok"}'
 FAKEEOF
 cat > "$FAKE/claude-quiet" <<'FAKEEOF'
 #!/usr/bin/env bash
-[ "${1:-}" = "--help" ] && exit 0     # runnable, but says nothing readable
+exit 3                      # never answers --help: the probe cannot read it
+FAKEEOF
+cat > "$FAKE/claude-nogate" <<'FAKEEOF'
+#!/usr/bin/env bash
+# rejects the flag that carries the structural gate
+for a in "$@"; do [ "$a" = "--disallowed-tools" ] && exit 64; done
+for a in "$@"; do [ "$a" = "--help" ] && exit 0; done
 echo '{}'
 FAKEEOF
-cat > "$FAKE/claude-partial" <<'FAKEEOF'
+cat > "$FAKE/claude-noceiling" <<'FAKEEOF'
 #!/usr/bin/env bash
-[ "${1:-}" = "--help" ] && { echo "--print --model --output-format"; exit 0; }
+# accepts the gate, rejects a ceiling
+for a in "$@"; do [ "$a" = "--max-budget-usd" ] && exit 64; done
+for a in "$@"; do [ "$a" = "--help" ] && exit 0; done
 echo '{}'
 FAKEEOF
 chmod +x "$FAKE"/claude-*
@@ -323,20 +326,40 @@ assert_eq "$rc" "1" "a phase runner that is not on PATH exits 1 before any spend
 assert_contains "$out" "not on PATH" "and says so, naming the command"
 
 out=$(PATH="$FAKE:$PATH" "$SPEC_RUN" --repo "$BS" --feature-dir "$BS/specs/001-t" \
-        --only plan --claude-bin claude-partial --dry-run 2>&1)
-assert_contains "$out" "does not advertise --max-budget-usd" \
-  "a runner missing a ceiling flag is reported, not silently uncapped"
-assert_contains "$out" "claude-partial -p" "but the run still proceeds — a warning, not a refusal"
-# The distinction this project keeps insisting on: a ceiling that was never
-# applied must not read like one that was.
-
-out=$(PATH="$FAKE:$PATH" "$SPEC_RUN" --repo "$BS" --feature-dir "$BS/specs/001-t" \
         --only plan --claude-bin claude-quiet --dry-run 2>&1)
-assert_contains "$out" "UNVERIFIED" "an unreadable probe reports the CHECK failed, not the flags"
-assert_not_contains "$out" "does not advertise" \
-  "and it does NOT then accuse the runner of missing every flag"
-# "The check passed", "the check failed" and "the check never ran" are three
-# states. Collapsing the last two here would have produced eleven false findings.
+assert_contains "$out" "exited non-zero on --help" "a runner that will not answer --help is reported"
+assert_contains "$out" "result.json" "and the reader is told where its stderr will be kept"
+assert_not_contains "$out" "rejects --" "no per-flag claim is made — that probe was removed, not softened"
+# It was removed because it was vacuously permissive: passing a flag alongside
+# --help short-circuits before option validation, so a flag that cannot exist
+# came back accepted, and a second probe form disagreed with the first about the
+# same input. A check whose verdict depends on how you phrase it is reported as a
+# guarantee and is not one. The failure it aimed at is caught below instead.
+
+# A runner that rejects a flag does no work, so the artifact does not move — and
+# THAT is what fails the phase, with the runner's own words kept on disk.
+cat > "$FAKE/claude-rejects" <<'FAKEEOF'
+#!/usr/bin/env bash
+[ "${1:-}" = "--help" ] && exit 0
+echo "error: unknown option '--max-budget-usd'" >&2
+exit 64
+FAKEEOF
+chmod +x "$FAKE/claude-rejects"
+RJ="$WORK/rejects"; mkdir -p "$RJ"; git -C "$RJ" init -q
+git -C "$RJ" config user.email t@t.invalid; git -C "$RJ" config user.name t
+"$SPEC_BOOTSTRAP" "$RJ" >/dev/null 2>&1
+git -C "$RJ" add -A >/dev/null 2>&1; git -C "$RJ" commit -qm scaffold
+mkdir -p "$RJ/specs/001-x"
+{ printf '# Plan\n'; for i in $(seq 1 40); do printf 'a plausible plan line %s\n' "$i"; done; } \
+  > "$RJ/specs/001-x/plan.md"
+out=$(PATH="$FAKE:$PATH" "$SPEC_RUN" --repo "$RJ" --feature-dir "$RJ/specs/001-x" \
+        --only plan --claude-bin claude-rejects 2>&1); rc=$?
+assert_eq "$rc" "1" "a runner that rejects a flag fails the phase"
+assert_contains "$out" "appears not to have run" "by the non-run rule, not by a guess beforehand"
+assert_contains "$(cat "$RJ/specs/001-x/.pipeline/plan.result.json" 2>/dev/null)" \
+  "unknown option" "and the runner's own error is preserved on disk"
+# This says strictly more than the probe did: the reader gets the exact flag the
+# runner objected to, in the runner's words.
 
 # ============================================================== invocation ====
 printf '\ninvocation (--dry-run)\n'

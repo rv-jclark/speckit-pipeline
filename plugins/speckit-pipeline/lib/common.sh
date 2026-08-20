@@ -128,15 +128,48 @@ state_phase_finish() { # ... <state_file> <phase> <status> <cost> <turns> <durat
   jq --arg p "$2" --arg s "$3" --arg c "$4" --arg n "$5" --arg d "$6" \
      --arg sha "$7" --arg note "$8" --arg t "$(now_iso)" \
     '.phases[$p] += {
-        status:$s, cost_usd:($c|tonumber? // 0), num_turns:($n|tonumber? // 0),
-        duration_ms:($d|tonumber? // 0), artifact_sha:$sha, note:$note,
-        finished_at:$t
+        status:$s,
+        # An empty figure records as null, never as 0. "$0.00 spent" and "nobody
+        # measured it" are different facts, and `// 0` erases the difference:
+        # a phase that never ran recorded a tidy $0 and 0 turns.
+        cost_usd:(if $c == "" then null else ($c|tonumber? // null) end),
+        num_turns:(if $n == "" then null else ($n|tonumber? // null) end),
+        duration_ms:(if $d == "" then null else ($d|tonumber? // null) end),
+        artifact_sha:$sha, note:$note, finished_at:$t
      }' "$f" > "$tmp" && mv "$tmp" "$f"
 }
 
 # An absent figure states its reason. "$0.00" and "nobody measured it" are
 # different facts and only one of them is good news.
 fmt_cost() { [ -n "${1:-}" ] && printf '$%s' "$1" || printf 'cost unmeasured'; }
+
+# Every attempt gets its OWN session id. Reusing one is not a way back into a
+# thread — `claude --session-id <existing>` refuses and exits in about two
+# seconds, which is how a re-run of the plan phase came back "ok" over the
+# artifact its previous attempt had left behind. Resuming is `--resume`; starting
+# is a fresh id. The history is kept so an earlier thread stays reachable.
+state_phase_push_session() { # <state_file> <phase> <session_id>
+  local f="$1" tmp; tmp=$(mktemp)
+  jq --arg p "$2" --arg sid "$3" \
+    '.phases[$p] = ((.phases[$p] // {}) + {
+        session_id:$sid,
+        sessions:(((.phases[$p].sessions) // []) + [$sid])
+     })' "$f" > "$tmp" && mv "$tmp" "$f"
+}
+
+# The last line of output that parses as a JSON object. A wrapper may print its
+# own chatter around the CLI's result, so the whole stream failing to parse is not
+# proof that no result was returned.
+extract_json() { # extract_json <text>
+  local text="$1" line
+  if jq -e 'type == "object"' >/dev/null 2>&1 <<<"$text"; then printf '%s' "$text"; return 0; fi
+  while IFS= read -r line; do
+    case "$line" in
+      \{*\}) jq -e 'type == "object"' >/dev/null 2>&1 <<<"$line" && printf '%s' "$line" && return 0;;
+    esac
+  done < <(printf '%s\n' "$text" | tail -r 2>/dev/null || printf '%s\n' "$text")
+  return 1
+}
 
 state_total_cost() { jq '[.phases[].cost_usd // 0] | add // 0' "$1"; }
 
@@ -162,24 +195,24 @@ agent_context_paths() { # agent_context_paths <repo_root>
 # ------------------------------------------------------- the claude binary -----
 # The engine does not assume it is driving `claude` itself. An organisation that
 # blocks permission bypass may need a wrapper that answers the prompts, so the
-# executable is configurable — and then PROBED, because a wrapper that silently
-# ignores --max-budget-usd leaves a phase with no ceiling while the summary still
-# reports one. "The ceiling was applied" and "the flag was accepted" are the same
-# claim only if somebody checked.
+# executable is configurable.
+#
+# What is checked: the command EXISTS and RUNS. What is deliberately NOT checked:
+# whether it accepts each flag the engine passes. An earlier version probed that
+# by passing the flag alongside --help, and it was vacuously permissive — help
+# short-circuits before option validation, so a flag that cannot exist came back
+# "accepted". A second probe form disagreed with the first about the same
+# nonsense flag, which settles it: a check that returns different verdicts for
+# the same input is worse than no check, because it is reported as a guarantee.
+#
+# The failure it was meant to catch is caught instead where it actually happens.
+# A runner that rejects a flag exits immediately without doing any work, so the
+# phase's artifact does not move and the non-run rule fails it by name — with the
+# runner's own stderr preserved in .pipeline/<phase>.result.json, which says more
+# than any probe would have. Detection at the point of truth, not a guess before.
 
-claude_bin_help=""
-
-probe_claude_bin() { # probe_claude_bin <bin>  -> 0 if runnable
+probe_claude_bin() { # probe_claude_bin <bin>  -> 0 ok, 1 not on PATH, 2 unreadable
   command -v "$1" >/dev/null 2>&1 || return 1
-  claude_bin_help=$("$1" --help 2>&1) || true
-  [ -n "$claude_bin_help" ] || return 2   # runnable but said nothing we can read
+  "$1" --help >/dev/null 2>&1 || return 2
   return 0
-}
-
-# Does the probed binary advertise this flag? Returns 1 for "no", 2 for "cannot
-# tell" — an unreadable probe is a failure of the CHECK, not of the binary, and
-# must not be reported as a missing flag.
-claude_bin_supports() { # claude_bin_supports <--flag>
-  [ -n "$claude_bin_help" ] || return 2
-  case "$claude_bin_help" in *"$1"*) return 0;; *) return 1;; esac
 }
