@@ -29,7 +29,7 @@ t_skip() { skipped=$((skipped+1)); printf '  \033[33m-\033[0m %s (skipped: %s)\n
 # A floor on the tally, because the failure above is invisible by construction:
 # nothing else in a passing run distinguishes "every assertion ran" from "most of
 # them printed and were never counted".
-TALLY_FLOOR=85
+TALLY_FLOOR=87
 
 assert_contains() { # <haystack> <needle> <label>
   case "$1" in *"$2"*) t_pass "$3";; *) t_fail "$3" "expected to contain: $2";; esac
@@ -360,6 +360,35 @@ assert_contains "$(cat "$RJ/specs/001-x/.pipeline/plan.result.json" 2>/dev/null)
   "unknown option" "and the runner's own error is preserved on disk"
 # This says strictly more than the probe did: the reader gets the exact flag the
 # runner objected to, in the runner's words.
+
+# ------------------------------------------------------- permission denials ----
+printf '\npermission denials\n'
+cat > "$FAKE/claude-denied" <<'FAKEEOF'
+#!/usr/bin/env bash
+[ "${1:-}" = "--help" ] && exit 0
+printf 'touched by the phase\n' >> "$SPEC_TEST_ARTIFACT"
+cat <<'J'
+{"total_cost_usd":0.03,"num_turns":5,"duration_ms":50,"result":"STATUS: ok",
+ "permission_denials":[{"tool_name":"Bash"},{"tool_name":"Bash"},{"tool_name":"Write"}]}
+J
+FAKEEOF
+chmod +x "$FAKE/claude-denied"
+DN="$WORK/denied"; mkdir -p "$DN"; git -C "$DN" init -q
+git -C "$DN" config user.email t@t.invalid; git -C "$DN" config user.name t
+"$SPEC_BOOTSTRAP" "$DN" >/dev/null 2>&1
+git -C "$DN" add -A >/dev/null 2>&1; git -C "$DN" commit -qm scaffold
+mkdir -p "$DN/specs/001-x"
+{ printf '# Plan\n'; for i in $(seq 1 40); do printf 'plan line %s\n' "$i"; done; } > "$DN/specs/001-x/plan.md"
+# The fake MUST move the artifact, or the non-run rule fires instead of this one
+# and the test would pass for the wrong reason.
+out=$(PATH="$FAKE:$PATH" SPEC_TEST_ARTIFACT="$DN/specs/001-x/plan.md" \
+      "$SPEC_RUN" --repo "$DN" --feature-dir "$DN/specs/001-x" \
+        --only plan --claude-bin claude-denied 2>&1)
+assert_contains "$out" "3 tool call(s) were DENIED" "denied tool calls are counted and reported"
+assert_contains "$out" "Bash, Write" "and the tools are named, de-duplicated"
+# The CLI reports its own refusals, so what a phase was blocked from doing is
+# MEASURED rather than inferred from a thin artifact. An empty spec and "17
+# denials" are the same artifact with completely different remedies.
 
 # ============================================================== invocation ====
 printf '\ninvocation (--dry-run)\n'

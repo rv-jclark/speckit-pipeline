@@ -141,6 +141,17 @@ accepted by `claude` 2.1.238 and appears **nowhere** in its `--help`. The
 help-reading probe duly warned that a ceiling was missing while it was being
 applied.
 
+Denied tool calls are **counted and named**, not inferred. The CLI reports its
+own refusals in the result (`permission_denials`), so a phase's note reads
+`3 tool call(s) were DENIED to this phase (Bash, Write)` rather than leaving you
+to guess from a thin artifact. An empty spec and "17 denials" are the same
+artifact with completely different remedies.
+
+Worth trying before reaching for a wrapper: `permission_mode` is already data in
+`phases.json`, and the CLI accepts `dontAsk` and `bypassPermissions` as well as
+`acceptEdits`. If your organisation's policy is what blocks those, the wrapper is
+the answer; if it was only the interactive prompt, a one-line config change is.
+
 ### Can a phase ask you something mid-run?
 
 No — and that is the real cost of the process boundary. A headless phase has no
@@ -286,7 +297,7 @@ reports success over a directory the rest of the pipeline cannot find.
 ## Tests
 
 ```bash
-./tests/run.sh          # shellcheck + 86 fixture assertions
+./tests/run.sh          # shellcheck + 88 fixture assertions
 ```
 
 No test spends money: the invocation assertions run under `--dry-run` and check

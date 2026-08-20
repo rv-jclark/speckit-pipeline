@@ -397,7 +397,7 @@ run_phase() { # run_phase <phase_json>
     fi
   fi
 
-  local cost turns dur result unmeasured="" json="" errcap=""
+  local cost turns dur result unmeasured="" json="" errcap="" denials=0 denied_tools="" denial_note=""
   errcap=$(head -c 4000 "$errf" 2>/dev/null || true)
   json=$(extract_json "$out") || json=""
   if [ -n "$json" ]; then
@@ -405,6 +405,16 @@ run_phase() { # run_phase <phase_json>
     turns=$(jq -r '.num_turns // empty'     <<<"$json")
     dur=$(jq -r '.duration_ms // empty'     <<<"$json")
     result=$(jq -r '.result // empty'       <<<"$json")
+    # The CLI reports the tool calls it refused, so what a phase was blocked from
+    # doing is a MEASURED fact rather than something to infer from a bad artifact.
+    # This matters most where the permission model is not the default: an empty
+    # spec and "17 denials" are the same artifact with very different remedies.
+    denials=$(jq -r '(.permission_denials // []) | length' <<<"$json" 2>/dev/null || echo 0)
+    if [ "${denials:-0}" -gt 0 ]; then
+      denied_tools=$(jq -r '[(.permission_denials // [])[] | (.tool_name // .tool // "?")]
+                            | unique | join(", ")' <<<"$json" 2>/dev/null || true)
+      denial_note="$denials tool call(s) were DENIED to this phase (${denied_tools:-unknown})"
+    fi
   else
     # The check failed, not necessarily the phase. Say which, and leave the
     # figures EMPTY so they record as null rather than as a measured zero.
@@ -442,6 +452,7 @@ run_phase() { # run_phase <phase_json>
     fi
   fi
   [ -n "$unmeasured" ] && note="$note; $unmeasured"
+  [ -n "$denial_note" ] && note="$note; $denial_note"
 
   # The phase's own account — including any question it wants answered — goes to
   # disk. A headless phase cannot ask mid-run and wait, so its questions arrive
