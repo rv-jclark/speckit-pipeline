@@ -438,11 +438,28 @@ run_phase() { # run_phase <phase_json>
   local status note
   IFS=$'\t' read -r status note < <(verify_phase "$id" "${FEATURE_DIR:-/nonexistent}" "$artifact")
 
+  # No parseable result AND a non-zero exit: the phase did not COMPLETE, and what
+  # its artifact looks like is beside the point. With --output-format json a normal
+  # completion always returns an envelope, so its absence plus a failed exit is
+  # conclusive rather than suggestive.
+  #
+  # Measured: a plan phase killed mid-run (SIGTERM, exit 143, no stdout) had
+  # already written a plan.md that ends at a plausible heading — 3088 bytes, no
+  # open markers — and verification passed it `ok`. The artifact HAD moved, so the
+  # unchanged-artifact rule below could not see it, and the later artifacts a
+  # finished plan writes (research.md, data-model.md, contracts/) were simply
+  # absent. A rolling restart, a Ctrl-C or an OOM kill all land here.
+  if [ -n "$unmeasured" ] && [ "$rc" -ne 0 ]; then
+    status=failed
+    note="the phase did not complete: exit $rc with no result returned${artifact:+ — $artifact may be partially written}"
+    unmeasured=""
+  fi
+
   # No parseable result AND an artifact that did not move: the phase did not run.
   # Verification against a file its previous attempt wrote is not evidence — this
   # is precisely the tidy pass over work that never happened, and it was measured
   # here (2 seconds, empty output, "ok" over the prior attempt's plan.md).
-  if [ -n "$unmeasured" ] && [ -n "${artifact:-}" ] && [ "$artifact" != null ]; then
+  if [ -n "$unmeasured" ] && [ "$rc" -eq 0 ] && [ -n "${artifact:-}" ] && [ "$artifact" != null ]; then
     local sha_after
     sha_after=$(file_sha "${FEATURE_DIR:-}/$artifact")
     if [ "$sha_after" = "$sha_before" ]; then

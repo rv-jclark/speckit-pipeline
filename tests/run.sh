@@ -29,7 +29,7 @@ t_skip() { skipped=$((skipped+1)); printf '  \033[33m-\033[0m %s (skipped: %s)\n
 # A floor on the tally, because the failure above is invisible by construction:
 # nothing else in a passing run distinguishes "every assertion ran" from "most of
 # them printed and were never counted".
-TALLY_FLOOR=87
+TALLY_FLOOR=90
 
 assert_contains() { # <haystack> <needle> <label>
   case "$1" in *"$2"*) t_pass "$3";; *) t_fail "$3" "expected to contain: $2";; esac
@@ -355,7 +355,10 @@ mkdir -p "$RJ/specs/001-x"
 out=$(PATH="$FAKE:$PATH" "$SPEC_RUN" --repo "$RJ" --feature-dir "$RJ/specs/001-x" \
         --only plan --claude-bin claude-rejects 2>&1); rc=$?
 assert_eq "$rc" "1" "a runner that rejects a flag fails the phase"
-assert_contains "$out" "appears not to have run" "by the non-run rule, not by a guess beforehand"
+assert_contains "$out" "did not complete: exit 64" \
+  "reported by its exit code, not guessed at beforehand"
+# It exits non-zero, so the completion rule catches it before the
+# unchanged-artifact rule needs to; both are correct, this one is more precise.
 assert_contains "$(cat "$RJ/specs/001-x/.pipeline/plan.result.json" 2>/dev/null)" \
   "unknown option" "and the runner's own error is preserved on disk"
 # This says strictly more than the probe did: the reader gets the exact flag the
@@ -389,6 +392,41 @@ assert_contains "$out" "Bash, Write" "and the tools are named, de-duplicated"
 # The CLI reports its own refusals, so what a phase was blocked from doing is
 # MEASURED rather than inferred from a thin artifact. An empty spec and "17
 # denials" are the same artifact with completely different remedies.
+
+# --------------------------------------------------- a phase killed mid-write --
+printf '\ninterrupted phase\n'
+cat > "$FAKE/claude-killed" <<'FAKEEOF'
+#!/usr/bin/env bash
+[ "${1:-}" = "--help" ] && exit 0
+# writes a PLAUSIBLE, complete-looking artifact and then dies, as a phase killed
+# by a rolling restart or a Ctrl-C does
+{ printf '# Implementation Plan\n\n'
+  for i in $(seq 1 40); do printf 'a wholly plausible plan line %s\n' "$i"; done
+  printf '\n## Complexity Tracking\n\n> Not applicable.\n'; } > "$SPEC_TEST_ARTIFACT"
+exit 143
+FAKEEOF
+chmod +x "$FAKE/claude-killed"
+KL="$WORK/killed"; mkdir -p "$KL"; git -C "$KL" init -q
+git -C "$KL" config user.email t@t.invalid; git -C "$KL" config user.name t
+"$SPEC_BOOTSTRAP" "$KL" >/dev/null 2>&1
+git -C "$KL" add -A >/dev/null 2>&1; git -C "$KL" commit -qm scaffold
+mkdir -p "$KL/specs/001-x"
+out=$(PATH="$FAKE:$PATH" SPEC_TEST_ARTIFACT="$KL/specs/001-x/plan.md" \
+      "$SPEC_RUN" --repo "$KL" --feature-dir "$KL/specs/001-x" \
+        --only plan --claude-bin claude-killed 2>&1); rc=$?
+assert_eq "$rc" "1" "a phase killed mid-write FAILS despite a plausible artifact"
+assert_contains "$out" "did not complete: exit 143" "and the exit signal is named"
+assert_contains "$out" "may be partially written" "and the artifact is called into question, not trusted"
+# This one was measured, not imagined: SIGTERM-ing a real plan phase left a
+# 3088-byte plan.md ending at a plausible heading, with no open markers — and it
+# verified `ok`. The artifact HAD moved, so the unchanged-artifact rule could not
+# see it. Byte-count and marker checks cannot distinguish "finished" from
+# "interrupted somewhere that happens to look finished"; the exit code can.
+# Mutation: drop the rc test and this reports ok on all three assertions.
+[ -s "$KL/specs/001-x/plan.md" ] && t_pass "the partial artifact is LEFT on disk for inspection" \
+  || t_fail "the partial artifact is left on disk"
+# Deleting it would be worse: it is the only record of how far the phase got, and
+# the next attempt overwrites it anyway.
 
 # ============================================================== invocation ====
 printf '\ninvocation (--dry-run)\n'
