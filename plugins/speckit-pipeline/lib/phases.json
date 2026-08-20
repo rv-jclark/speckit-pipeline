@@ -1,0 +1,112 @@
+{
+  "version": 1,
+  "_comment": [
+    "Phase configuration is DATA, not code. Retuning which model runs which phase,",
+    "or what a phase is allowed to touch, must never require editing bin/spec-run.",
+    "",
+    "Fields:",
+    "  id             phase name, used on the CLI (--stop-after, --gate, --with)",
+    "  skill          the speckit skill invoked as a slash command in the phase process",
+    "  model          opus | sonnet | haiku | fable (a CLI alias, resolved at run time)",
+    "  effort         low | medium | high | xhigh | max",
+    "  artifact       file (relative to the feature dir) whose state is the ONLY",
+    "                 authority on whether the phase succeeded. null = no artifact,",
+    "                 verification is skipped and recorded as unevaluated.",
+    "  max_budget_usd hard ceiling passed to --max-budget-usd",
+    "  max_turns      hard ceiling passed to --max-turns",
+    "  gate           always | on_needs_input | never",
+    "  optional       true = only runs when named in --with",
+    "  deny_tools     added to defaults.deny_tools for this phase",
+    "  write_scope    path prefixes this phase may modify. null = unrestricted.",
+    "                 Enforced AFTER the phase by comparing git status, because a",
+    "                 detected escape is verifiable where a path-scoped tool deny is not.",
+    "  takes_description  true = the feature description is passed as the skill argument"
+  ],
+
+  "defaults": {
+    "permission_mode": "acceptEdits",
+    "max_turns": 80,
+    "write_scope": ["specs/", ".specify/"],
+    "deny_tools": [
+      "Bash(git push:*)",
+      "Bash(gh pr merge:*)",
+      "Bash(gh pr create:*)",
+      "Bash(gh release:*)",
+      "Bash(gh workflow run:*)",
+      "Bash(gh api:*)"
+    ]
+  },
+
+  "phases": [
+    {
+      "id": "specify",
+      "skill": "speckit-specify",
+      "takes_description": true,
+      "model": "opus",
+      "effort": "high",
+      "mcp": "none",
+      "artifact": "spec.md",
+      "max_budget_usd": 5,
+      "max_turns": 60,
+      "gate": "on_needs_input"
+    },
+    {
+      "id": "clarify",
+      "skill": "speckit-clarify",
+      "optional": true,
+      "model": "opus",
+      "effort": "high",
+      "mcp": "none",
+      "artifact": "spec.md",
+      "max_budget_usd": 3,
+      "max_turns": 40,
+      "gate": "always"
+    },
+    {
+      "id": "plan",
+      "skill": "speckit-plan",
+      "model": "opus",
+      "effort": "high",
+      "mcp": "none",
+      "artifact": "plan.md",
+      "max_budget_usd": 8,
+      "max_turns": 80,
+      "gate": "on_needs_input"
+    },
+    {
+      "id": "tasks",
+      "skill": "speckit-tasks",
+      "model": "sonnet",
+      "effort": "medium",
+      "mcp": "none",
+      "artifact": "tasks.md",
+      "max_budget_usd": 5,
+      "max_turns": 60,
+      "gate": "on_needs_input"
+    },
+    {
+      "id": "analyze",
+      "skill": "speckit-analyze",
+      "optional": true,
+      "model": "opus",
+      "effort": "high",
+      "mcp": "none",
+      "artifact": null,
+      "max_budget_usd": 3,
+      "max_turns": 30,
+      "gate": "on_needs_input"
+    },
+    {
+      "id": "implement",
+      "skill": "speckit-implement",
+      "model": "sonnet",
+      "effort": "medium",
+      "mcp": "inherit",
+      "artifact": "tasks.md",
+      "write_scope": null,
+      "max_budget_usd": 40,
+      "max_turns": 400,
+      "gate": "on_needs_input"
+    }
+  ]
+}

@@ -1,0 +1,502 @@
+#!/usr/bin/env bash
+#
+# spec-run — drive a spec-kit feature through its phases, one isolated
+# `claude -p` process per phase, each with its own model, effort, tool
+# allowance and spend ceiling.
+#
+# Why a process per phase rather than one long session:
+#   * the model and effort that suit writing a spec do not suit checking off
+#     47 mechanical tasks, and only a per-process flag can differ;
+#   * a phase's transcript — tool calls, file dumps, test output — dies with
+#     its process instead of accumulating in a window you keep paying for;
+#   * --max-budget-usd and --max-turns are per-process ceilings, so a phase
+#     that goes wrong is bounded by arithmetic rather than by noticing;
+#   * --disallowed-tools is enforced by the harness, so "do not merge and
+#     deploy" is a missing tool rather than a sentence a model may reinterpret.
+#
+# Exit codes:  0 every selected phase verified ok
+#              1 a phase failed, or a prerequisite is missing
+#              2 stopped at a gate, or a phase needs human input
+#              3 usage error
+
+set -uo pipefail
+
+SPECKIT_PIPELINE_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+export SPECKIT_PIPELINE_ROOT
+# shellcheck source=../lib/common.sh
+. "$SPECKIT_PIPELINE_ROOT/lib/common.sh"
+# shellcheck source=../lib/verify.sh
+. "$SPECKIT_PIPELINE_ROOT/lib/verify.sh"
+
+CONFIG="$SPECKIT_PIPELINE_ROOT/lib/phases.json"
+
+# ------------------------------------------------------------------ usage -----
+
+usage() {
+  cat <<'EOF'
+spec-run — run the spec-kit phases, one isolated claude process each
+
+USAGE
+  spec-run [options] "<feature description>"    start a new feature
+  spec-run [options]                            resume the current feature
+
+OPTIONS
+  --repo <path>          repository root (default: git toplevel of cwd)
+  --feature-dir <path>   skip discovery, use this feature directory
+  --config <file>        alternate phases.json
+  --from <phase>         start at this phase
+  --stop-after <phase>   stop after this phase, whatever the config says
+  --with <p[,p]>         also run optional phases (clarify, analyze)
+  --only <p[,p]>         run exactly these phases
+  --gate <all|none|p,..> override which phases pause for you
+  --model <phase>=<m>    override one phase's model      (repeatable)
+  --effort <phase>=<e>   override one phase's effort      (repeatable)
+  --budget <usd>         ceiling across the whole run
+  --force                re-run phases already recorded ok
+  --dry-run              print the exact claude invocations, run nothing
+  --list                 print the configured phases and exit
+  -h, --help
+
+PHASES
+  specify → [clarify] → plan → tasks → [analyze] → implement
+  Bracketed phases are optional; name them in --with to include them.
+
+EXAMPLES
+  spec-run "add a CSV export to the metrics page"
+  spec-run --with clarify --stop-after plan "rework the auth flow"
+  spec-run --resume
+  spec-run --dry-run --only plan
+EOF
+}
+
+# ----------------------------------------------------------------- args -------
+
+REPO=""; FEATURE_DIR=""; DESCRIPTION=""
+FROM=""; STOP_AFTER=""; WITH=""; ONLY=""; GATE_OVERRIDE=""
+BUDGET=""; FORCE=0; DRY_RUN=0; LIST=0
+declare -a MODEL_OVERRIDES=() EFFORT_OVERRIDES=()
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --repo)         REPO="${2:-}"; shift 2 || exit 3;;
+    --feature-dir)  FEATURE_DIR="${2:-}"; shift 2 || exit 3;;
+    --config)       CONFIG="${2:-}"; shift 2 || exit 3;;
+    --from)         FROM="${2:-}"; shift 2 || exit 3;;
+    --stop-after)   STOP_AFTER="${2:-}"; shift 2 || exit 3;;
+    --with)         WITH="${2:-}"; shift 2 || exit 3;;
+    --only)         ONLY="${2:-}"; shift 2 || exit 3;;
+    --gate)         GATE_OVERRIDE="${2:-}"; shift 2 || exit 3;;
+    --budget)       BUDGET="${2:-}"; shift 2 || exit 3;;
+    --model)        MODEL_OVERRIDES+=("${2:-}"); shift 2 || exit 3;;
+    --effort)       EFFORT_OVERRIDES+=("${2:-}"); shift 2 || exit 3;;
+    --force)        FORCE=1; shift;;
+    --dry-run)      DRY_RUN=1; shift;;
+    --list)         LIST=1; shift;;
+    --resume)       shift;;   # resuming is the default when no description is given
+    -h|--help)      usage; exit 0;;
+    -*)             err "unknown option: $1"; usage >&2; exit 3;;
+    *)              DESCRIPTION="${DESCRIPTION:+$DESCRIPTION }$1"; shift;;
+  esac
+done
+
+[ -f "$CONFIG" ] || die "phase config not found: $CONFIG" \
+  "pass --config, or reinstall speckit-pipeline"
+jq -e . "$CONFIG" >/dev/null 2>&1 || die "phase config is not valid JSON: $CONFIG"
+
+if [ "$LIST" -eq 1 ]; then
+  printf '%-10s %-8s %-7s %-9s %-6s %s\n' PHASE MODEL EFFORT GATE OPT SKILL
+  jq -r '.phases[] | [.id, .model, .effort, .gate, (if .optional then "yes" else "-" end), .skill]
+         | @tsv' "$CONFIG" |
+    while IFS=$'\t' read -r a b c d e f; do
+      printf '%-10s %-8s %-7s %-9s %-6s %s\n' "$a" "$b" "$c" "$d" "$e" "$f"
+    done
+  exit 0
+fi
+
+# --------------------------------------------------------------- context ------
+
+if [ -z "$REPO" ]; then
+  REPO=$(git rev-parse --show-toplevel 2>/dev/null) || \
+    die "not inside a git repository" "pass --repo <path>"
+fi
+REPO=$(cd -- "$REPO" && pwd)
+
+preflight "$REPO" || exit 1
+
+# Optional phases only run when asked for; --only replaces the selection entirely.
+_in_list() { case ",$1," in *",$2,"*) return 0;; *) return 1;; esac; }
+
+phase_selected() { # phase_selected <id> <optional>
+  local id="$1" optional="$2"
+  if [ -n "$ONLY" ]; then _in_list "$ONLY" "$id" && return 0 || return 1; fi
+  if [ "$optional" = "true" ]; then _in_list "$WITH" "$id" && return 0 || return 1; fi
+  return 0
+}
+
+override_for() { # override_for <phase> <"model"|"effort">  -> prints override or nothing
+  local phase="$1" kind="$2" entry
+  local -a list=()
+  if [ "$kind" = model ]; then list=("${MODEL_OVERRIDES[@]:-}"); else list=("${EFFORT_OVERRIDES[@]:-}"); fi
+  for entry in "${list[@]}"; do
+    [ -n "$entry" ] || continue
+    case "$entry" in "$phase="*) printf '%s\n' "${entry#*=}"; return 0;; esac
+  done
+}
+
+# The phase skills must be resolvable as PROJECT skills, not from a plugin
+# namespace. spec-kit's own `before_specify` hook is mandatory and resolves
+# `speckit.git.feature` to the slash command `/speckit-git-feature` — a bare,
+# unnamespaced name. Under a plugin namespace that hook silently fails to
+# resolve, the feature branch is never created, and the phase reports success
+# over a directory nothing else in the pipeline can find. So there is one path:
+# spec-bootstrap installs the skills into the repo, and this checks.
+for _s in specify plan tasks implement git-feature; do
+  [ -d "$REPO/.claude/skills/speckit-$_s" ] || \
+    die "missing project skill: .claude/skills/speckit-$_s" \
+        "run: $SPECKIT_PIPELINE_ROOT/bin/spec-bootstrap $REPO"
+done
+
+# ------------------------------------------------- feature dir discovery ------
+# Before the first phase there is no feature directory: /speckit-specify is what
+# creates the branch and the directory. So discovery runs again after specify.
+
+discover_feature_dir() {
+  local fj="$REPO/.specify/feature.json" rel=""
+  if [ -f "$fj" ]; then
+    rel=$(jq -r '.feature_directory // empty' "$fj" 2>/dev/null)
+  fi
+  if [ -z "$rel" ] && [ -x "$REPO/.specify/scripts/bash/check-prerequisites.sh" ]; then
+    rel=$( cd "$REPO" && ./.specify/scripts/bash/check-prerequisites.sh --json 2>/dev/null |
+           jq -r '.FEATURE_DIR // empty' 2>/dev/null )
+  fi
+  [ -n "$rel" ] || return 1
+  case "$rel" in /*) printf '%s\n' "$rel";; *) printf '%s\n' "$REPO/$rel";; esac
+}
+
+if [ -z "$FEATURE_DIR" ]; then FEATURE_DIR=$(discover_feature_dir || true); fi
+
+STATE=""
+init_state_if_possible() {
+  [ -n "$FEATURE_DIR" ] && [ -d "$FEATURE_DIR" ] || return 1
+  STATE="$FEATURE_DIR/.pipeline/state.json"
+  state_init "$STATE" "$FEATURE_DIR" "$(git -C "$REPO" rev-parse --abbrev-ref HEAD)" "$DESCRIPTION"
+}
+init_state_if_possible || true
+
+# ------------------------------------------------------------ phase runner ----
+
+COST_LOG=""
+RUN_TOTAL=0
+
+init_cost_log() {
+  [ -n "$FEATURE_DIR" ] || return 0
+  COST_LOG="$FEATURE_DIR/.pipeline/cost.log"
+  mkdir -p "$(dirname "$COST_LOG")"
+  [ -f "$COST_LOG" ] || \
+    printf '# started_at\tphase\tmodel\teffort\tcost_usd\tturns\tduration_ms\n' > "$COST_LOG"
+}
+
+# Everything the phase must know that is not in the skill: which phase it is,
+# that the skill is to be invoked rather than imitated, and that finishing means
+# finishing this phase only. The tool denials are enforced by the harness; they
+# are restated here so a refusal reads as a rule rather than a malfunction.
+handoff_contract() { # handoff_contract <phase_id> <skill_ref> <feature_dir>
+  cat <<EOF
+You are running exactly one phase of a spec-kit pipeline: "$1".
+
+Invoke the skill \`$2\` using the Skill tool and let it do its work. Never
+approximate, summarise or re-implement what the skill does — it carries the
+project's constitution, templates and hooks, and skipping it silently produces
+artifacts the rest of the pipeline cannot use.
+
+Do this phase and stop. A later process runs the next phase; the handoff between
+you is the files on disk, so leave them complete and leave nothing half-written.
+Do not start the next phase even if it looks trivial.
+
+Pushing, merging pull requests, and triggering deploys are withheld from you as
+tools for every phase but implementation, and withheld everywhere for merges.
+That is deliberate and not a fault to work around.
+
+${3:+The feature directory for this run is $3.}
+
+Finish your final message with one line of the form:
+STATUS: ok | needs_input | failed — <one sentence>
+and, if needs_input, the specific questions a human must answer.
+EOF
+}
+
+run_phase() { # run_phase <phase_json>
+  local pj="$1"
+  local id skill model effort artifact gate maxb maxt mcp optional
+  id=$(jq -r '.id' <<<"$pj")
+  skill=$(jq -r '.skill' <<<"$pj")
+  model=$(jq -r '.model' <<<"$pj")
+  effort=$(jq -r '.effort' <<<"$pj")
+  artifact=$(jq -r '.artifact // ""' <<<"$pj")
+  gate=$(jq -r '.gate // "on_needs_input"' <<<"$pj")
+  maxb=$(jq -r '.max_budget_usd // empty' <<<"$pj")
+  maxt=$(jq -r '.max_turns // empty' <<<"$pj")
+  mcp=$(jq -r '.mcp // "inherit"' <<<"$pj")
+  optional=$(jq -r '.optional // false' <<<"$pj")
+
+  local o
+  o=$(override_for "$id" model); [ -n "$o" ] && model="$o"
+  o=$(override_for "$id" effort); [ -n "$o" ] && effort="$o"
+
+  valid_model "$model"  || die "phase '$id': not a model alias: $model" \
+    "expected one of: opus sonnet haiku fable, or a full claude-* id"
+  valid_effort "$effort" || die "phase '$id': not an effort level: $effort" \
+    "expected one of: low medium high xhigh max"
+
+  # already done?
+  if [ -n "$STATE" ] && [ "$FORCE" -eq 0 ]; then
+    local prev
+    prev=$(state_phase_get "$STATE" "$id" status "")
+    if [ "$prev" = "ok" ]; then
+      dim "  · $id — already ok, skipping (use --force to re-run)"
+      return 0
+    fi
+  fi
+
+  # overall budget ceiling, checked BEFORE the spend rather than after
+  if [ -n "$BUDGET" ] && [ -n "$STATE" ]; then
+    local spent
+    spent=$(state_total_cost "$STATE")
+    if awk -v s="$spent" -v b="$BUDGET" 'BEGIN{exit !(s >= b)}'; then
+      err "run budget of \$$BUDGET reached (\$$spent spent) before phase '$id'"
+      return 1
+    fi
+  fi
+
+  # ---- skill reference and prompt
+  local skill_ref prompt
+  skill_ref="$skill"
+  prompt="/$skill_ref"
+  if [ "$(jq -r '.takes_description // false' <<<"$pj")" = true ] && [ -n "$DESCRIPTION" ]; then
+    prompt="/$skill_ref $DESCRIPTION"
+  fi
+
+  # ---- tool denials: defaults plus this phase's own
+  local deny
+  deny=$(jq -r '[ (.defaults.deny_tools // [])[] ] | join(",")' "$CONFIG")
+  local phase_deny
+  phase_deny=$(jq -r '(.deny_tools // []) | join(",")' <<<"$pj")
+  [ -n "$phase_deny" ] && deny="${deny:+$deny,}$phase_deny"
+  # Implementation is the one phase that may legitimately push a branch.
+  if [ "$id" = implement ]; then
+    deny=$(printf '%s' "$deny" | tr ',' '\n' | grep -v '^Bash(git push:\*)$' |
+           grep -v '^Bash(gh pr create:\*)$' | paste -sd, -)
+  fi
+
+  # ---- session id, reused across attempts so --resume lands in the same thread
+  local sid
+  sid=$(state_phase_get "${STATE:-/dev/null}" "$id" session_id "")
+  [ -n "$sid" ] || sid=$(new_uuid)
+
+  # ---- assemble argv
+  local -a argv=(claude -p "$prompt"
+    --model "$model"
+    --effort "$effort"
+    --output-format json
+    --permission-mode "$(jqd "$CONFIG" '.defaults.permission_mode' acceptEdits)"
+    --session-id "$sid"
+    --append-system-prompt "$(handoff_contract "$id" "$skill_ref" "${FEATURE_DIR:-}")"
+  )
+  [ -n "$maxt" ] && argv+=(--max-turns "$maxt")
+  [ -n "$maxb" ] && argv+=(--max-budget-usd "$maxb")
+  [ -n "$deny" ] && argv+=(--disallowed-tools "$deny")
+  # A phase that talks to nothing external should not pay for a tool list it
+  # cannot use; one that drives a browser or an API must keep it.
+  if [ "$mcp" = none ]; then argv+=(--strict-mcp-config --mcp-config '{"mcpServers":{}}'); fi
+
+  info "$id — $model/$effort${maxb:+, ≤\$$maxb}${maxt:+, ≤$maxt turns}"
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    printf '  '; printf '%q ' "${argv[@]}"; printf '\n\n'
+    return 0
+  fi
+
+  [ -n "$STATE" ] && state_phase_start "$STATE" "$id" "$sid" "$model" "$effort"
+
+  # ---- declared write scope, and a snapshot of what is ALREADY dirty outside it
+  local scope_json
+  scope_json=$(jq -c 'if has("write_scope") then .write_scope else "inherit" end' <<<"$pj")
+  local -a prefixes=()
+  if [ "$scope_json" = '"inherit"' ]; then
+    while IFS= read -r p; do [ -n "$p" ] && prefixes+=("$p"); done < \
+      <(jq -r '(.defaults.write_scope // [])[]' "$CONFIG")
+  elif [ "$scope_json" != null ]; then
+    while IFS= read -r p; do [ -n "$p" ] && prefixes+=("$p"); done < \
+      <(jq -r '.[]' <<<"$scope_json")
+  fi
+  local snap=""
+  if [ "${#prefixes[@]}" -gt 0 ]; then
+    snap=$(mktemp)
+    scope_snapshot "$REPO" "$snap" "${prefixes[@]}"
+  fi
+
+  # ---- run
+  # stderr is kept SEPARATE from stdout: merging them means one warning line on
+  # stderr makes the JSON unparseable, and the parse below would then read cost
+  # and turns as zero. A zero that means "not measured" is the most expensive
+  # kind of tidy number.
+  local out rc errf
+  errf=$(mktemp)
+  out=$( cd "$REPO" && "${argv[@]}" 2>"$errf" ); rc=$?
+
+  # The feature directory only exists once specify has run: /speckit-specify is
+  # what creates the branch and the directory. So the first phase of a new
+  # feature has nowhere to record itself until after it finishes — discover the
+  # directory now and backfill, including the cost log, which would otherwise be
+  # missing exactly one phase on every new feature.
+  if [ -z "$STATE" ]; then
+    FEATURE_DIR=$(discover_feature_dir || true)
+    if init_state_if_possible; then
+      state_phase_start "$STATE" "$id" "$sid" "$model" "$effort"
+      init_cost_log
+    fi
+  fi
+
+  local cost turns dur result unmeasured=""
+  if jq -e . <<<"$out" >/dev/null 2>&1; then
+    cost=$(jq -r '.total_cost_usd // empty' <<<"$out")
+    turns=$(jq -r '.num_turns // empty'     <<<"$out")
+    dur=$(jq -r '.duration_ms // empty'     <<<"$out")
+    result=$(jq -r '.result // empty'       <<<"$out")
+  else
+    # The check failed, not necessarily the phase. Say which, and leave the
+    # figures EMPTY so they record as null rather than as a measured zero.
+    unmeasured="the phase's output was not parseable JSON, so cost and turns are UNMEASURED (not zero)"
+    cost=""; turns=""; dur=""
+    result=$(printf '%s\n%s' "$(printf '%s' "$out" | head -c 1200)" \
+                              "$(head -c 800 "$errf")")
+  fi
+  rm -f "$errf"
+  [ -n "$cost" ] && RUN_TOTAL=$(awk -v a="$RUN_TOTAL" -v b="$cost" 'BEGIN{printf "%.4f", a+b}')
+
+  if [ -n "$COST_LOG" ]; then
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$(now_iso)" "$id" "$model" "$effort" "${cost:-unmeasured}" \
+      "${turns:-unmeasured}" "${dur:-unmeasured}" >> "$COST_LOG"
+  fi
+
+  # A non-zero exit is evidence, not a verdict — and a zero exit is not a pass.
+  # The artifact decides. But a process that died before writing anything should
+  # say so in its own words, so keep the output when things go wrong.
+  local status note
+  IFS=$'\t' read -r status note < <(verify_phase "$id" "${FEATURE_DIR:-/nonexistent}" "$artifact")
+
+  [ -n "$unmeasured" ] && note="$note; $unmeasured"
+
+  # ---- scope check, against the tree as it was when this phase started
+  local violations=""
+  if [ -n "$snap" ]; then
+    violations=$(scope_violations_since "$REPO" "$snap" "${prefixes[@]}")
+    rm -f "$snap"
+    if [ -n "$violations" ]; then
+      status=failed
+      note="wrote outside its declared scope (${prefixes[*]}): $(printf '%s' "$violations" | tr '\n' ' ')"
+    fi
+  fi
+
+  local sha
+  sha=$(file_sha "${FEATURE_DIR:-}/${artifact:-nonexistent}")
+  [ -n "$STATE" ] && state_phase_finish "$STATE" "$id" "$status" "$cost" "$turns" "$dur" "$sha" "$note"
+
+  case "$status" in
+    ok)          ok   "$id — $note  $(dim_s "($(fmt_cost "$cost"), ${turns:-?} turns)")";;
+    unevaluated) warn "$id — $note  ($(fmt_cost "$cost"), ${turns:-?} turns)";;
+    needs_input) warn "$id — $note  ($(fmt_cost "$cost"), ${turns:-?} turns)";;
+    failed)      err  "$id — $note  ($(fmt_cost "$cost"), ${turns:-?} turns, exit $rc)";;
+  esac
+
+  if [ "$status" = failed ] || [ "$status" = needs_input ]; then
+    printf '\n'
+    [ -n "$result" ] && { dim "  the phase's own account:"; printf '  %s\n\n' "$result"; }
+    say "  pick this phase up in conversation:"
+    say "    claude --resume $sid"
+    say "  then continue the pipeline:"
+    say "    spec-run --resume${FROM:+ --from $id}"
+    printf '\n'
+    [ "$status" = failed ] && return 1
+    return 2
+  fi
+
+  # A gate is a stop the pipeline owns, not a sentence in a prompt. Prose has
+  # already been tried: an agent told "stop before implement" merged two pull
+  # requests and deployed them.
+  local gate_policy="$gate"
+  case "$GATE_OVERRIDE" in
+    all)  gate_policy=always;;
+    none) gate_policy=never;;
+    "")   ;;
+    *)    _in_list "$GATE_OVERRIDE" "$id" && gate_policy=always || gate_policy=never;;
+  esac
+  if [ "$gate_policy" = always ]; then
+    printf '\n'
+    say "  gate: $id is configured to pause for review."
+    say "    review:   ${FEATURE_DIR:-?}/${artifact:-}"
+    say "    continue: spec-run --resume"
+    printf '\n'
+    return 2
+  fi
+
+  if [ -n "$STOP_AFTER" ] && [ "$id" = "$STOP_AFTER" ]; then
+    printf '\n'; ok "stopped after '$id' as requested"; printf '\n'
+    return 2
+  fi
+
+  return 0
+}
+
+# ---------------------------------------------------------------- driver ------
+
+init_cost_log
+
+say ""
+say "spec-run  $(dim_s "repo $REPO")"
+[ -n "$FEATURE_DIR" ] && dim "          feature $FEATURE_DIR"
+[ -n "$DESCRIPTION" ] && dim "          \"$DESCRIPTION\""
+say ""
+
+if [ -z "$DESCRIPTION" ] && [ -z "$FEATURE_DIR" ] && [ -z "$ONLY" ]; then
+  die "nothing to resume and no feature description given" \
+      "spec-run \"<what you want built>\"   — or run from a branch with a specs/ directory"
+fi
+
+reached=""
+[ -z "$FROM" ] && reached=1
+
+rc_final=0
+while IFS= read -r pj; do
+  id=$(jq -r '.id' <<<"$pj")
+  optional=$(jq -r '.optional // false' <<<"$pj")
+
+  if [ -z "$reached" ]; then
+    [ "$id" = "$FROM" ] && reached=1 || { dim "  · $id — before --from $FROM, skipping"; continue; }
+  fi
+  phase_selected "$id" "$optional" || { dim "  · $id — not selected"; continue; }
+
+  run_phase "$pj"; rc=$?
+  if [ "$rc" -ne 0 ]; then rc_final=$rc; break; fi
+done < <(jq -c '.phases[]' "$CONFIG")
+
+# ---------------------------------------------------------------- summary -----
+
+say ""
+if [ -n "$STATE" ] && [ -f "$STATE" ] && [ "$DRY_RUN" -eq 0 ]; then
+  say "summary"
+  printf '  %-10s %-8s %-7s %-12s %10s %6s\n' PHASE MODEL EFFORT STATUS COST TURNS
+  jq -r '.phases | to_entries[] |
+         [.key, (.value.model // "-"), (.value.effort // "-"), (.value.status // "-"),
+          (if .value.cost_usd == null then "unmeasured" else "$" + (.value.cost_usd|tostring) end),
+          (if .value.num_turns == null then "?" else (.value.num_turns|tostring) end)] | @tsv' "$STATE" |
+    while IFS=$'\t' read -r a b c d e f; do
+      printf '  %-10s %-8s %-7s %-12s %10s %6s\n' "$a" "$b" "$c" "$d" "$e" "$f"
+    done
+  printf '  %-10s %-8s %-7s %-12s %10s\n' TOTAL "" "" "" "\$$(state_total_cost "$STATE")"
+  dim "  state: $STATE"
+  say ""
+fi
+
+exit "$rc_final"

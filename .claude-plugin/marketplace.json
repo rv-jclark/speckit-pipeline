@@ -1,0 +1,11 @@
+{
+  "name": "speckit-pipeline",
+  "owner": { "name": "Jamie Clark" },
+  "plugins": [
+    {
+      "name": "speckit-pipeline",
+      "source": "./plugins/speckit-pipeline",
+      "description": "Run the spec-kit phases as isolated claude processes — one model, effort level, tool allowance and spend ceiling per phase."
+    }
+  ]
+}

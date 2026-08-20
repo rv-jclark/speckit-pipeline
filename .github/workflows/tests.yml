@@ -1,0 +1,29 @@
+name: tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pinned to the exact version the suite asserts. An unpinned linter means
+      # "lint" does not mean the same thing on a laptop as it does here: apt
+      # ships 0.9.0, which disagrees with 0.11.0 in BOTH directions, so a clean
+      # local run can go red in CI over a finding the newer release dropped.
+      - name: install shellcheck 0.11.0
+        run: |
+          set -euo pipefail
+          v=0.11.0
+          curl -fsSL "https://github.com/koalaman/shellcheck/releases/download/v${v}/shellcheck-v${v}.linux.x86_64.tar.xz" \
+            | tar -xJ
+          sudo install -m 0755 "shellcheck-v${v}/shellcheck" /usr/local/bin/shellcheck
+          got=$(shellcheck --version | awk '/^version:/{print $2}')
+          [ "$got" = "$v" ] || { echo "expected shellcheck $v, got $got"; exit 1; }
+
+      - name: tests
+        run: ./tests/run.sh

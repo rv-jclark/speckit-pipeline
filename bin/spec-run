@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Wrapper for the clone-and-run install path. The engine lives inside the plugin
+# directory so that both install modes — git clone, and /plugin install — get a
+# complete copy.
+exec "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../plugins/speckit-pipeline/bin" && pwd)/spec-run" "$@"

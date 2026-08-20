@@ -1,0 +1,5 @@
+.DS_Store
+*.swp
+
+# spec-run's own state, if this repo ever runs the pipeline on itself
+specs/*/.pipeline/

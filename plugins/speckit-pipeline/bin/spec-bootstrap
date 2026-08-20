@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+#
+# spec-bootstrap — make a repository ready for spec-run.
+#
+# Installs the vendored spec-kit assets: the phase skills into .claude/skills/
+# and the scaffold into .specify/. Idempotent, and it never overwrites content
+# the project authored — a constitution is the project's own assertion about how
+# it works, and silently replacing it with a template is the one unrecoverable
+# thing this script could do.
+
+set -uo pipefail
+
+SPECKIT_PIPELINE_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+export SPECKIT_PIPELINE_ROOT
+# shellcheck source=../lib/common.sh
+. "$SPECKIT_PIPELINE_ROOT/lib/common.sh"
+
+ASSETS="$SPECKIT_PIPELINE_ROOT/assets"
+FORCE=0
+TARGET=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --force) FORCE=1; shift;;
+    -h|--help)
+      cat <<'EOF'
+spec-bootstrap — install the spec-kit scaffold into a repository
+
+USAGE
+  spec-bootstrap [--force] [path]
+
+  path      repository to bootstrap (default: git toplevel of cwd)
+  --force   replace vendored files that already exist and differ.
+            Never touches .specify/memory/constitution.md, which is yours.
+EOF
+      exit 0;;
+    -*) die "unknown option: $1";;
+    *)  TARGET="$1"; shift;;
+  esac
+done
+
+[ -d "$ASSETS" ] || die "vendored assets missing: $ASSETS" \
+  "this looks like an incomplete clone of speckit-pipeline"
+
+if [ -z "$TARGET" ]; then
+  TARGET=$(git rev-parse --show-toplevel 2>/dev/null) || \
+    die "not inside a git repository" "pass a path: spec-bootstrap /path/to/repo"
+fi
+[ -d "$TARGET" ] || die "no such directory: $TARGET"
+TARGET=$(cd -- "$TARGET" && pwd)
+
+git -C "$TARGET" rev-parse --is-inside-work-tree >/dev/null 2>&1 || \
+  die "not a git repository: $TARGET" \
+      "spec-kit names feature branches, so run: git -C $TARGET init"
+
+installed=0; skipped=0; drifted=0
+
+# copy_asset <src_file> <dst_file>
+copy_asset() {
+  local src="$1" dst="$2"
+  mkdir -p "$(dirname "$dst")"
+  if [ ! -e "$dst" ]; then
+    cp -R "$src" "$dst"; installed=$((installed + 1)); return 0
+  fi
+  if diff -rq "$src" "$dst" >/dev/null 2>&1; then
+    skipped=$((skipped + 1)); return 0
+  fi
+  if [ "$FORCE" -eq 1 ]; then
+    rm -rf "$dst"; cp -R "$src" "$dst"; installed=$((installed + 1))
+  else
+    warn "differs from the vendored copy: ${dst#"$TARGET"/}"
+    drifted=$((drifted + 1))
+  fi
+}
+
+info "bootstrapping $TARGET"
+
+# ---- phase skills
+for d in "$ASSETS"/claude-skills/*; do
+  [ -d "$d" ] || continue
+  copy_asset "$d" "$TARGET/.claude/skills/$(basename "$d")"
+done
+
+# ---- .specify scaffold
+copy_asset "$ASSETS/specify/scripts"        "$TARGET/.specify/scripts"
+copy_asset "$ASSETS/specify/templates"      "$TARGET/.specify/templates"
+[ -d "$ASSETS/specify/extensions" ] && \
+  copy_asset "$ASSETS/specify/extensions"   "$TARGET/.specify/extensions"
+copy_asset "$ASSETS/specify/extensions.yml" "$TARGET/.specify/extensions.yml"
+[ -f "$ASSETS/specify/init-options.json" ] && \
+  copy_asset "$ASSETS/specify/init-options.json" "$TARGET/.specify/init-options.json"
+
+chmod +x "$TARGET"/.specify/scripts/bash/*.sh 2>/dev/null || true
+chmod +x "$TARGET"/.specify/extensions/git/scripts/bash/*.sh 2>/dev/null || true
+
+# ---- integration marker
+if [ ! -f "$TARGET/.specify/integration.json" ]; then
+  printf '{\n  "integration": "claude",\n  "version": "%s"\n}\n' \
+    "$(jqd "$SPECKIT_PIPELINE_ROOT/.claude-plugin/plugin.json" \
+        '.metadata.speckit_version' 0.7.3)" > "$TARGET/.specify/integration.json"
+  installed=$((installed + 1))
+fi
+
+# ---- the constitution is the project's, not ours
+CONST="$TARGET/.specify/memory/constitution.md"
+if [ ! -f "$CONST" ]; then
+  mkdir -p "$(dirname "$CONST")"
+  cp "$ASSETS/specify/templates/constitution-template.md" "$CONST"
+  installed=$((installed + 1))
+  CONST_IS_TEMPLATE=1
+else
+  CONST_IS_TEMPLATE=0
+fi
+
+mkdir -p "$TARGET/specs"
+
+say ""
+ok "$installed installed, $skipped already current${drifted:+, $drifted differing}"
+if [ "${drifted:-0}" -gt 0 ]; then
+  warn "re-run with --force to replace the differing files"
+  say  "  a difference is not necessarily wrong: a project may have deliberately"
+  say  "  customised a template. Look before you force."
+fi
+
+say ""
+say "next:"
+if [ "$CONST_IS_TEMPLATE" -eq 1 ]; then
+  say "  1. fill in .specify/memory/constitution.md — it is a TEMPLATE right now,"
+  say "     and every phase reads it. An unfilled constitution is not a neutral"
+  say "     default; it is placeholder text shaping every artifact."
+  say "     (or run: claude \"/speckit-constitution\")"
+  say "  2. $SPECKIT_PIPELINE_ROOT/bin/spec-run \"<what you want built>\""
+else
+  say "  $SPECKIT_PIPELINE_ROOT/bin/spec-run \"<what you want built>\""
+fi
+say ""
+say "run state and per-phase costs are written to specs/<feature>/.pipeline/."
+say "to keep them out of git:  echo 'specs/*/.pipeline/' >> $TARGET/.gitignore"
+say ""
