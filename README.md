@@ -197,6 +197,18 @@ against clean, and on the first real run it blamed a phase for the 14 skill file
 `spec-bootstrap` had just installed and for the caller's own log file, failing a
 `specify` that had done everything right.)
 
+And a **completion check**. With `--output-format json`, a normal completion
+always returns a result envelope — so no envelope plus a non-zero exit means the
+phase did not finish, and what its artifact looks like is beside the point. This
+was measured: SIGTERM-ing a live `plan` phase left a 3088-byte `plan.md` ending
+at a plausible heading with no open markers, and it verified **`ok`** — the later
+artifacts a finished plan writes (`research.md`, `data-model.md`, `contracts/`)
+were simply absent and nothing looked for them. Byte counts and marker checks
+cannot tell "finished" from "interrupted somewhere that happens to look
+finished"; the exit code can. A rolling restart, a Ctrl-C and an OOM kill all
+land here. The partial artifact is left on disk deliberately — it is the only
+record of how far the phase got, and the next attempt overwrites it anyway.
+
 And a **non-run check**. If a phase returns no parseable result *and* leaves its
 artifact byte-identical, it is recorded `failed` — "the phase returned no
 parseable result and did not change plan.md — it appears not to have run at
@@ -297,7 +309,7 @@ reports success over a directory the rest of the pipeline cannot find.
 ## Tests
 
 ```bash
-./tests/run.sh          # shellcheck + 88 fixture assertions
+./tests/run.sh          # shellcheck + 92 fixture assertions
 ```
 
 No test spends money: the invocation assertions run under `--dry-run` and check
