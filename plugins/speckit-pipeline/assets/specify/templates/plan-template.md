@@ -31,20 +31,25 @@
 
 *GATE: Must pass before Phase 0 research. Re-check after Phase 1 design.*
 
-- [ ] **I. Agent Scope** — Does this feature respect existing domain boundaries?
-      If it crosses a boundary, is the capability being added to the owning agent?
-- [ ] **II. Cross-Cutting** — If this feature introduces a shared capability
-      (notifications, auth, logging), is it being centralized in one agent behind
-      a dedicated endpoint rather than duplicated?
-- [ ] **III. Postgres-Driven** — Are new behavioral variations expressed as
-      Postgres-backed config in `ppc-agent-context` rather than hardcoded logic,
-      env vars, or YAML files?
-- [ ] **IV. Credentials** — Do all new secrets live only in the agent that
-      directly uses them? No agent holds a secret it does not directly need.
-- [ ] **V. Narrow-First** — Is the scope as tight as possible? Are there
-      speculative additions that should be deferred until a real need emerges?
+[Gates determined based on constitution file]
 
-Any violations MUST be documented in the Complexity Tracking table below.
+<!--
+  This is upstream spec-kit's generic placeholder, and it is deliberate: the
+  gates belong to THIS project's .specify/memory/constitution.md, and the plan
+  phase reads them from there.
+
+  The scaffold this was vendored from had five concrete gates written into this
+  template instead — one project's architecture principles, hardcoded into the
+  template every other project would inherit. A default that names specific
+  things has to be checked against the things that actually exist, and those
+  gates existed in exactly one repository.
+
+  To customise the gates for your project, write them in your constitution, or
+  put a project-specific copy of this template in
+  .specify/templates/overrides/plan-template.md — resolve_template() in
+  .specify/scripts/bash/common.sh prefers overrides over this file, so your
+  version wins without editing the vendored copy.
+-->
 
 ## Project Structure
 
