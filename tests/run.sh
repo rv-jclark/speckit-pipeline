@@ -146,9 +146,26 @@ assert_eq "$uncapped" "" "every phase has a budget or turn ceiling"
 # plugin's /spec-status existed and there was no such script.
 printf '\ndocumented commands\n'
 README="$ROOT/README.md"
-doc_cmds=$(grep -oE '(^|[^a-zA-Z/-])spec-[a-z]+' "$README" |
-           grep -oE 'spec-[a-z]+' | sort -u |
-           grep -vE '^spec-(kit|run-config)$' || true)
+# Extracted from COMMAND POSITION inside fenced bash blocks — the first token of
+# a line — not from any matching token anywhere in the file. The denylist version
+# of this ('spec-kit', 'spec-run-config', …) was fragile by construction: it
+# failed the moment prose mentioned `spec-template.md`, which is a filename, not
+# something anyone types. What the check means is "if the README tells someone to
+# TYPE a spec-* command, it must exist", so it should read where commands are
+# typed.
+doc_cmds=$(awk '
+  /^```bash$/ {inblock=1; next}
+  /^```/      {inblock=0; next}
+  inblock {
+    line=$0
+    sub(/^[[:space:]]+/, "", line)
+    # An unescaped / inside a bracket expression ends the regex literal in awk,
+    # so strip any leading path with a plain conditional instead.
+    if (line ~ /\/bin\//) sub(/.*\/bin\//, "", line)
+    sub(/^"/, "", line)
+    n=split(line, w, /[[:space:]"]+/)
+    if (n > 0 && w[1] ~ /^spec-[a-z]+$/) print w[1]
+  }' "$README" | sort -u)
 missing=""
 for c in $doc_cmds; do
   [ -x "$ROOT/bin/$c" ] || missing="$missing $c"
