@@ -47,6 +47,22 @@ unquote() { printf '%s' "$1" | LC_ALL=C tr -d '\\'; }
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/speckit-pipeline-tests.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
 
+# A stub runner shadows the real `claude` for the whole suite, on purpose. The
+# suite must behave identically on a laptop and in CI, and it did not: CI has no
+# claude, so 30 assertions exited at the prerequisite check having never reached
+# an argv — all of them green locally, on a machine that happened to have it
+# installed. Nothing here is allowed to spend money or need a login; the tests
+# that care about a MISSING runner name one explicitly with --claude-bin, so
+# they are unaffected by PATH.
+FAKE="$WORK/fakebin"; mkdir -p "$FAKE"
+cat > "$FAKE/claude" <<'STUBEOF'
+#!/usr/bin/env bash
+for a in "$@"; do [ "$a" = "--help" ] && exit 0; done
+echo '{"total_cost_usd":0.01,"num_turns":1,"duration_ms":10,"result":"STATUS: ok"}'
+STUBEOF
+chmod +x "$FAKE/claude"
+PATH="$FAKE:$PATH"; export PATH
+
 # =============================================================== shellcheck ===
 printf '\nshellcheck\n'
 if command -v shellcheck >/dev/null 2>&1; then
@@ -72,6 +88,14 @@ b4=$(grep -nE '(^|[^[:alnum:]_])(mapfile|readarray)([^[:alnum:]_]|$)|declare -A|
        "$ROOT/bin/spec-run" "$ROOT/bin/spec-bootstrap" 2>/dev/null | grep -v '^\s*#' || true)
 assert_eq "$b4" "" "no bash-4-only construct in the shipped scripts (macOS ships 3.2)"
 t_note "running under bash ${BASH_VERSION}"
+
+# The suite must not reach a real claude. If this fails, an assertion somewhere
+# is about to spend money or depend on a login.
+resolved=$(command -v claude 2>/dev/null || true)
+case "$resolved" in
+  "$FAKE"/*) t_pass "the suite is hermetic — claude resolves to the stub";;
+  *)         t_fail "the suite is hermetic" "claude resolves to $resolved";;
+esac
 
 # ================================================================== config ====
 printf '\nphase config\n'
@@ -285,7 +309,6 @@ assert_not_contains "$v" "CLAUDE.md" "with them, it is not"
 
 # ------------------------------------------------------- custom claude binary --
 printf '\ncustom phase runner\n'
-FAKE="$WORK/fakebin"; mkdir -p "$FAKE"
 cat > "$FAKE/claude-edits" <<'FAKEEOF'
 #!/usr/bin/env bash
 # accepts anything, like a passthrough wrapper
@@ -312,11 +335,11 @@ echo '{}'
 FAKEEOF
 chmod +x "$FAKE"/claude-*
 
-argv=$(PATH="$FAKE:$PATH" "$SPEC_RUN" --repo "$BS" --feature-dir "$BS/specs/001-t" \
+argv=$("$SPEC_RUN" --repo "$BS" --feature-dir "$BS/specs/001-t" \
         --only plan --claude-bin claude-edits --dry-run 2>&1)
 assert_contains "$argv" "claude-edits -p" "--claude-bin runs the named executable, not claude"
 
-argv=$(PATH="$FAKE:$PATH" SPEC_RUN_CLAUDE_BIN=claude-edits "$SPEC_RUN" --repo "$BS" \
+argv=$(SPEC_RUN_CLAUDE_BIN=claude-edits "$SPEC_RUN" --repo "$BS" \
         --feature-dir "$BS/specs/001-t" --only plan --dry-run 2>&1)
 assert_contains "$argv" "claude-edits -p" "SPEC_RUN_CLAUDE_BIN is honoured too"
 
@@ -325,7 +348,7 @@ out=$("$SPEC_RUN" --repo "$BS" --feature-dir "$BS/specs/001-t" --only plan \
 assert_eq "$rc" "1" "a phase runner that is not on PATH exits 1 before any spend"
 assert_contains "$out" "not on PATH" "and says so, naming the command"
 
-out=$(PATH="$FAKE:$PATH" "$SPEC_RUN" --repo "$BS" --feature-dir "$BS/specs/001-t" \
+out=$("$SPEC_RUN" --repo "$BS" --feature-dir "$BS/specs/001-t" \
         --only plan --claude-bin claude-quiet --dry-run 2>&1)
 assert_contains "$out" "exited non-zero on --help" "a runner that will not answer --help is reported"
 assert_contains "$out" "result.json" "and the reader is told where its stderr will be kept"
@@ -352,7 +375,7 @@ git -C "$RJ" add -A >/dev/null 2>&1; git -C "$RJ" commit -qm scaffold
 mkdir -p "$RJ/specs/001-x"
 { printf '# Plan\n'; for i in $(seq 1 40); do printf 'a plausible plan line %s\n' "$i"; done; } \
   > "$RJ/specs/001-x/plan.md"
-out=$(PATH="$FAKE:$PATH" "$SPEC_RUN" --repo "$RJ" --feature-dir "$RJ/specs/001-x" \
+out=$("$SPEC_RUN" --repo "$RJ" --feature-dir "$RJ/specs/001-x" \
         --only plan --claude-bin claude-rejects 2>&1); rc=$?
 assert_eq "$rc" "1" "a runner that rejects a flag fails the phase"
 assert_contains "$out" "did not complete: exit 64" \
@@ -384,7 +407,7 @@ mkdir -p "$DN/specs/001-x"
 { printf '# Plan\n'; for i in $(seq 1 40); do printf 'plan line %s\n' "$i"; done; } > "$DN/specs/001-x/plan.md"
 # The fake MUST move the artifact, or the non-run rule fires instead of this one
 # and the test would pass for the wrong reason.
-out=$(PATH="$FAKE:$PATH" SPEC_TEST_ARTIFACT="$DN/specs/001-x/plan.md" \
+out=$(SPEC_TEST_ARTIFACT="$DN/specs/001-x/plan.md" \
       "$SPEC_RUN" --repo "$DN" --feature-dir "$DN/specs/001-x" \
         --only plan --claude-bin claude-denied 2>&1)
 assert_contains "$out" "3 tool call(s) were DENIED" "denied tool calls are counted and reported"
@@ -411,7 +434,7 @@ git -C "$KL" config user.email t@t.invalid; git -C "$KL" config user.name t
 "$SPEC_BOOTSTRAP" "$KL" >/dev/null 2>&1
 git -C "$KL" add -A >/dev/null 2>&1; git -C "$KL" commit -qm scaffold
 mkdir -p "$KL/specs/001-x"
-out=$(PATH="$FAKE:$PATH" SPEC_TEST_ARTIFACT="$KL/specs/001-x/plan.md" \
+out=$(SPEC_TEST_ARTIFACT="$KL/specs/001-x/plan.md" \
       "$SPEC_RUN" --repo "$KL" --feature-dir "$KL/specs/001-x" \
         --only plan --claude-bin claude-killed 2>&1); rc=$?
 assert_eq "$rc" "1" "a phase killed mid-write FAILS despite a plausible artifact"

@@ -54,11 +54,12 @@ jqd() { # jqd <file> <filter> <default>
 preflight() { # preflight <repo_root>
   local root="$1" missing=0
 
-  command -v claude >/dev/null 2>&1 || {
-    err "claude CLI not on PATH"
-    printf '  install: https://docs.claude.com/en/docs/claude-code\n' >&2
-    missing=1
-  }
+  # NOT `command -v claude`: the runner is configurable, and checking the default
+  # name blocks anyone whose only runner is a wrapper — which is precisely the
+  # case the --claude-bin option exists to serve. probe_claude_bin checks the
+  # configured binary; this function must not second-guess it with a hardcoded
+  # name. (Found by CI, which has no `claude`: 30 assertions never reached an
+  # argv, and every one of them had passed on a laptop that happened to have it.)
   command -v jq >/dev/null 2>&1 || {
     err "jq not on PATH"
     printf '  install: brew install jq  (or apt-get install jq)\n' >&2
