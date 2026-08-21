@@ -625,6 +625,32 @@ than chased because the engine depends on the `feature.json` and
 `check-prerequisites.sh --json` contracts, which have not been re-validated
 against main; refreshing is a real piece of work with real regression risk.
 
+### Which spec-kit versions this works with
+
+Both shapes currently in the wild, because the required skills are **read from
+the project** rather than assumed:
+
+| | 0.7.x | 0.11.x |
+|---|---|---|
+| a feature is | a git **branch** | a **directory** (`SPECIFY_FEATURE_DIRECTORY`) |
+| branch creation | a mandatory `before_specify` git hook | none — specify just creates the directory |
+| `git-*` skills | five of them | removed; `converge` + `agent-context-update` added |
+| `spec-run` | ✅ validated end to end | ✅ accepted; phases invoke correctly |
+| `spec-roadmap` | ✅ validated through a squash merge | ⚠️ the merge gate wants a branch per entry, and 0.11.x does not create one — you would branch by hand |
+
+The phase skills come from `phases.json`; anything else comes from whatever
+`.specify/extensions.yml` hooks into those phases, with `speckit.git.feature`
+mapping to `/speckit-git-feature` exactly as the skills themselves document. An
+earlier version hardcoded the five `git-*` skills and so refused to run in every
+0.11.x project — and the remedy it printed would have installed 0.7.3's git
+skills alongside 0.11.x's, mixing two versions. **A requirement this tool invents
+rather than reads is a compatibility bug waiting for the next release.**
+
+⚠️ **Do not `spec-bootstrap --force` a project on a newer spec-kit than the
+vendored 0.7.3** — it would downgrade the scaffold and add back skills that
+version deliberately removed. Without `--force` it reports the difference and
+leaves everything alone, which is the right outcome.
+
 The skills install into the project as **unnamespaced** `.claude/skills/speckit-*`
 rather than being served from the plugin namespace. That is not incidental:
 spec-kit's mandatory `before_specify` hook resolves `speckit.git.feature` to the
@@ -635,7 +661,7 @@ reports success over a directory the rest of the pipeline cannot find.
 ## Tests
 
 ```bash
-./tests/run.sh          # shellcheck + 250 fixture assertions
+./tests/run.sh          # shellcheck + 257 fixture assertions
 ```
 
 **The suite is hermetic.** A stub runner shadows the real `claude` for the whole
@@ -729,7 +755,7 @@ not be measured are recorded `unmeasured`, never as `$0`.
 ## Tests, and what they cost to run
 
 ```bash
-./tests/run.sh          # shellcheck + 250 assertions, ~70 seconds
+./tests/run.sh          # shellcheck + 257 assertions, ~70 seconds
 ```
 
 Hermetic: a stub runner shadows the real `claude` for the whole run, so nothing

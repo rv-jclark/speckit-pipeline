@@ -583,6 +583,47 @@ assert_contains "$out" "may be partially written" "and the artifact is called in
 # Deleting it would be worse: it is the only record of how far the phase got, and
 # the next attempt overwrites it anyway.
 
+# ------------------------------------------- which skills are REQUIRED ---------
+printf '\nrequired skills are derived, not assumed\n'
+# spec-kit 0.7.3 ships five git-* skills and a mandatory before_specify hook that
+# creates the branch. 0.11.3 REMOVED the git extension entirely and lets specify
+# create the directory without one. A hardcoded requirement on
+# speckit-git-feature refused to run in every 0.11.3 project — and the remedy it
+# printed would have installed 0.7.3's git skills into a 0.11.3 project, mixing
+# two versions. So the requirement is read from the project: the phase skills come
+# from phases.json, the rest from whatever .specify/extensions.yml hooks.
+
+# a 0.11.3-shaped project: phase skills, no git-* skills, no hooks needing them
+V11="$WORK/v11"; mkbare "$V11" main
+mkdir -p "$V11/.specify/scripts/bash" "$V11/.specify/templates" "$V11/specs"
+for sk in specify plan tasks implement analyze clarify; do mkdir -p "$V11/.claude/skills/speckit-$sk"; done
+printf 'installed:\n- agent-context\nhooks:\n  after_specify:\n  - extension: agent-context\n    command: speckit.agent-context.update\n' \
+  > "$V11/.specify/extensions.yml"
+mkdir -p "$V11/.claude/skills/speckit-agent-context-update"
+out=$("$SPEC_RUN" --repo "$V11" --only specify --dry-run "probe" 2>&1); rc=$?
+assert_eq "$rc" "0" "a project with no git-* skills is accepted when it hooks none"
+assert_contains "$(unquote "$out")" "/speckit-specify" "and the phase is still invoked"
+
+# the same project, but hooking a skill it does not have
+printf 'hooks:\n  before_specify:\n  - extension: git\n    command: speckit.git.feature\n' \
+  > "$V11/.specify/extensions.yml"
+out=$("$SPEC_RUN" --repo "$V11" --only specify --dry-run "probe" 2>&1); rc=$?
+assert_eq "$rc" "1" "but a project that HOOKS a missing skill is refused"
+assert_contains "$out" "speckit-git-feature" "naming the skill its own hooks ask for"
+assert_contains "$out" "extensions.yml" "and where that requirement came from"
+# Derived both ways: the same project is fine or broken depending only on what it
+# declares, which is the difference between reading a requirement and inventing
+# one. Mutation: hardcode the git-* list again and the FIRST assertion fails.
+
+# a phase skill is required unconditionally, because a phase cannot run without it
+rm -rf "$V11/.claude/skills/speckit-plan"
+printf 'installed: []\n' > "$V11/.specify/extensions.yml"
+out=$("$SPEC_RUN" --repo "$V11" --only specify --dry-run "probe" 2>&1); rc=$?
+assert_eq "$rc" "1" "a missing PHASE skill is refused even with no hooks at all"
+assert_contains "$out" "speckit-plan" "naming it"
+# Note it refuses even though only `specify` was selected: a config naming a skill
+# the project lacks is broken whether or not this particular run would reach it.
+
 # ------------------------------------ every selected phase actually runs -------
 printf '\nmulti-phase run\n'
 # The bug this guards was invisible to every other test here. The driver loop was

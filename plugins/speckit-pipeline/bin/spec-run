@@ -213,17 +213,58 @@ override_for() { # override_for <phase> <"model"|"effort">  -> prints override o
 }
 
 # The phase skills must be resolvable as PROJECT skills, not from a plugin
-# namespace. spec-kit's own `before_specify` hook is mandatory and resolves
-# `speckit.git.feature` to the slash command `/speckit-git-feature` — a bare,
-# unnamespaced name. Under a plugin namespace that hook silently fails to
-# resolve, the feature branch is never created, and the phase reports success
-# over a directory nothing else in the pipeline can find. So there is one path:
-# spec-bootstrap installs the skills into the repo, and this checks.
-for _s in specify plan tasks implement git-feature; do
-  [ -d "$REPO/.claude/skills/speckit-$_s" ] || \
-    die "missing project skill: .claude/skills/speckit-$_s" \
-        "run: $SPECKIT_PIPELINE_ROOT/bin/spec-bootstrap $REPO"
+# namespace: spec-kit's hooks resolve to bare slash commands like
+# `/speckit-git-feature`, which under a plugin namespace silently fail to
+# resolve — the branch is never created and the phase reports success over a
+# directory nothing downstream can find.
+#
+# WHICH skills are required is derived, not hardcoded. Two sources, each
+# authoritative for its half:
+#   * the phases this run will execute, from phases.json;
+#   * whatever THIS PROJECT's .specify/extensions.yml hooks into those phases.
+#
+# The hardcoded list this replaces demanded `speckit-git-feature`, which
+# spec-kit 0.7.3 ships and 0.11.3 REMOVED — 0.11.3 dropped the git extension
+# entirely and lets specify create the directory without a branch. So the tool
+# refused to run in every 0.11.3 project, and the remedy it printed
+# (spec-bootstrap) would have installed 0.7.3's git skills into a 0.11.3
+# project, mixing two versions. A requirement invented by this tool rather than
+# read from the project is a compatibility bug waiting for the next release.
+_missing_skills=""
+_require_skill() {
+  [ -d "$REPO/.claude/skills/$1" ] ||     case " $_missing_skills " in *" $1 "*) ;; *) _missing_skills="${_missing_skills:+$_missing_skills }$1";; esac
+}
+
+# the phases themselves
+_ri=0
+_rn=$(jq -r '.phases | length' "$CONFIG")
+while [ "$_ri" -lt "$_rn" ]; do
+  _rskill=$(jq -r ".phases[$_ri].skill" "$CONFIG")
+  _ri=$((_ri + 1))
+  _require_skill "$_rskill"
 done
+
+# whatever the project hooks into them. `speckit.git.feature` becomes
+# `/speckit-git-feature`, which is the substitution the skills themselves
+# document, so it is the substitution used here.
+if [ -f "$REPO/.specify/extensions.yml" ]; then
+  while IFS= read -r _hook; do
+    [ -n "$_hook" ] || continue
+    _require_skill "$(printf '%s' "$_hook" | tr '.' '-')"
+  done <<EOF
+$(grep -E '^[[:space:]]*-?[[:space:]]*command:[[:space:]]*speckit\.' "$REPO/.specify/extensions.yml" 2>/dev/null |
+   sed 's/.*command:[[:space:]]*//' | sort -u)
+EOF
+fi
+
+if [ -n "$_missing_skills" ]; then
+  err "this project is missing skills the pipeline needs:"
+  for _s in $_missing_skills; do printf '    .claude/skills/%s\n' "$_s" >&2; done
+  printf '  install them: %s/bin/spec-bootstrap %s\n' "$SPECKIT_PIPELINE_ROOT" "$REPO" >&2
+  printf '  (the phase skills come from phases.json; the rest are whatever this\n' >&2
+  printf '   project hooks in .specify/extensions.yml)\n' >&2
+  exit 1
+fi
 
 # ------------------------------------------------- feature dir discovery ------
 # Before the first phase there is no feature directory: /speckit-specify is what
