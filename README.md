@@ -369,6 +369,46 @@ than in a companion markdown doc, because two stores for one fact always drift.
 1 poisons everything above it, and finding out four specs deep costs four
 pipelines and four review cycles. The file is plain JSON — edit it.
 
+### Starting from a roadmap you already wrote
+
+If the sequence already exists as a document — a `docs/proposals/*-roadmap.md`,
+say — transcribe it rather than asking for a fresh decomposition:
+
+```bash
+spec-roadmap plan --from-doc docs/proposals/my-thing-roadmap.md
+```
+
+That is a different job from `plan "<goal>"`, and usually the better one. A
+document a human wrote encodes decisions, constraints and prior lessons that no
+from-scratch split reproduces. So the phase is told it is **not designing the
+split**: one entry per spec in the document, in the document's order, nothing
+merged, split, added or dropped, and where the document contradicts itself it says
+so rather than choosing for the author.
+
+Each entry's `description` is what the specify phase receives verbatim, and that
+phase will not have read the rest of the document — so each one inlines the
+entry's own substance and its testing requirements, names the sections that
+constrain it, and states what the entry must **not** take on and which later entry
+owns that. The document must live inside the repository, because the phase is told
+to read it.
+
+Measured on a real 345-line roadmap: 6 entries transcribed in the author's order
+with their numbering preserved, $1.48 on opus/high.
+
+### Reading code that lives elsewhere
+
+```bash
+spec-roadmap run --add-dir ../../services/blueprint
+spec-run --add-dir /path/to/other/checkout "..."
+```
+
+A git worktree has no copy of a gitignored sibling checkout, so a spec about code
+in another repository has nothing to read. `--add-dir` grants every phase **read**
+access outside the repository; the write scope is unchanged and still checked
+afterwards, so this widens what a phase may look at, not what it may leave behind.
+A directory that does not exist is a usage error rather than a silently useless
+flag — otherwise the phase runs and produces a spec grounded in nothing.
+
 ### How a run proceeds
 
 ```
@@ -760,7 +800,7 @@ reports success over a directory the rest of the pipeline cannot find.
 ## Tests
 
 ```bash
-./tests/run.sh          # shellcheck + 303 fixture assertions
+./tests/run.sh          # shellcheck + 316 fixture assertions
 ```
 
 **The suite is hermetic.** A stub runner shadows the real `claude` for the whole
@@ -854,7 +894,7 @@ not be measured are recorded `unmeasured`, never as `$0`.
 ## Tests, and what they cost to run
 
 ```bash
-./tests/run.sh          # shellcheck + 303 assertions, ~2 minutes
+./tests/run.sh          # shellcheck + 316 assertions, ~2 minutes
 ```
 
 Hermetic: a stub runner shadows the real `claude` for the whole run, so nothing

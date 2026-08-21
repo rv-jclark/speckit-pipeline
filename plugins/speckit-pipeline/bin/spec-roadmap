@@ -46,6 +46,10 @@ OPTIONS
   --effort <p>=<e>    passed through to spec-run  (repeatable)
   --stop-after <p>    passed through to spec-run
   --with <p[,p]>      passed through to spec-run
+  --add-dir <path>    passed through to spec-run (repeatable)
+  --from-doc <path>   with `plan`: read an EXISTING roadmap document and turn the
+                      sequence its author already decided into entries, instead of
+                      decomposing a goal from scratch
   --version              print the version and where this copy is installed
   -h, --help
 
@@ -68,16 +72,19 @@ case "$CMD" in
   *) err "unknown command: $CMD"; usage >&2; exit 3;;
 esac
 
-REPO=""; BASE=""; BASE_HOW=""; SLUG=""; GOAL=""; BUDGET=""; DRY_RUN=0
+REPO=""; BASE=""; BASE_HOW=""; SLUG=""; GOAL=""; BUDGET=""; DRY_RUN=0; FROM_DOC=""
+declare -a ADD_DIRS=()
 declare -a PASSTHROUGH=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --repo)        REPO="${2:-}"; shift 2 || exit 3;;
     --base)        BASE="${2:-}"; shift 2 || exit 3;;
     --slug)        SLUG="${2:-}"; shift 2 || exit 3;;
+    --from-doc)    FROM_DOC="${2:-}"; shift 2 || exit 3;;
     --budget)      BUDGET="${2:-}"; shift 2 || exit 3;;
     --dry-run)     DRY_RUN=1; shift;;
     --model|--effort)      PASSTHROUGH+=("$1" "${2:-}"); shift 2 || exit 3;;
+    --add-dir)             PASSTHROUGH+=("$1" "${2:-}"); ADD_DIRS+=("${2:-}"); shift 2 || exit 3;;
     --stop-after|--with)   PASSTHROUGH+=("$1" "${2:-}"); shift 2 || exit 3;;
     -h|--help)     usage; exit 0;;
     --version)     pipeline_version "${REPO:-}"; exit 0;;
@@ -146,15 +153,38 @@ fi
 
 # ------------------------------------------------------------------ plan ------
 if [ "$CMD" = plan ]; then
-  [ -n "$GOAL" ] || die "no goal given" \
-    "spec-roadmap plan \"the larger thing you want built\""
+  if [ -n "$FROM_DOC" ]; then
+    [ -f "$FROM_DOC" ] || die_usage "no such roadmap document: $FROM_DOC"
+    FROM_DOC=$(cd -- "$(dirname -- "$FROM_DOC")" && pwd)/$(basename -- "$FROM_DOC")
+    # The doc must be inside the repo, because the specify phase will be told to
+    # read it and a phase cannot read what is not there.
+    case "$FROM_DOC" in
+      "$REPO"/*) ;;
+      *) die_usage "the roadmap document is outside the repository" \
+           "the specify phase reads it from the repo, so it has to live in $REPO";;
+    esac
+  else
+    [ -n "$GOAL" ] || die "no goal given" \
+      "spec-roadmap plan \"the larger thing you want built\"   (or --from-doc <path>)"
+  fi
   if [ -z "$SLUG" ]; then
-    SLUG=$(printf '%s' "$GOAL" | tr '[:upper:]' '[:lower:]' |
-           tr -cs 'a-z0-9' '-' | cut -c1-40 | sed 's/^-//;s/-$//')
+    if [ -n "$FROM_DOC" ]; then
+      # A doc has a name already; using it keeps the roadmap and the document that
+      # defines it findable from each other.
+      # Named after the document, exactly. An earlier version tried to strip a
+      # "-roadmap" suffix and could not: `tr` turns basename's trailing newline
+      # into a dash, so the string ended "-roadmap-" and the anchored substitution
+      # never matched. Matching the doc name is also just more predictable.
+      SLUG=$(basename "$FROM_DOC" .md | tr '[:upper:]' '[:lower:]' |
+             tr -cs 'a-z0-9' '-' | sed 's/-*$//;s/^-*//' | cut -c1-40)
+    else
+      SLUG=$(printf '%s' "$GOAL" | tr '[:upper:]' '[:lower:]' |
+             tr -cs 'a-z0-9' '-' | cut -c1-40 | sed 's/^-//;s/-$//')
+    fi
     # A goal made entirely of punctuation derives to nothing, and an empty slug
     # would name the file ".json".
-    valid_slug "$SLUG" || die_usage "could not derive a roadmap name from that goal" \
-      "pass one: spec-roadmap plan --slug <name> \"...\""
+    valid_slug "$SLUG" || die_usage "could not derive a roadmap name" \
+      "pass one: spec-roadmap plan --slug <name> ..."
   fi
   RM=$(roadmap_file "$REPO" "$SLUG")
   [ -e "$RM" ] && die "a roadmap already exists at ${RM#"$REPO"/}" \
@@ -165,7 +195,59 @@ if [ "$CMD" = plan ]; then
   effort=$(jqd "$SPECKIT_PIPELINE_ROOT/lib/phases.json" '.phases[0].effort' high)
   bin="${SPEC_RUN_CLAUDE_BIN:-$(jqd "$SPECKIT_PIPELINE_ROOT/lib/phases.json" '.defaults.claude_bin' claude)}"
 
-  prompt=$(cat <<EOF
+  if [ -n "$FROM_DOC" ]; then
+    doc_rel=${FROM_DOC#"$REPO"/}
+    prompt=$(cat <<EOF
+Read the roadmap document at $doc_rel and TRANSCRIBE the spec sequence its author
+already decided into $RM as JSON.
+
+You are not designing the split. A human designed it, in that document, with
+reasons. Your job is to make it machine-readable without changing it.
+
+Rules, in order of importance:
+
+1. ONE ENTRY PER SPEC IN THE DOCUMENT, in the document's order. Do not merge two,
+   do not split one, do not add one the author did not write, do not drop one you
+   think is unnecessary. If the document numbers them, keep that numbering in the
+   titles so the two can be read side by side.
+2. Each "description" is what a later process hands VERBATIM to the specify phase,
+   and that phase will not have read the rest of the document. So each one must
+   carry, in its own words:
+     * what the entry itself says, including any testing requirements the author
+       attached to it;
+     * an instruction to read $doc_rel in full before specifying — naming the
+       sections that constrain it (decisions, constraints, data model, lessons, or
+       whatever that document actually calls them);
+     * what the entry must NOT take on, naming the later entry that owns it, where
+       the author says so.
+   Inline the substance and point at the document for the rest. A description that
+   only says "implement step 3" is useless; one that reproduces 300 lines is worse.
+3. "rationale" is the author's reason for the position, if they gave one. If they
+   did not, say so plainly rather than inventing one.
+4. Where the document contradicts itself, or an entry has no clear boundary,
+   say so in your final message instead of choosing for the author.
+
+Write exactly this shape:
+
+{
+  "goal": "<the document's own one-sentence framing>",
+  "base": "$BASE",
+  "source_doc": "$doc_rel",
+  "entries": [
+    { "slug": "short-kebab-name", "title": "...", "description": "...", "rationale": "..." }
+  ]
+}
+
+Write the file, then say how many entries you transcribed and list their slugs, so
+a human can check the count against the document. Do not create branches, do not
+run any other phase, and do not begin implementing anything.
+
+Finish your final message with:
+STATUS: ok | needs_input | failed — <one sentence>
+EOF
+)
+  else
+    prompt=$(cat <<EOF
 Decompose this into an ORDERED series of specs, and write the result to
 $RM as JSON.
 
@@ -215,18 +297,27 @@ Finish your final message with:
 STATUS: ok | needs_input | failed — <one sentence>
 EOF
 )
+  fi
 
-  info "planning roadmap '$SLUG' — $model/$effort"
+  if [ -n "$FROM_DOC" ]; then
+    info "transcribing ${FROM_DOC#"$REPO"/} into roadmap '$SLUG' — $model/$effort"
+  else
+    info "planning roadmap '$SLUG' — $model/$effort"
+  fi
   if [ "$DRY_RUN" -eq 1 ]; then
     say "  would write: ${RM#"$REPO"/}"
     printf '  %s -p <decomposition prompt> --model %s --effort %s\n' "$bin" "$model" "$effort"
     exit 0
   fi
 
+  declare -a plan_extra=()
+  if [ "${#ADD_DIRS[@]}" -gt 0 ]; then
+    for _ad in "${ADD_DIRS[@]}"; do [ -n "$_ad" ] && plan_extra+=(--add-dir "$_ad"); done
+  fi
   errf=$(mktemp)
   out=$( cd "$REPO" && "$bin" -p "$prompt" --model "$model" --effort "$effort" \
            --output-format json --permission-mode acceptEdits \
-           --session-id "$(new_uuid)" \
+           --session-id "$(new_uuid)" "${plan_extra[@]+"${plan_extra[@]}"}" \
            --disallowed-tools "Bash(git push:*),Bash(gh pr merge:*),Bash(git checkout:*),Bash(git commit:*)" \
            2>"$errf" ); rc=$?
   json=$(extract_json "$out") || json=""

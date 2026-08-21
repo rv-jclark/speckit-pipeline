@@ -11,8 +11,15 @@ set -uo pipefail
 
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 PKG="$ROOT/plugins/speckit-pipeline"
+# Every tool path up here with the others. Defining one partway down the file
+# makes it unbound for anything inserted above it, and with `set -u` that fails a
+# whole block of assertions in a way that looks like a product bug. This has now
+# bitten twice: mkbare, then SPEC_ROADMAP.
 SPEC_RUN="$PKG/bin/spec-run"
 SPEC_BOOTSTRAP="$PKG/bin/spec-bootstrap"
+SPEC_STATUS="$PKG/bin/spec-status"
+SPEC_ROADMAP="$PKG/bin/spec-roadmap"
+SPEC_UPGRADE="$PKG/bin/spec-upgrade"
 
 pass=0; fail=0; skipped=0
 
@@ -832,7 +839,6 @@ assert_contains "$out" "/speckit-tasks" "--from tasks starts where it says"
 
 # =================================================================== spec-status
 printf '\nspec-status\n'
-SPEC_STATUS="$PKG/bin/spec-status"
 ST_REPO="$WORK/statusrepo"; mkbare "$ST_REPO" main
 "$SPEC_BOOTSTRAP" "$ST_REPO" >/dev/null 2>&1
 
@@ -903,7 +909,6 @@ assert_eq "$rc" "1" "a directory that is not a git repo exits 1"
 
 # =================================================================== spec-upgrade
 printf '\nspec-upgrade\n'
-SPEC_UPGRADE="$PKG/bin/spec-upgrade"
 
 # A project on an older scaffold. Built by hand rather than bootstrapped, so the
 # "older" files are genuinely different from the vendored ones.
@@ -1030,11 +1035,67 @@ out=$("$SPEC_UPGRADE" --nonsense 2>&1); assert_eq "$?" "3" "an unknown option ex
 out=$("$SPEC_UPGRADE" --scan "$WORK/does-not-exist" 2>&1); rc=$?
 assert_eq "$rc" "1" "--scan on a missing directory fails"
 
+# ------------------------------------------------------ reading outside the repo
+printf '\n--add-dir\n'
+# A git worktree has no copy of a gitignored sibling checkout, so grounding a spec
+# in code that lives elsewhere needs read access outside the repository. The write
+# scope is unchanged and still checked afterwards: this widens what a phase may
+# LOOK at, not what it may leave behind.
+EXTRA="$WORK/elsewhere"; mkdir -p "$EXTRA"
+argv=$("$SPEC_RUN" --repo "$BS" --feature-dir "$BS/specs/001-t" --only specify \
+        --add-dir "$EXTRA" --dry-run 2>&1)
+assert_contains "$(unquote "$argv")" "--add-dir $EXTRA" "--add-dir reaches the phase invocation"
+argv=$("$SPEC_RUN" --repo "$BS" --feature-dir "$BS/specs/001-t" --only specify \
+        --add-dir "$EXTRA" --add-dir "$WORK" --dry-run 2>&1)
+n_add=$(printf '%s\n' "$(unquote "$argv")" | LC_ALL=C grep -o -- '--add-dir' | grep -c . || true)
+assert_eq "$n_add" "2" "and it is repeatable"
+
+out=$("$SPEC_RUN" --repo "$BS" --feature-dir "$BS/specs/001-t" --only specify \
+        --add-dir "$WORK/nope" --dry-run 2>&1); rc=$?
+assert_eq "$rc" "3" "a directory that does not exist is a usage error"
+assert_contains "$out" "not a directory" "named, before any spend"
+# Silently useless otherwise: the phase starts, cannot see what it was told to
+# read, and produces a spec grounded in nothing.
+
+printf '\nroadmap: --from-doc\n'
+# A roadmap document a human already wrote is better input than a decomposition:
+# it encodes decisions and constraints no from-scratch split would reproduce. The
+# JSON is a projection of that document, not a replacement for it.
+DOCR="$WORK/docroadmap"; mkbare "$DOCR" main
+"$SPEC_BOOTSTRAP" "$DOCR" >/dev/null 2>&1
+mkdir -p "$DOCR/docs/proposals"
+printf '# A plan\n\n## Spec sequence\n\n1. **first thing.**\n2. **second thing.**\n' \
+  > "$DOCR/docs/proposals/my-thing-roadmap.md"
+
+out=$("$SPEC_ROADMAP" plan --repo "$DOCR" --from-doc "$DOCR/docs/proposals/my-thing-roadmap.md" \
+        --dry-run 2>&1); rc=$?
+assert_eq "$rc" "0" "--from-doc dry-runs cleanly"
+assert_contains "$out" "transcribing" "and says it is transcribing, not decomposing"
+assert_contains "$out" "my-thing-roadmap" "naming the roadmap after the document"
+# Named after the doc exactly, so the two stay findable from each other. An
+# earlier version tried to strip a "-roadmap" suffix and could not: tr turns
+# basename's trailing newline into a dash, so the anchored substitution never
+# matched.
+
+out=$("$SPEC_ROADMAP" plan --repo "$DOCR" --from-doc "$DOCR/nope.md" --dry-run 2>&1); rc=$?
+assert_eq "$rc" "3" "a document that does not exist is a usage error"
+assert_contains "$out" "no such roadmap document" "saying which"
+
+printf 'outside\n' > "$WORK/outside-roadmap.md"
+out=$("$SPEC_ROADMAP" plan --repo "$DOCR" --from-doc "$WORK/outside-roadmap.md" --dry-run 2>&1); rc=$?
+assert_eq "$rc" "3" "a document outside the repository is refused"
+assert_contains "$out" "outside the repository" "because the specify phase reads it FROM the repo"
+# Each entry's description tells the phase to read that document. A path the phase
+# cannot reach makes every entry reference something invisible.
+
+out=$("$SPEC_ROADMAP" plan --repo "$DOCR" --dry-run 2>&1); rc=$?
+assert_eq "$rc" "1" "plan with neither a goal nor a document still fails"
+assert_contains "$out" "no goal given" "mentioning both ways in"
+
 # ==================================================================== roadmap =
 printf '\nroadmap: has this entry landed?\n'
 # shellcheck source=../plugins/speckit-pipeline/lib/roadmap.sh
 . "$PKG/lib/roadmap.sh"
-SPEC_ROADMAP="$PKG/bin/spec-roadmap"
 
 # A repo with a real base branch and a real feature, so the landed checks run
 # against git rather than a mock of it.

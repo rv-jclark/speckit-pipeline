@@ -47,6 +47,11 @@ USAGE
 
 OPTIONS
   --repo <path>          repository root (default: git toplevel of cwd)
+  --add-dir <path>       grant every phase READ access to a directory outside the
+                         repository (repeatable). A git worktree has no copy of a
+                         gitignored sibling checkout, so grounding a spec in code
+                         that lives elsewhere needs this; the phase still only
+                         WRITES inside its declared scope.
   --claude-bin <cmd>     executable to run each phase with, instead of `claude`.
                          Also settable as SPEC_RUN_CLAUDE_BIN, or claude_bin in
                          phases.json. Use it for a wrapper that handles your
@@ -85,6 +90,7 @@ EOF
 # ----------------------------------------------------------------- args -------
 
 REPO=""; FEATURE_DIR=""; DESCRIPTION=""; CLAUDE_BIN="${SPEC_RUN_CLAUDE_BIN:-}"
+declare -a ADD_DIRS=()
 FROM=""; STOP_AFTER=""; WITH=""; ONLY=""; GATE_OVERRIDE=""
 BUDGET=""; FORCE=0; DRY_RUN=0; LIST=0
 declare -a MODEL_OVERRIDES=() EFFORT_OVERRIDES=()
@@ -92,6 +98,7 @@ declare -a MODEL_OVERRIDES=() EFFORT_OVERRIDES=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --repo)         REPO="${2:-}"; shift 2 || exit 3;;
+    --add-dir)      ADD_DIRS+=("${2:-}"); shift 2 || exit 3;;
     --claude-bin)   CLAUDE_BIN="${2:-}"; shift 2 || exit 3;;
     --feature-dir)  FEATURE_DIR="${2:-}"; shift 2 || exit 3;;
     --config)       CONFIG="${2:-}"; shift 2 || exit 3;;
@@ -140,6 +147,15 @@ REPO=$(cd -- "$REPO" && pwd)
 export SPEC_RUN_CLAUDE_BIN="$CLAUDE_BIN"
 
 preflight "$REPO" || exit 1
+
+# A --add-dir that does not exist is silently useless: the phase starts, cannot
+# see what it was told to read, and produces a spec grounded in nothing.
+if [ "${#ADD_DIRS[@]}" -gt 0 ]; then
+  for _ad in "${ADD_DIRS[@]}"; do
+    [ -n "$_ad" ] || continue
+    [ -d "$_ad" ] || die_usage "--add-dir is not a directory: $_ad"
+  done
+fi
 
 # Check the runner exists and runs, before the first phase is billed for
 # anything. Flag support is NOT probed — see lib/common.sh for why the probe that
@@ -424,6 +440,14 @@ run_phase() { # run_phase <phase_json>
   [ -n "$maxt" ] && argv+=(--max-turns "$maxt")
   [ -n "$maxb" ] && argv+=(--max-budget-usd "$maxb")
   [ -n "$deny" ] && argv+=(--disallowed-tools "$deny")
+  # Read access outside the repository. The write scope is unchanged and still
+  # checked after the phase, so this widens what a phase can LOOK at without
+  # widening what it may leave behind.
+  if [ "${#ADD_DIRS[@]}" -gt 0 ]; then
+    for _ad in "${ADD_DIRS[@]}"; do
+      [ -n "$_ad" ] && argv+=(--add-dir "$_ad")
+    done
+  fi
   # A phase that talks to nothing external should not pay for a tool list it
   # cannot use; one that drives a browser or an API must keep it.
   if [ "$mcp" = none ]; then argv+=(--strict-mcp-config --mcp-config '{"mcpServers":{}}'); fi
