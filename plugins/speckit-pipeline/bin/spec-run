@@ -520,7 +520,7 @@ run_phase() { # run_phase <phase_json>
   if [ "$STREAM" -eq 1 ]; then
     # The filter writes its condensed view to stderr and passes the stream
     # through, so this capture is unchanged and the progress appears live.
-    out=$( cd "$REPO" && "${argv[@]}" 2>"$errf" </dev/null | stream_progress ); rc=$?
+    out=$( cd "$REPO" && "${argv[@]}" 2>"$errf" </dev/null | stream_progress "$REPO" ); rc=$?
   else
     out=$( cd "$REPO" && "${argv[@]}" 2>"$errf" </dev/null ); rc=$?
   fi

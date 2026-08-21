@@ -72,6 +72,8 @@ mkbare() { # mkbare <path> <branch>
 . "$PKG/lib/common.sh"
 # shellcheck source=../plugins/speckit-pipeline/lib/verify.sh
 . "$PKG/lib/verify.sh"
+# shellcheck source=../plugins/speckit-pipeline/lib/roadmap.sh
+. "$PKG/lib/roadmap.sh"
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/speckit-pipeline-tests.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
@@ -174,6 +176,32 @@ esac
 # --disallowed-tools still applies under bypassPermissions, so pushing, merging
 # and deploying stay withheld. The invocation assertions below check the deny list
 # is still passed; this one checks the mode does not make the phases useless.
+
+# ------------------------------------------------------- suite hygiene ---------
+printf '\nsuite hygiene\n'
+# Library sourcing must ALL happen above the first assertion. This has now cost
+# four debugging sessions — `mkbare`, `SPEC_ROADMAP`, `jqd`, and most recently
+# `roadmap_state_init`, where the missing helper left the state file unseeded and
+# an assertion PASSED anyway: the run exited 1 for an unrelated reason and the
+# "budget stops the run" tick was reading that. A sourcing line below the first
+# assert is invisible to review and produces a false pass, not an error.
+#
+# Watch the primitive (`. "$PKG/lib/...`), not any one library name, so adding a
+# fifth library is covered without touching this guard.
+# Both scans are single awk passes on purpose. `grep ... | head -1` SIGPIPEs its
+# writer, and under `pipefail` that reports failure despite a match — the trap
+# this repo has already documented twice. And the pattern must match a CALL, not
+# a definition: `assert_eq() {` has no space before its paren, so requiring one
+# after the name skips the harness's own three definitions. Without that, the
+# first "assertion" is line 41 and every real sourcing line reads as late.
+first_assert=$(awk '/^[[:space:]]*assert_[a-z_]+[[:space:]]/{print NR; exit}' "$0")
+late_src=$(awk -v f="${first_assert:-0}" '
+  NR > f && /^[[:space:]]*(\.|source)[[:space:]]/ && index($0, "$PKG/lib/") \
+    { printf "%s ", NR }' "$0")
+late_src=${late_src% }
+assert_eq "${late_src:-none}" "none" \
+  "every library is sourced before the first assertion"
+[ -n "$late_src" ] && printf '      sourced late at line(s): %s\n' "$late_src"
 
 # ------------------------------------------------------- documented commands ---
 # Every `spec-*` command the README tells someone to type must exist and be
@@ -1068,6 +1096,57 @@ out=$("$SPEC_UPGRADE" --nonsense 2>&1); assert_eq "$?" "3" "an unknown option ex
 out=$("$SPEC_UPGRADE" --scan "$WORK/does-not-exist" 2>&1); rc=$?
 assert_eq "$rc" "1" "--scan on a missing directory fails"
 
+# ------------------------------------------------------- the progress filter ----
+printf '\nstream_progress\n'
+# What the filter shows is the only live view of a phase, and the first version
+# was unreadable for the case that matters most. Both defects came from watching a
+# real run, not from review.
+ev() { printf '%s\n' "$1" | stream_progress "${2:-}" >/dev/null; }
+
+# 1. the Skill tool's argument is named `skill`, so every line read "· Skill "
+sk=$(printf '%s' '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Skill","input":{"skill":"speckit-plan"}}]}}' \
+     | stream_progress 2>&1 >/dev/null)
+assert_contains "$sk" "Skill speckit-plan" "a Skill call names the skill it invoked"
+
+# 2. strip the repo prefix BEFORE truncating, and keep the tail
+long='{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Edit","input":{"file_path":"/repo/services/blueprint/app/orgs/[podSlug]/scorecard-dashboards/team-cards/TeamCardsSummary.tsx"}}]}}'
+out=$(printf '%s' "$long" | stream_progress /repo 2>&1 >/dev/null)
+assert_contains "$out" "TeamCardsSummary.tsx" "a long path keeps its FILENAME"
+assert_not_contains "$out" "/repo/" "with the repo prefix stripped"
+# Truncating first left every line reading ".../worktrees/<name>/services/bluepri"
+# — identical for every file, filename always cut. And no downstream sed can
+# recover it, because the loss happens here.
+
+out=$(printf '%s' "$long" | stream_progress 2>&1 >/dev/null)
+assert_contains "$out" "TeamCardsSummary.tsx" "and keeps it even with no repo root to strip"
+
+# 3. the stream is passed through unchanged, or the caller loses its metrics
+through=$(printf '%s\n%s\n' '{"type":"assistant","message":{"content":[]}}' '{"type":"result","num_turns":3,"total_cost_usd":0.5}' | stream_progress 2>/dev/null)
+assert_contains "$(extract_json "$through")" '"num_turns":3' "the result event survives the filter"
+
+printf '\nroadmap: a budget that cannot be forgotten\n'
+# A ceiling passed only on the command line is one somebody forgets, and a
+# forgotten ceiling is silently unlimited.
+BR2="$WORK/budgetfile"; mkbare "$BR2" main
+"$SPEC_BOOTSTRAP" "$BR2" >/dev/null 2>&1
+git -C "$BR2" add -A >/dev/null 2>&1; git -C "$BR2" commit -qm bootstrap
+mkdir -p "$BR2/.specify/roadmaps"
+printf '{"goal":"g","base":"main","budget_usd":4,"entries":[{"slug":"one","title":"t","description":"d"},{"slug":"two","title":"t2","description":"d2"}]}\n' \
+  > "$BR2/.specify/roadmaps/rm.json"
+BRST2="$BR2/.specify/roadmaps/rm.state.json"
+roadmap_state_init "$BRST2" ".specify/roadmaps/rm.json" rm main
+roadmap_entry_set "$BRST2" one '{"status":"done","cost_usd":9}'
+out=$(SPEC_RUN_CLAUDE_BIN=claude-pipeline "$SPEC_ROADMAP" run --repo "$BR2" --slug rm --base main 2>&1); rc=$?
+assert_eq "$rc" "1" "budget_usd in the roadmap file stops the run with no --budget flag"
+assert_contains "$out" 'budget of $4' "using the file's value"
+
+out=$(SPEC_RUN_CLAUDE_BIN=claude-pipeline "$SPEC_ROADMAP" run --repo "$BR2" --slug rm --base main \
+        --budget 100 --dry-run 2>&1); rc=$?
+assert_eq "$rc" "0" "--budget overrides the file for a single run"
+# The bound is documented rather than fixed: this is checked BEFORE each entry, so
+# it caps how many entries start, not what one entry spends. The per-phase
+# ceilings are the only mid-flight stop, and they total $58 for one entry.
+
 # ------------------------------------------------------ reading outside the repo
 printf '\n--add-dir\n'
 # A git worktree has no copy of a gitignored sibling checkout, so grounding a spec
@@ -1127,8 +1206,6 @@ assert_contains "$out" "no goal given" "mentioning both ways in"
 
 # ==================================================================== roadmap =
 printf '\nroadmap: has this entry landed?\n'
-# shellcheck source=../plugins/speckit-pipeline/lib/roadmap.sh
-. "$PKG/lib/roadmap.sh"
 
 # A repo with a real base branch and a real feature, so the landed checks run
 # against git rather than a mock of it.

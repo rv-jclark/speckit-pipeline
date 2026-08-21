@@ -79,25 +79,41 @@ pipeline_version() {
 # condensed view to STDERR, so capturing stdout with $(...) still works and the
 # progress is visible while it happens.
 
-stream_progress() { # reads the event stream on stdin
-  local line kind
-  while IFS= read -r line; do
+stream_progress() { # reads the event stream on stdin; $1 = repo root to strip
+  local line kind repo="${1:-}"
+  # `|| [ -n "$line" ]` handles a final line with no trailing newline. Claude's
+  # stream is newline-terminated, so this looks redundant — but a phase killed
+  # mid-write leaves a partial last line, and that is the one worth showing.
+  while IFS= read -r line || [ -n "$line" ]; do
     printf '%s\n' "$line"
-    # Only assistant events can carry tool calls; skipping the rest keeps this
-    # from spawning a jq per token.
     case "$line" in
       *'"tool_use"'*) ;;
       *'"type":"result"'*) ;;
       *) continue;;
     esac
-    kind=$(printf '%s' "$line" | jq -r '
+    # Three corrections over the first version, all from watching a real run:
+    #
+    #  * `.input.skill` — the Skill tool's argument is named `skill`, so every
+    #    line read "· Skill " with nothing after it.
+    #  * strip the repo prefix BEFORE truncating. Absolute paths in a worktree
+    #    are ~70 characters of prefix, so truncating first left every line
+    #    reading ".../worktrees/scorecard-entries/services/bluepri" — the same
+    #    text for every file, with the filename always cut off. Sed-ing the
+    #    output afterwards cannot recover it; the loss happens here.
+    #  * keep the TAIL when a value is still too long. For a path the
+    #    interesting part is the end.
+    kind=$(printf '%s' "$line" | jq -r --arg repo "$repo" '
+      def shorten:
+        tostring
+        | if ($repo != "" and startswith($repo + "/")) then .[($repo|length + 1):] else . end
+        | if (length > 76) then "…" + .[-75:] else . end;
       if .type == "result" then
         "      \(if .is_error then "!" else "·" end) done: \(.num_turns) turns, $\(.total_cost_usd // 0)"
       else
         [ (.message.content // [])[] | select(.type == "tool_use") |
           "      · \(.name) \(
-             ( .input.file_path // .input.pattern // .input.command // .input.path
-               // .input.description // "" ) | tostring | .[0:78] )"
+             ( .input.skill // .input.file_path // .input.pattern // .input.command
+               // .input.path // .input.description // "" ) | shorten )"
         ] | join("\n")
       end' 2>/dev/null) || kind=""
     [ -n "$kind" ] && printf '%s%s%s\n' "$_c_dim" "$kind" "$_c_reset" >&2

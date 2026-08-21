@@ -40,7 +40,10 @@ OPTIONS
                       origin/HEAD, then the remotes, then local main/master/trunk
                       — the run prints which, so a wrong guess is visible
   --slug <name>       roadmap name; with `plan`, names the new file
-  --budget <usd>      ceiling across the whole roadmap
+  --budget <usd>      ceiling for THIS run; overrides `budget_usd` in the roadmap
+                      file. Checked before each entry starts, so it bounds how
+                      many entries run rather than what one entry spends — the
+                      per-phase ceilings do that
   --dry-run           print what would happen, run nothing
   --model <p>=<m>     passed through to spec-run  (repeatable)
   --effort <p>=<e>    passed through to spec-run  (repeatable)
@@ -235,6 +238,7 @@ Write exactly this shape:
   "goal": "<the document's own one-sentence framing>",
   "base": "$BASE",
   "source_doc": "$doc_rel",
+  "budget_usd": null,
   "entries": [
     { "slug": "short-kebab-name", "title": "...", "description": "...", "rationale": "..." }
   ]
@@ -352,6 +356,11 @@ RM=$(roadmap_file "$REPO" "$SLUG")
 if ! reason=$(roadmap_validate "$RM"); then die "$reason"; fi
 ST=$(roadmap_state "$REPO" "$SLUG")
 BASE=$(jqd "$RM" '.base' "$BASE")
+# A ceiling passed only on the command line is one somebody forgets, and a
+# forgotten ceiling is silently unlimited — the shape this tool is meant to
+# dislike. So the roadmap file may declare `budget_usd`; --budget overrides it
+# for a single run.
+[ -z "$BUDGET" ] && BUDGET=$(jqd "$RM" '.budget_usd' "")
 roadmap_state_init "$ST" "${RM#"$REPO"/}" "$SLUG" "$BASE"
 
 if [ "$CMD" = show ]; then
@@ -585,6 +594,10 @@ while [ "$ei" -lt "$n_entries" ]; do
   roadmap_entry_set "$ST" "$slug" '{"status":"in_progress"}'
 
   if [ -n "$BUDGET" ]; then
+    # ⚠️ This bounds how many ENTRIES start, not what one entry spends: it runs
+    # before each entry, and the per-phase max_budget_usd values are the only
+    # thing that stops a phase mid-flight. With the shipped phases that is $58
+    # for a single entry, which can exceed a smaller roadmap budget.
     spent=$(jq -r '[.entries[].cost_usd // 0] | add // 0' "$ST")
     if awk -v s="$spent" -v b="$BUDGET" 'BEGIN{exit !(s >= b)}'; then
       err "roadmap budget of \$$BUDGET reached (\$$spent spent) before '$slug'"
