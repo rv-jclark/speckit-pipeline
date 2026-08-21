@@ -1,0 +1,20 @@
+speckit-pipeline
+Copyright (c) 2026 Jamie Clark
+
+This product includes software vendored from github/spec-kit
+(https://github.com/github/spec-kit), which is licensed under the MIT License
+and remains under its own upstream copyright.
+
+The vendored files are everything under plugins/speckit-pipeline/assets/ — the
+spec-kit skills and the .specify scaffold (scripts, templates, extensions). See
+plugins/speckit-pipeline/assets/UPSTREAM.md for the pinned version, what was
+copied, what was deliberately not copied, and the two recorded deviations.
+
+Everything outside that directory — the engine (bin/, lib/), the plugin
+manifests and commands, and the test suite — is original to this repository and
+covered by the LICENSE file.
+
+This note lives here rather than appended to LICENSE because appending to it
+defeats GitHub's licence detection: the repository reported "no licence
+detected" while containing a complete MIT grant, and a licence that tooling
+cannot see is one some consumers will treat as absent.
