@@ -48,6 +48,21 @@ detect_base() { # detect_base <repo>  -> prints "<ref>\t<how>"
   printf '\tno branch could be identified\n'; return 1
 }
 
+# A slug is interpolated into a file path, so it may not BE a path. `--slug
+# ../../etc/passwd` resolved to .specify/roadmaps/../../etc/passwd.json, which is
+# sloppy rather than dangerous — the caller already owns the machine — but a name
+# that escapes its directory is never what anyone meant, and the auto-derived
+# form is already restricted to this same character set.
+valid_slug() { # valid_slug <slug>
+  case "$1" in
+    ""|*/*|*..*) return 1;;
+    *) case "$1" in
+         [a-z0-9]*) printf '%s' "$1" | grep -qE '^[a-z0-9][a-z0-9._-]*$' && return 0 || return 1;;
+         *) return 1;;
+       esac;;
+  esac
+}
+
 roadmap_dir()  { printf '%s/.specify/roadmaps\n' "$1"; }
 roadmap_file() { printf '%s/.specify/roadmaps/%s.json\n' "$1" "$2"; }
 roadmap_state(){ printf '%s/.specify/roadmaps/%s.state.json\n' "$1" "$2"; }
@@ -62,6 +77,16 @@ roadmap_validate() { # roadmap_validate <file>  -> prints reason and returns 1 o
   local f="$1"
   [ -f "$f" ] || { printf 'no such roadmap file: %s\n' "$f"; return 1; }
   jq -e . "$f" >/dev/null 2>&1 || { printf 'not valid JSON: %s\n' "$f"; return 1; }
+
+  # An ARRAY, specifically. `jq '.entries | length'` counts an object's keys too,
+  # so an object here validated cleanly and then failed at run time: the runner
+  # reads `.entries[$i]` by index, which is null for an object. Order is the whole
+  # point of a roadmap, and an object does not have one.
+  if ! jq -e '(.entries | type) == "array"' "$f" >/dev/null 2>&1; then
+    printf 'entries must be a JSON array (it is %s) — a roadmap is ordered, and an object is not\n' \
+      "$(jq -r '.entries | type' "$f" 2>/dev/null || echo missing)"
+    return 1
+  fi
 
   local n
   n=$(jq -r '(.entries // []) | length' "$f")

@@ -332,6 +332,21 @@ contain this one, producing a spec built on a false premise. One asymmetry is
 deliberate: a *stale* ref that says **landed** is still trusted, because merging
 does not un-happen — only the negative is unsafe to read from a stale ref.
 
+### Exit codes
+
+`spec-roadmap` uses the same convention as `spec-run`, so a wrapper script can
+treat them alike:
+
+| Code | Meaning |
+|---|---|
+| 0 | every entry has landed on the base |
+| 1 | an entry failed, or a prerequisite is missing |
+| 2 | waiting on you — a merge, a gate, or a question |
+| 3 | usage error |
+
+A `2` is the normal resting state of a healthy roadmap: it means the runner has
+done its part and the next move is a human's.
+
 ### Safety
 
 - **A dirty working tree stops the run** before any branch switch, naming the
@@ -620,7 +635,7 @@ reports success over a directory the rest of the pipeline cannot find.
 ## Tests
 
 ```bash
-./tests/run.sh          # shellcheck + 233 fixture assertions
+./tests/run.sh          # shellcheck + 250 fixture assertions
 ```
 
 **The suite is hermetic.** A stub runner shadows the real `claude` for the whole
@@ -692,15 +707,58 @@ mutation-verified: restoring the stream-fed loop makes the assertion report
 
 ## What it cost, measured
 
-Real numbers from the smoke feature (a `--version` flag on a one-file CLI), with
-both phases **overridden to sonnet** — so read them as a floor, not as what the
+A complete roadmap entry — spec through working code — on a small Python CLI,
+with every phase **overridden to sonnet**. Read these as a floor, not as what the
 configured opus defaults cost:
 
-| Phase | Model | Turns | Cost | Wall clock |
-|---|---|---|---|---|
-| specify | sonnet | 15 | $0.62 | 75s |
-| plan | sonnet | 18 | $0.31 | 70s |
+| Phase | Turns | Cost | Output |
+|---|---|---|---|
+| specify | 14 | $0.70 | `spec.md`, 11KB, plus a requirements checklist |
+| plan | 30 | $0.88 | `plan.md`, `research.md`, `data-model.md`, `contracts/` |
+| tasks | 15 | $0.50 | 18 tasks |
+| implement | 30 | $0.95 | all 18 checked off; the CLI went 7 → 85 lines and runs |
+| **total** | **89** | **$3.03** | then stopped at the merge gate |
 
-Every run appends to `specs/<feature>/.pipeline/cost.log`, so the answer to "is
-opus on plan worth it" is measurable in your repo rather than arguable. Attempts
-that could not be measured are recorded `unmeasured`, never as `$0`.
+Separately, decomposing a goal into a 3-entry roadmap cost **$0.75** on
+opus/high.
+
+Every run appends to `specs/<feature>/.pipeline/cost.log`, so "is opus on plan
+worth it" is measurable in your repo rather than arguable. Attempts that could
+not be measured are recorded `unmeasured`, never as `$0`.
+
+## Tests, and what they cost to run
+
+```bash
+./tests/run.sh          # shellcheck + 250 assertions, ~70 seconds
+```
+
+Hermetic: a stub runner shadows the real `claude` for the whole run, so nothing
+spends money, nothing needs a login, and the result is identical on a laptop and
+in CI. The suite asserts that property explicitly, because it is invisible on a
+machine where the real binary happens to be installed.
+
+Seven defects in this suite are worth knowing about, because every one of them
+passed while checking nothing:
+
+- two assertions matched `printf %q` **escaping** rather than content, and passed
+  against a build that denied pushing to every phase;
+- `verify.sh` was sourced without `common.sh`, so `file_sha` was missing, every
+  hash compared empty-to-empty, and two scope assertions passed because
+  *everything* looked changed;
+- `mapfile` is bash 4 and macOS ships **3.2**, so it failed silently and left an
+  array unbound, making the *next* assertion pass with fewer arguments than it
+  meant to check;
+- the harness named its counter `ok()`, which `common.sh` also defines, so the
+  library's definition won partway through and ~80 assertions printed ticks
+  without incrementing: **"9 passed, 0 failed"**, exit 0. Hence `TALLY_FLOOR`;
+- a scope assertion snapshotted the tree **after** the write it meant to detect,
+  so the check was correctly silent and the test failed against working code;
+- the status-vocabulary check read 2 of 5 statuses (JSON literals but not jq
+  object syntax) and duly reported nothing undeclared;
+- and a fake pipeline created a new feature directory on **every** phase, so
+  verification chased a moving target — a fixture bug whose output is
+  indistinguishable from a product bug.
+
+Every guard here carries a companion assertion that would fail if its extraction
+found nothing, because a check that matches nothing reports no problems, which
+reads exactly like success.

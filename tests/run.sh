@@ -873,6 +873,33 @@ RMEOF
 roadmap_validate "$RMD/good.json" >/dev/null 2>&1 \
   && t_pass "a well-formed roadmap validates" || t_fail "a well-formed roadmap validates"
 
+printf '{"goal":"g","entries":{"a":{"slug":"x","description":"y"}}}\n' > "$RMD/object.json"
+out=$(roadmap_validate "$RMD/object.json" 2>&1); rc=$?
+assert_eq "$rc" "1" "entries as an OBJECT is rejected"
+assert_contains "$out" "must be a JSON array" "because a roadmap is ordered and an object is not"
+# `jq '.entries | length'` counts an object's keys too, so this validated cleanly
+# and then failed at run time, where the runner reads .entries[$i] by index and
+# gets null. Mutation: drop the type check and this is ACCEPTED.
+
+printf '\nroadmap: a slug names a file\n'
+for bad in "../../etc/passwd" "a/b" "..hidden" "" "Upper" "-leading"; do
+  if valid_slug "$bad"; then
+    t_fail "the slug '$bad' is rejected" "it was accepted, and it names a path or a file"
+  else
+    t_pass "the slug '$(printf '%s' "${bad:-<empty>}")' is rejected"
+  fi
+done
+for good in "config-file" "v2.plan" "a" "roadmap_1"; do
+  valid_slug "$good" && t_pass "the slug '$good' is accepted" \
+    || t_fail "the slug '$good' is accepted" "a legitimate name was refused"
+done
+out=$("$SPEC_ROADMAP" show --repo "$RB" --slug "../../etc/passwd" 2>&1); rc=$?
+assert_eq "$rc" "3" "and the CLI refuses one as a usage error"
+assert_contains "$out" "not a usable roadmap name" "saying what is wrong with it"
+# `--slug ../../etc/passwd` resolved to .specify/roadmaps/../../etc/passwd.json.
+# Sloppy rather than dangerous — the caller owns the machine — but a name that
+# escapes its own directory is never what anybody meant.
+
 printf '\nroadmap: the CLI\n'
 out=$("$SPEC_ROADMAP" --help 2>&1); assert_eq "$?" "0" "--help exits 0"
 assert_contains "$out" "squash-merges" "the help states the merge-detection rule"
@@ -1068,6 +1095,24 @@ assert_eq "$n_specs" "1" "and does NOT create a second feature for the same entr
 # state slot that can only point at one of them. Reached by a Ctrl-C, a rolling
 # restart, a deleted state file, or a laptop lid.
 # Mutation: remove the resume_dir branch and n_specs becomes 2.
+
+# --- a resumed entry must tolerate its OWN uncommitted work
+printf '\nroadmap: resuming over uncommitted work\n'
+# An entry interrupted partway through implementation has modified tracked files
+# by definition. The tree checks guard a BRANCH SWITCH, and a resume does not
+# switch branches — so refusing here would block resume in exactly the situation
+# resume exists for.
+git -C "$IR" checkout -q 001-fake 2>/dev/null || true
+printf 'work in progress\n' >> "$IR/f"          # f is tracked
+roadmap_entry_set "$IRST" one '{"status":"in_progress"}'
+out=$(SPEC_RUN_CLAUDE_BIN=claude-pipeline "$SPEC_ROADMAP" run --repo "$IR" --slug rm --base main 2>&1); rc=$?
+assert_contains "$out" "resuming its existing feature" "a resume proceeds despite tracked modifications"
+assert_not_contains "$out" "uncommitted tracked changes" "and does not refuse over the entry's own work"
+[ -n "$(git -C "$IR" status --porcelain f)" ] && t_pass "the in-progress work is still there" \
+  || t_fail "the in-progress work survives" "it was reverted or committed"
+git -C "$IR" checkout -- f 2>/dev/null || true
+# Mutation: hoist the tree checks back above the resume decision and the first
+# two assertions fail — the run refuses instead of resuming.
 
 # ------------------------------------------------ roadmap: the gate releases ---
 printf '\nroadmap: the merge gate\n'

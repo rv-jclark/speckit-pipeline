@@ -49,6 +49,25 @@ jqd() { # jqd <file> <filter> <default>
   [ -n "$v" ] && [ "$v" != "null" ] && printf '%s\n' "$v" || printf '%s\n' "$3"
 }
 
+# --------------------------------------------------------------- version ------
+# Every tool can say what it is. The first thing anyone needs in a bug report is
+# which copy they are running, and with two install paths (a clone and a plugin
+# cache that a plugin update replaces) "the latest" is not an answer.
+pipeline_version() {
+  local m="$SPECKIT_PIPELINE_ROOT/.claude-plugin/plugin.json"
+  local v sk
+  v=$(jqd "$m" '.version' unknown)
+  sk=$(jqd "$m" '.metadata.speckit_version' unknown)
+  printf 'speckit-pipeline %s (vendored spec-kit %s)\n' "$v" "$sk"
+  printf 'installed at %s\n' "$SPECKIT_PIPELINE_ROOT"
+  # Which spec-kit the PROJECT has is a different fact from which one is
+  # vendored here, and only the first one runs.
+  if [ -n "${1:-}" ] && [ -f "$1/.specify/integration.json" ]; then
+    printf 'this project scaffolded with %s\n' \
+      "$(jqd "$1/.specify/integration.json" '.version' unknown)"
+  fi
+}
+
 # ------------------------------------------------------------- preflight ------
 # Check every prerequisite BEFORE spending a phase budget. A missing dependency
 # discovered three phases in has already cost real money; and a run that reaches

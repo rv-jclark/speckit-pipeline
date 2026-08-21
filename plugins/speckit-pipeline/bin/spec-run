@@ -67,6 +67,7 @@ OPTIONS
   --force                re-run phases already recorded ok
   --dry-run              print the exact claude invocations, run nothing
   --list                 print the configured phases and exit
+  --version              print the version and where this copy is installed
   -h, --help
 
 PHASES
@@ -107,6 +108,7 @@ while [ $# -gt 0 ]; do
     --list)         LIST=1; shift;;
     --resume)       shift;;   # resuming is the default when no description is given
     -h|--help)      usage; exit 0;;
+    --version)      pipeline_version "${REPO:-}"; exit 0;;
     -*)             err "unknown option: $1"; usage >&2; exit 3;;
     *)              DESCRIPTION="${DESCRIPTION:+$DESCRIPTION }$1"; shift;;
   esac

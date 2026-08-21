@@ -20,6 +20,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --repo)        REPO="${2:-}"; shift 2 || exit 3;;
     --feature-dir) FEATURE_DIR="${2:-}"; shift 2 || exit 3;;
+    --version) pipeline_version "${REPO:-}"; exit 0;;
     -h|--help)
       cat <<'EOF'
 spec-status — show the current feature's pipeline state

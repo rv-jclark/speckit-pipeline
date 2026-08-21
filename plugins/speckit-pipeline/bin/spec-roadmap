@@ -46,6 +46,7 @@ OPTIONS
   --effort <p>=<e>    passed through to spec-run  (repeatable)
   --stop-after <p>    passed through to spec-run
   --with <p[,p]>      passed through to spec-run
+  --version              print the version and where this copy is installed
   -h, --help
 
 HOW IT RUNS
@@ -63,6 +64,7 @@ CMD="${1:-}"; [ $# -gt 0 ] && shift
 case "$CMD" in
   plan|show|run|list) ;;
   -h|--help|"") usage; exit 0;;
+  --version) pipeline_version; exit 0;;
   *) err "unknown command: $CMD"; usage >&2; exit 3;;
 esac
 
@@ -78,6 +80,7 @@ while [ $# -gt 0 ]; do
     --model|--effort)      PASSTHROUGH+=("$1" "${2:-}"); shift 2 || exit 3;;
     --stop-after|--with)   PASSTHROUGH+=("$1" "${2:-}"); shift 2 || exit 3;;
     -h|--help)     usage; exit 0;;
+    --version)     pipeline_version "${REPO:-}"; exit 0;;
     -*)            err "unknown option: $1"; exit 3;;
     *)             GOAL="${GOAL:+$GOAL }$1"; shift;;
   esac
@@ -98,6 +101,11 @@ if [ -z "$BASE" ]; then
 fi
 
 RMDIR=$(roadmap_dir "$REPO")
+
+if [ -n "$SLUG" ] && ! valid_slug "$SLUG"; then
+  die_usage "not a usable roadmap name: $SLUG" \
+    "lower-case letters, digits, dot, dash and underscore; must start with a letter or digit"
+fi
 
 # `show`/`run` with no slug: if there is exactly one roadmap, use it; if there
 # are several, say which rather than picking.
@@ -143,6 +151,10 @@ if [ "$CMD" = plan ]; then
   if [ -z "$SLUG" ]; then
     SLUG=$(printf '%s' "$GOAL" | tr '[:upper:]' '[:lower:]' |
            tr -cs 'a-z0-9' '-' | cut -c1-40 | sed 's/^-//;s/-$//')
+    # A goal made entirely of punctuation derives to nothing, and an empty slug
+    # would name the file ".json".
+    valid_slug "$SLUG" || die_usage "could not derive a roadmap name from that goal" \
+      "pass one: spec-roadmap plan --slug <name> \"...\""
   fi
   RM=$(roadmap_file "$REPO" "$SLUG")
   [ -e "$RM" ] && die "a roadmap already exists at ${RM#"$REPO"/}" \
@@ -390,34 +402,44 @@ while [ "$ei" -lt "$n_entries" ]; do
     fi
   fi
 
-  # Switching branches over somebody's uncommitted work is not this tool's call
-  # to make, and stashing on their behalf is worse. Tracked modifications refuse;
-  # untracked files only warn, because git carries those across a checkout and
-  # refuses outright rather than losing one.
-  changes=$(tracked_changes "$REPO")
-  if [ -n "$changes" ]; then
-    err "there are uncommitted tracked changes; not switching branch over them"
-    printf '%s\n' "$changes" | head -20 | sed 's/^/    /'
-    say ""
-    say "  If this is the previous entry's work, commit it and merge it — the"
-    say "  roadmap is waiting on exactly that. Otherwise commit or stash it"
-    say "  yourself; this will not stash on your behalf."
-    say "  Then: spec-roadmap run $SLUG"
-    exit 1
-  fi
-  stray=$(untracked_files "$REPO")
-  if [ -n "$stray" ]; then
-    warn "untracked files will follow this checkout into the new entry's branch:"
-    printf '%s\n' "$stray" | head -10 | sed 's/^/    /'
-    n_stray=$(printf '%s\n' "$stray" | grep -c . || true)
-    [ "${n_stray:-0}" -gt 10 ] && dim "    … and $((n_stray - 10)) more"
-    say "  Not a blocker — git preserves them — but if any belong to the previous"
-    say "  entry, commit them there first or they will appear in this entry's diff."
+  # These checks guard a BRANCH SWITCH, so they belong to a new entry only. A
+  # resumed entry stays on its own branch and its half-finished work is expected
+  # to be sitting there uncommitted — refusing over it would block resume in
+  # exactly the situation resume exists for, an interruption partway through
+  # implementation.
+  #
+  # And they run BEFORE the dry run, not after: a dry run that reports
+  # "would run: …" where the real run refuses is worse than no dry run at all,
+  # because the whole point of asking is to find out what will happen. Getting
+  # this order wrong is a two-line edit and it silently makes --dry-run lie, so
+  # the suite asserts the warning appears under --dry-run specifically.
+  if [ -z "$resume_dir" ]; then
+    # Switching branches over somebody's uncommitted work is not this tool's call
+    # to make, and stashing on their behalf is worse. Tracked modifications refuse;
+    # untracked files only warn, because git carries those across a checkout and
+    # refuses outright rather than losing one.
+    changes=$(tracked_changes "$REPO")
+    if [ -n "$changes" ]; then
+      err "there are uncommitted tracked changes; not switching branch over them"
+      printf '%s\n' "$changes" | head -20 | sed 's/^/    /'
+      say ""
+      say "  If this is the previous entry's work, commit it and merge it — the"
+      say "  roadmap is waiting on exactly that. Otherwise commit or stash it"
+      say "  yourself; this will not stash on your behalf."
+      say "  Then: spec-roadmap run $SLUG"
+      exit 1
+    fi
+    stray=$(untracked_files "$REPO")
+    if [ -n "$stray" ]; then
+      warn "untracked files will follow this checkout into the new entry's branch:"
+      printf '%s\n' "$stray" | head -10 | sed 's/^/    /'
+      n_stray=$(printf '%s\n' "$stray" | grep -c . || true)
+      [ "${n_stray:-0}" -gt 10 ] && dim "    … and $((n_stray - 10)) more"
+      say "  Not a blocker — git preserves them — but if any belong to the previous"
+      say "  entry, commit them there first or they will appear in this entry's diff."
+    fi
   fi
 
-  # The dry run comes AFTER the tree checks on purpose. A dry run that reports
-  # "would run: …" where the real run refuses is worse than no dry run at all:
-  # the whole point of asking is to find out what will happen.
   if [ "$DRY_RUN" -eq 1 ]; then
     if [ "${#PASSTHROUGH[@]}" -gt 0 ]; then
       printf '    would run: spec-run %s\n' "$(printf '%q ' "${PASSTHROUGH[@]}" "$description")"
