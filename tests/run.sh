@@ -1173,6 +1173,25 @@ assert_contains "$prog" "[2t · 2.1k out]" "and both accumulate across turns"
 midrun=$(printf '%s\n' "$prog" | grep -v 'done:' || true)
 assert_not_contains "$midrun" '$' "no progress line ever prints an estimated cost"
 assert_contains "$prog" 'done: 2 turns, $0.42' "the measured cost is reported once, with the result"
+
+# 🛑 A phase runs in a ONE-SHOT headless process, so delegating work to a
+# background subagent and waiting is a dead end: there is no session to receive
+# the completion notification and no later turn to resume in. Measured on entry 2
+# of a real roadmap — the phase spawned a `ppc-python-agent`, polled it three
+# times with ListAgents, called ScheduleWakeup, then ended its own turn with
+# "The backend agent is still running. I'll wait for its completion notification
+# before proceeding to frontend work." It never continued. 42 turns and $10.71
+# spent, 0 of 103 tasks ticked, and the 27 edits it had made were unattributed to
+# any task.
+#
+# Prose telling the model not to delegate is the wrong mechanism (the phase
+# prompt already says to do the work itself). Withholding the tools is the
+# structural one, exactly as with `git push`.
+for t in Task Agent ScheduleWakeup ListAgents SendMessage; do
+  n=$(jq -r --arg t "$t" '[.defaults.deny_tools[] | select(. == $t)] | length' \
+      "$PKG/lib/phases.json")
+  assert_eq "$n" "1" "a phase cannot call $t — it has no way to wait for one"
+done
 assert_not_contains "$out" "/repo/" "with the repo prefix stripped"
 # Truncating first left every line reading ".../worktrees/<name>/services/bluepri"
 # — identical for every file, filename always cut. And no downstream sed can

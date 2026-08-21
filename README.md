@@ -872,7 +872,7 @@ reports success over a directory the rest of the pipeline cannot find.
 ## Tests
 
 ```bash
-./tests/run.sh          # shellcheck + 364 fixture assertions
+./tests/run.sh          # shellcheck + 369 fixture assertions
 ```
 
 **The suite is hermetic.** A stub runner shadows the real `claude` for the whole
@@ -966,7 +966,7 @@ not be measured are recorded `unmeasured`, never as `$0`.
 ## Tests, and what they cost to run
 
 ```bash
-./tests/run.sh          # shellcheck + 364 assertions, ~2 minutes
+./tests/run.sh          # shellcheck + 369 assertions, ~2 minutes
 ```
 
 Hermetic: a stub runner shadows the real `claude` for the whole run, so nothing

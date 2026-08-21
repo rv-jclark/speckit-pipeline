@@ -56,7 +56,12 @@
       "Bash(gh pr create:*)",
       "Bash(gh release:*)",
       "Bash(gh workflow run:*)",
-      "Bash(gh api:*)"
+      "Bash(gh api:*)",
+      "Task",
+      "Agent",
+      "ScheduleWakeup",
+      "ListAgents",
+      "SendMessage"
     ]
   },
   "phases": [
