@@ -171,6 +171,26 @@ This is the one to use in plugin mode. The `/spec-run` command shells out to the
 engine, which inherits your shell environment, so it applies to both the CLI and
 the slash command.
 
+> 🛑 **A wrapper that needs a terminal cannot be used for a backgrounded run,
+> and this section used to recommend exactly that.** `claude-edits` and wrappers
+> like it drive Claude through `pexpect` and call `child.interact()`, which does
+> a `tcgetattr` on stdin. With no controlling terminal that raises
+> `termios.error: (19, 'Operation not supported by device')` and the phase dies
+> at once. So the export above works when you run `spec-run` yourself in a
+> terminal, and fails for anything launched under `nohup`, from a scheduler, or
+> by an agent on your behalf — while looking like a spec-run bug, because the
+> only visible symptom is `exited non-zero on --help` followed by an immediate
+> phase failure.
+>
+> Measured 2026-08-21: four consecutive launches lost this way. If you want the
+> wrapper as your default, scope it to interactive shells —
+>
+> ```bash
+> [[ -o interactive ]] && export SPEC_RUN_CLAUDE_BIN=claude-edits
+> ```
+>
+> — or pass `--claude-bin` per run, and let a background run use plain `claude`.
+
 **Committed with your tuning** — `claude_bin` in `phases.json`, alongside the
 per-phase models:
 

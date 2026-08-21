@@ -549,7 +549,13 @@ assert_not_contains "$v" "CLAUDE.md" "with them, it is not"
 
 # ------------------------------------------------------- custom claude binary --
 printf '\ncustom phase runner\n'
-cat > "$FAKE/claude-edits" <<'FAKEEOF'
+# ⚠️ Deliberately an unmistakably-fake name. This fixture was called
+# `claude-edits`, which is also a REAL pexpect wrapper on at least one
+# developer's PATH — and when a run failed because that tool was configured via
+# SPEC_RUN_CLAUDE_BIN, the shared name led straight to the wrong diagnosis ("a
+# test polluted the shipped config"). A fixture must not be confusable with a
+# tool someone actually has installed.
+cat > "$FAKE/claude-wrapper-fixture" <<'FAKEEOF'
 #!/usr/bin/env bash
 # accepts anything, like a passthrough wrapper
 for a in "$@"; do [ "$a" = "--help" ] && exit 0; done
@@ -576,12 +582,12 @@ FAKEEOF
 chmod +x "$FAKE"/claude-*
 
 argv=$("$SPEC_RUN" --repo "$BS" --feature-dir "$BS/specs/001-t" \
-        --only plan --claude-bin claude-edits --dry-run 2>&1)
-assert_contains "$argv" "claude-edits -p" "--claude-bin runs the named executable, not claude"
+        --only plan --claude-bin claude-wrapper-fixture --dry-run 2>&1)
+assert_contains "$argv" "claude-wrapper-fixture -p" "--claude-bin runs the named executable, not claude"
 
-argv=$(SPEC_RUN_CLAUDE_BIN=claude-edits "$SPEC_RUN" --repo "$BS" \
+argv=$(SPEC_RUN_CLAUDE_BIN=claude-wrapper-fixture "$SPEC_RUN" --repo "$BS" \
         --feature-dir "$BS/specs/001-t" --only plan --dry-run 2>&1)
-assert_contains "$argv" "claude-edits -p" "SPEC_RUN_CLAUDE_BIN is honoured too"
+assert_contains "$argv" "claude-wrapper-fixture -p" "SPEC_RUN_CLAUDE_BIN is honoured too"
 
 out=$("$SPEC_RUN" --repo "$BS" --feature-dir "$BS/specs/001-t" --only plan \
         --claude-bin definitely-not-installed --dry-run 2>&1); rc=$?
