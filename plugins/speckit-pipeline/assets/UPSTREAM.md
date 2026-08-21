@@ -1,92 +1,94 @@
 # Vendored spec-kit assets — provenance
 
-Everything under this directory is **vendored**, not authored here. It is a copy
-so that a fresh repository needs one `spec-bootstrap` and no separate spec-kit
-installation.
+Everything under this directory is **vendored**, not authored here, so a fresh
+repository needs one `spec-bootstrap` and no separate spec-kit installation.
 
 | | |
 |---|---|
 | Upstream | [github/spec-kit](https://github.com/github/spec-kit) |
+| Pinned version | **v0.16.5** (2026-08-19), recorded as `metadata.speckit_version` |
 | Integration | `claude` |
-| Pinned version | **0.7.3** (recorded in `.claude-plugin/plugin.json` as `metadata.speckit_version`) |
-| Copied | 2026-08-20 |
-| Copied from | a spec-kit 0.7.3 project scaffold (`.claude/skills/speckit-*` + `.specify/`) |
+| Extensions | `git`, `agent-context` |
+| Produced by | `specify init --here --integration claude` then `specify extension add git` and `specify extension add agent-context`, at that tag |
+| Vendored | 2026-08-21 |
+
+## Why those two extensions
+
+Post-0.7.x spec-kit moved both capabilities out of core into opt-in extensions,
+and this pipeline needs them:
+
+- **`git`** creates a feature branch per spec via the mandatory `before_specify`
+  hook. Without it, `specify` creates a directory and leaves you on the branch
+  you were already on — and `spec-roadmap`'s merge gate has nothing to gate,
+  because each entry is meant to become its own pull request.
+- **`agent-context`** maintains the agent context file (`CLAUDE.md` here) with
+  the plan pointer. Without it nothing writes that file, which is *also* fine —
+  the write-scope derivation returns an empty list and no phase is flagged. The
+  extension is vendored because a maintained CLAUDE.md is worth having, not
+  because the pipeline breaks without it.
+
+Together they reproduce the behaviour set 0.7.x had in core, on current upstream.
 
 ## What is here
 
 | Path | What it is |
 |---|---|
-| `claude-skills/speckit-*` | the 14 spec-kit skills, verbatim — six phase skills plus the `git-*` extension skills |
-| `specify/scripts/bash/` | `create-new-feature.sh`, `check-prerequisites.sh`, `setup-plan.sh`, `update-agent-context.sh`, `common.sh` |
-| `specify/templates/` | the spec, plan, tasks, checklist, constitution and agent-file templates |
-| `specify/extensions/git/` | the git extension: hook commands and scripts |
-| `specify/extensions.yml` | hook registrations, verbatim upstream |
+| `claude-skills/speckit-*` | the 16 skills: the phase skills, the five `git-*`, and `agent-context-update` |
+| `specify/scripts/bash/` | `create-new-feature.sh`, `check-prerequisites.sh`, `setup-plan.sh`, `setup-tasks.sh`, `resolve-template.sh`, `common.sh` |
+| `specify/templates/` | spec, plan, tasks, checklist and constitution templates, **pristine upstream** |
+| `specify/extensions/` | `git` and `agent-context`, with their hook commands and scripts |
+| `specify/extensions.yml` | hook registrations, as the extensions installed them |
+| `specify/workflows/`, `integrations/` | 0.16.x additions, copied as-is |
 
 ## What is deliberately NOT here
 
 - **`memory/constitution.md`.** A constitution is the project's own assertion
   about how it works. `spec-bootstrap` seeds it from
-  `templates/constitution-template.md` only when absent, never overwrites it,
-  and says out loud that a freshly-seeded one is a **template** — an unfilled
+  `templates/constitution-template.md` only when absent, never overwrites it, and
+  says out loud that a freshly-seeded one is a **template** — an unfilled
   constitution is not a neutral default, it is placeholder text shaping every
   artifact the pipeline produces.
-- **`feature.json`.** A pointer to whichever feature the source project happened
-  to have open.
+- **`feature.json`.** A pointer to whichever feature the source project had open.
 
-## Deviations from the scaffold this was copied from
+## Upgrade history, and the two lessons from it
 
-Two, both deliberate, because a vendored copy that quietly differs is worse than
-one that says how.
+**0.7.3 → 0.16.5 (2026-08-21).** The earlier pin was a 0.7.3-era scaffold copied
+out of an existing project, which brought two problems that are worth recording
+because both are easy to repeat.
 
-**The plan template's Constitution Check was reset to upstream's placeholder.**
-The scaffold had five concrete gates written into it — one project's architecture
-principles, hardcoded into the template every other project would inherit. Gates
-belong in a project's own `memory/constitution.md`, which is where the plan phase
-reads them from; a project that wants template-level gates can put a copy in
-`.specify/templates/overrides/`, which `resolve_template()` prefers.
+**It carried that project's customisations.** `plan-template.md` had five concrete
+Constitution Check gates written into it — one project's architecture principles,
+naming an internal service, hardcoded into the template every other project would
+inherit. Templates here are now pristine upstream: gates belong in a project's own
+`memory/constitution.md`, and `.specify/templates/overrides/` exists for anyone who
+wants them at template level. (A `Testing Strategy` section that the old scaffold
+added to `spec-template.md` is also gone. It was generic and useful; add it back as
+an override if you want it.)
 
-**The spec template's "Testing Strategy *(mandatory)*" section was kept.** It is
-an addition to upstream, and unlike the gates it names nothing project-specific:
-it asks what needs automated coverage and what is intentionally out of scope,
-before planning begins. That is good practice anywhere, so it stays.
+**The bundle did not satisfy its own preflight, and nothing checked.** The vendored
+`extensions.yml` hooked `speckit.agent-context.update` while that skill had not been
+copied, so `spec-bootstrap` produced a project that failed `spec-run`'s skill check
+immediately — and the remedy it printed was to run `spec-bootstrap` again, which
+could not help. The suite now bootstraps a fresh repository and requires it to pass
+preflight, and separately asserts that every command `extensions.yml` hooks has a
+vendored skill.
 
-## Drift
-
-The version above is pinned so drift is **visible**. Two facts stay separate,
-because only the second answers anything at run time:
-
-- what upstream spec-kit currently ships, and
-- what this directory contains.
-
-⚠️ **This is a 0.7.3-era scaffold, not upstream `main`, and the gap is large.**
-Measured 2026-08-20 against `github/spec-kit@main`: `common.sh` is **12KB here
-against 38KB upstream**, and `create-new-feature.sh` 12KB against 16KB. Most of
-what looks like local customisation in a diff is simply age.
-
-The pin is held rather than chased on purpose. The engine reads
-`.specify/feature.json` and `check-prerequisites.sh --json` to locate a feature
-directory, and those contracts have not been re-validated against upstream main.
-Refreshing is a real piece of work with real regression risk, not a copy — do it
-deliberately, and re-run a live `specify` → `plan` afterwards, because the
-templates and scripts are what those phases actually execute.
-
-`spec-bootstrap` reports a vendored file that differs from what a project already
-has and leaves it alone unless you pass `--force`. A difference is not
-necessarily wrong — a project may have deliberately customised a template. Look
-before you force.
-
-## Refreshing
+## Refreshing again
 
 ```bash
-# from a repo with a newer spec-kit scaffold installed:
-cp -R <repo>/.claude/skills/speckit-*  assets/claude-skills/
-cp    <repo>/.specify/scripts/bash/*.sh assets/specify/scripts/bash/
-cp    <repo>/.specify/templates/*.md    assets/specify/templates/
-cp    <repo>/.specify/extensions.yml    assets/specify/extensions.yml
-cp -R <repo>/.specify/extensions        assets/specify/
+cd "$(mktemp -d)" && git init -q -b main
+uvx --native-tls --from git+https://github.com/github/spec-kit.git@vX.Y.Z \
+  specify init --here --force --non-interactive --integration claude
+uvx --native-tls --from git+https://github.com/github/spec-kit.git@vX.Y.Z specify extension add git
+uvx --native-tls --from git+https://github.com/github/spec-kit.git@vX.Y.Z specify extension add agent-context
+# then copy .claude/skills/* -> assets/claude-skills/
+#            .specify/{scripts,templates,extensions,extensions.yml,workflows,integrations,init-options.json}
+#              -> assets/specify/   (never memory/constitution.md or feature.json)
 ```
 
-Then update `metadata.speckit_version` in `.claude-plugin/plugin.json`, and run
-`./tests/run.sh` — it asserts that `speckit-git-feature` is installed by
-bootstrap, which is the skill a partial refresh is most likely to drop. Losing it
-produces a run that reports success and creates no feature branch.
+Then update `metadata.speckit_version`, run `./tests/run.sh`, and **do a live
+`specify` run** — the templates and scripts are what the phases actually execute,
+so a green suite is necessary and not sufficient. Check in particular that the
+`before_specify` hook still creates a branch and that `.specify/feature.json` is
+still where feature discovery reads it; those two contracts are what the engine
+and the roadmap rest on.

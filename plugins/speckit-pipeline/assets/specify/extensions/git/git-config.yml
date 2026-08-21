@@ -4,8 +4,25 @@
 # Branch numbering strategy: "sequential" (001, 002, ...) or "timestamp" (YYYYMMDD-HHMMSS)
 branch_numbering: sequential
 
+# Optional branch name template. Leave empty for the default "{number}-{slug}".
+# Supported tokens: {author}, {app}, {number}, {slug}
+# {slug} must not appear before {number}; final path segment must start with {number}-.
+# Example for monorepos: "{author}/{app}/{number}-{slug}"
+branch_template: ""
+
+# Optional shorthand namespace. Leave empty to use branch_template/default behavior.
+# Example: "features/{app}" expands to "features/{app}/{number}-{slug}"
+branch_prefix: ""
+
 # Commit message used by `git commit` during repository initialization
-init_commit_message: "chore(speckit): initial commit"
+init_commit_message: "[Spec Kit] Initial commit"
+
+# Commit message style used by auto-commit hooks (speckit.git.commit):
+# "fixed"        - default; use the configured/static messages below.
+# "conventional" - ask the agent to inspect the diff and generate a
+#                  Conventional Commit message (e.g. "feat: add OAuth spec")
+#                  instead of using the messages configured below.
+commit_style: fixed
 
 # Auto-commit before/after core commands.
 # Set "default" to enable for all commands, then override per-command.
@@ -14,49 +31,49 @@ auto_commit:
   default: false
   before_clarify:
     enabled: false
-    message: "chore(speckit): save progress before clarification"
+    message: "[Spec Kit] Save progress before clarification"
   before_plan:
     enabled: false
-    message: "chore(speckit): save progress before planning"
+    message: "[Spec Kit] Save progress before planning"
   before_tasks:
     enabled: false
-    message: "chore(speckit): save progress before task generation"
+    message: "[Spec Kit] Save progress before task generation"
   before_implement:
     enabled: false
-    message: "chore(speckit): save progress before implementation"
+    message: "[Spec Kit] Save progress before implementation"
   before_checklist:
     enabled: false
-    message: "chore(speckit): save progress before checklist"
+    message: "[Spec Kit] Save progress before checklist"
   before_analyze:
     enabled: false
-    message: "chore(speckit): save progress before analysis"
+    message: "[Spec Kit] Save progress before analysis"
   before_taskstoissues:
     enabled: false
-    message: "chore(speckit): save progress before issue sync"
+    message: "[Spec Kit] Save progress before issue sync"
   after_constitution:
-    enabled: true
-    message: "chore(speckit): add project constitution"
+    enabled: false
+    message: "[Spec Kit] Add project constitution"
   after_specify:
-    enabled: true
-    message: "chore(speckit): add specification"
+    enabled: false
+    message: "[Spec Kit] Add specification"
   after_clarify:
-    enabled: true
-    message: "chore(speckit): clarify specification"
+    enabled: false
+    message: "[Spec Kit] Clarify specification"
   after_plan:
-    enabled: true
-    message: "chore(speckit): add implementation plan"
+    enabled: false
+    message: "[Spec Kit] Add implementation plan"
   after_tasks:
-    enabled: true
-    message: "chore(speckit): add tasks"
+    enabled: false
+    message: "[Spec Kit] Add tasks"
   after_implement:
-    enabled: true
-    message: "chore(speckit): implementation progress"
+    enabled: false
+    message: "[Spec Kit] Implementation progress"
   after_checklist:
-    enabled: true
-    message: "chore(speckit): add checklist"
+    enabled: false
+    message: "[Spec Kit] Add checklist"
   after_analyze:
-    enabled: true
-    message: "chore(speckit): add analysis report"
+    enabled: false
+    message: "[Spec Kit] Add analysis report"
   after_taskstoissues:
-    enabled: true
-    message: "chore(speckit): sync tasks to issues"
+    enabled: false
+    message: "[Spec Kit] Sync tasks to issues"

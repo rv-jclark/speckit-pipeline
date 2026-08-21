@@ -210,9 +210,52 @@ state_total_cost() { jq '[.phases[].cost_usd // 0] | add // 0' "$1"; }
 # spec-kit is refreshed — reintroducing this same false failure for whichever
 # agent got added. Enumerate the primitive, not a snapshot of it.
 agent_context_paths() { # agent_context_paths <repo_root>
-  local script="$1/.specify/scripts/bash/update-agent-context.sh"
-  [ -f "$script" ] || return 0
-  sed -nE 's/^[A-Z_]+_FILE="\$REPO_ROOT\/(.+)"$/\1/p' "$script" | sort -u
+  # Which files a phase may legitimately write outside specs/ — the agent context
+  # file (CLAUDE.md and its equivalents), which spec-kit's own tooling maintains.
+  #
+  # It is DECLARED in two different places depending on the version, and the
+  # difference is not cosmetic:
+  #   0.7.x  — core ships update-agent-context.sh with the whole list of 25
+  #            possible files hardcoded as *_FILE="$REPO_ROOT/…" variables.
+  #   0.11.x+ — agent-context became an OPT-IN extension that declares its
+  #            targets as data: context_files / context_file in its config, or a
+  #            per-integration default keyed by .specify/init-options.json.
+  #
+  # Read both, and read nothing when nothing can write those files: on 0.16.5
+  # without the extension the answer is genuinely the empty list, and a scope
+  # check that invented entries there would be permitting writes nobody makes.
+  local root="$1" f
+
+  # --- 0.7.x: scrape core's own enumeration
+  f="$root/.specify/scripts/bash/update-agent-context.sh"
+  [ -f "$f" ] && sed -nE 's/^[A-Z_]+_FILE="\$REPO_ROOT\/(.+)"$/\1/p' "$f"
+
+  # --- 0.11.x+: read the extension's declaration
+  local cfg="$root/.specify/extensions/agent-context/agent-context-config.yml"
+  local defs="$root/.specify/extensions/agent-context/agent-context-defaults.json"
+  if [ -f "$cfg" ]; then
+    local listed
+    # context_files takes precedence over context_file, per the extension's own
+    # documented rule — not our guess at which wins.
+    listed=$(awk '
+      /^context_files:[[:space:]]*\[\]/ {next}
+      /^context_files:/ {inlist=1; next}
+      inlist && /^[[:space:]]*-[[:space:]]*/ {sub(/^[[:space:]]*-[[:space:]]*/,""); gsub(/"/,""); if ($0 != "") print; next}
+      inlist && /^[^[:space:]-]/ {inlist=0}
+      /^context_file:[[:space:]]*[^"[:space:]]/ {sub(/^context_file:[[:space:]]*/,""); gsub(/"/,""); if ($0 != "") print}
+    ' "$cfg" 2>/dev/null)
+    if [ -n "$listed" ]; then
+      printf '%s\n' "$listed"
+    elif [ -f "$defs" ]; then
+      # Nothing declared: the extension self-seeds from the integration recorded
+      # at init time, so that is the file it will write.
+      local integ
+      integ=$(jqd "$root/.specify/init-options.json" '.integration' "")
+      [ -n "$integ" ] || integ=$(jqd "$root/.specify/integration.json" '.integration' "")
+      [ -n "$integ" ] && jq -r --arg k "$integ" '.agents[$k] // empty' "$defs" 2>/dev/null
+    fi
+  fi | sort -u
+  return 0
 }
 
 # ------------------------------------------------------- the claude binary -----

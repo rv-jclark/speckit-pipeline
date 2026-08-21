@@ -1,7 +1,7 @@
 {
   "name": "speckit-pipeline",
   "description": "Run the spec-kit phases as isolated claude processes — one model, effort level, tool allowance and spend ceiling per phase — and drive roadmaps of specs that ship in order.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "author": {
     "name": "Jamie Clark"
   },
@@ -13,7 +13,7 @@
     "roadmap"
   ],
   "metadata": {
-    "speckit_version": "0.7.3",
-    "speckit_provenance": "assets/ vendored from a spec-kit 0.7.3 project scaffold; see assets/UPSTREAM.md"
+    "speckit_version": "0.16.5",
+    "speckit_provenance": "assets/ vendored from `specify init --integration claude` at v0.16.5 plus `specify extension add git`; see assets/UPSTREAM.md"
   }
 }

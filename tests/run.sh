@@ -387,34 +387,67 @@ assert_not_contains "$(cat "$BS/.specify/templates/spec-template.md")" "drifted"
 
 # ------------------------------------------------- spec-kit's own write targets
 printf '\nagent context scope\n'
+# The agent context file (CLAUDE.md and friends) is written by spec-kit's own
+# tooling, so a phase writing it is not going off-piste. WHERE that list is
+# declared changed between versions, and the derivation reads both:
+#   0.7.x   core's update-agent-context.sh, 25 files hardcoded as *_FILE=
+#   0.11.x+ the opt-in agent-context extension, declared as data
 acp=$(agent_context_paths "$BS" | tr '\n' ' ')
-assert_contains "$acp" "CLAUDE.md" "the agent context file is derived from spec-kit's own script"
-assert_contains "$acp" "AGENTS.md" "and so are the other agents' context files"
+assert_contains "$acp" "CLAUDE.md" "the agent context file is derived, not assumed"
 n_acp=$(agent_context_paths "$BS" | grep -c . || true)
-[ "${n_acp:-0}" -ge 15 ] && t_pass "the derivation finds the whole list ($n_acp paths)" \
-  || t_fail "the derivation finds the whole list" "only $n_acp paths; the sed pattern has drifted"
-# Derived, never copied: the script names 25 possible files, and a hand-kept copy
-# goes stale the first time the vendored spec-kit is refreshed — reintroducing
-# this exact false failure for whichever agent was added.
+[ "${n_acp:-0}" -ge 1 ] && t_pass "the derivation finds it ($n_acp path(s))" \
+  || t_fail "the derivation finds the context file" "found none, so a legitimate write would be flagged"
 
-# NOT mapfile: macOS ships bash 3.2, where it does not exist. It failed silently
-# enough that the NEXT assertion passed with an unbound array — i.e. vacuously,
-# for the third time in this suite. Nothing in this project may use bash 4.
-ACP=()
-while IFS= read -r _p; do [ -n "$_p" ] && ACP+=("$_p"); done < <(agent_context_paths "$BS")
+# the 0.7.x shape: a core script enumerating every agent's file
+V07="$WORK/v07shape"; mkdir -p "$V07/.specify/scripts/bash"
+cat > "$V07/.specify/scripts/bash/update-agent-context.sh" <<'V07EOF'
+#!/usr/bin/env bash
+CLAUDE_FILE="$REPO_ROOT/CLAUDE.md"
+GEMINI_FILE="$REPO_ROOT/GEMINI.md"
+COPILOT_FILE="$REPO_ROOT/.github/agents/copilot-instructions.md"
+V07EOF
+acp07=$(agent_context_paths "$V07" | tr '\n' ' ')
+assert_contains "$acp07" "GEMINI.md" "the 0.7.x core-script shape is still read"
+assert_contains "$acp07" ".github/agents/copilot-instructions.md" "including its nested paths"
 
-# Snapshot BEFORE the write, or the write is already in the baseline and the
-# check is correctly silent — which is how the first version of this test failed
-# while the code was right.
+# the 0.11.x+ shape: the extension declares its targets as data
+V11S="$WORK/v11shape"; mkdir -p "$V11S/.specify/extensions/agent-context"
+printf '{"agents":{"claude":"CLAUDE.md","codex":"AGENTS.md"}}\n' \
+  > "$V11S/.specify/extensions/agent-context/agent-context-defaults.json"
+printf 'context_file: ""\ncontext_files: []\n' \
+  > "$V11S/.specify/extensions/agent-context/agent-context-config.yml"
+printf '{"integration":"codex"}\n' > "$V11S/.specify/init-options.json"
+acp11=$(agent_context_paths "$V11S" | tr '\n' ' ')
+assert_contains "$acp11" "AGENTS.md" "an undeclared config falls back to the project's integration default"
+assert_not_contains "$acp11" "CLAUDE.md" "and not to some other agent's file"
+# The fallback is keyed by the integration recorded at init, so a codex project
+# must not be told CLAUDE.md is fair game.
+
+printf 'context_files:\n  - AGENTS.md\n  - CLAUDE.md\n' \
+  > "$V11S/.specify/extensions/agent-context/agent-context-config.yml"
+acp11=$(agent_context_paths "$V11S" | tr '\n' ' ')
+assert_contains "$acp11" "AGENTS.md" "an explicit context_files list is read"
+assert_contains "$acp11" "CLAUDE.md" "all of it"
+
+printf 'context_file: JUSTONE.md\ncontext_files: []\n' \
+  > "$V11S/.specify/extensions/agent-context/agent-context-config.yml"
+acp11=$(agent_context_paths "$V11S" | tr '\n' ' ')
+assert_contains "$acp11" "JUSTONE.md" "and so is a single context_file"
+
+# no extension at all: the honest answer is nothing, because nothing writes them
+NOEXT="$WORK/noext"; mkdir -p "$NOEXT/.specify/scripts/bash"
+assert_eq "$(agent_context_paths "$NOEXT")" "" "a project where nothing maintains a context file yields NO paths"
+# Inventing entries here would silently permit writes nobody makes.
+
+# and the pair that makes the scope check meaningful
 scope_snapshot "$BS" "$WORK/snap2" "${SCOPE[@]}"
 printf 'agent context\n' > "$BS/CLAUDE.md"
 v=$(scope_violations_since "$BS" "$WORK/snap2" "${SCOPE[@]}")
 assert_contains "$v" "CLAUDE.md" "without the derived paths, a legitimate CLAUDE.md write IS flagged"
+ACP=()
+while IFS= read -r _p; do [ -n "$_p" ] && ACP+=("$_p"); done < <(agent_context_paths "$BS")
 v=$(scope_violations_since "$BS" "$WORK/snap2" "${SCOPE[@]}" "${ACP[@]}")
 assert_not_contains "$v" "CLAUDE.md" "with them, it is not"
-# The pair matters: the first assertion is what makes the second meaningful. A
-# real plan run cost $0.65 and reported STATUS ok with every artifact written,
-# and was marked `failed` over precisely this file.
 
 # ------------------------------------------------------- custom claude binary --
 printf '\ncustom phase runner\n'
@@ -582,6 +615,33 @@ assert_contains "$out" "may be partially written" "and the artifact is called in
   || t_fail "the partial artifact is left on disk"
 # Deleting it would be worse: it is the only record of how far the phase got, and
 # the next attempt overwrites it anyway.
+
+# ------------------------------------ the vendored bundle is self-consistent ----
+printf '\nthe bundle satisfies its own preflight\n'
+# spec-bootstrap installs the vendored assets; spec-run then reads the project's
+# own extensions.yml to decide which skills are required. Those two must agree,
+# and nothing made them: the vendored extensions.yml hooked
+# `speckit.agent-context.update` while that skill was not vendored, so bootstrap
+# produced a project that failed its own preflight immediately — and the remedy it
+# printed was to run bootstrap again, which could not help.
+SC="$WORK/selfconsistent"; mkbare "$SC" main
+"$SPEC_BOOTSTRAP" "$SC" >/dev/null 2>&1
+out=$("$SPEC_RUN" --repo "$SC" --only specify --dry-run "probe" 2>&1); rc=$?
+assert_eq "$rc" "0" "a freshly bootstrapped project passes preflight"
+assert_not_contains "$out" "missing skills" "with no skill left unvendored"
+
+# and state it directly, so the failure names the cause rather than a symptom
+hooked=$(grep -E "command:" "$PKG/assets/specify/extensions.yml" 2>/dev/null |
+         sed 's/.*command:[[:space:]]*//' | sort -u)
+unvendored=""
+for c in $hooked; do
+  sk=$(printf '%s' "$c" | tr '.' '-')
+  [ -d "$PKG/assets/claude-skills/$sk" ] || unvendored="${unvendored:+$unvendored }$sk"
+done
+assert_eq "$unvendored" "" "every skill the vendored extensions.yml hooks is also vendored"
+n_hooked=$(printf '%s\n' "$hooked" | grep -c . || true)
+[ "${n_hooked:-0}" -ge 2 ] && t_pass "and there are $n_hooked hooked commands to check" \
+  || t_fail "the hook extraction found commands" "only $n_hooked — the pattern has drifted"
 
 # ------------------------------------------- which skills are REQUIRED ---------
 printf '\nrequired skills are derived, not assumed\n'

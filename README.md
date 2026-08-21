@@ -627,16 +627,24 @@ against main; refreshing is a real piece of work with real regression risk.
 
 ### Which spec-kit versions this works with
 
-Both shapes currently in the wild, because the required skills are **read from
-the project** rather than assumed:
+The vendored copy is **spec-kit v0.16.5** (current upstream) with the `git` and
+`agent-context` extensions, so `spec-bootstrap` gives you branch-per-feature and a
+maintained `CLAUDE.md`. It also runs against whatever a project already has,
+because the required skills are **read from the project** rather than assumed:
 
-| | 0.7.x | 0.11.x |
+| | 0.7.x | 0.11.x – 0.16.x |
 |---|---|---|
-| a feature is | a git **branch** | a **directory** (`SPECIFY_FEATURE_DIRECTORY`) |
-| branch creation | a mandatory `before_specify` git hook | none — specify just creates the directory |
-| `git-*` skills | five of them | removed; `converge` + `agent-context-update` added |
-| `spec-run` | ✅ validated end to end | ✅ accepted; phases invoke correctly |
-| `spec-roadmap` | ✅ validated through a squash merge | ⚠️ the merge gate wants a branch per entry, and 0.11.x does not create one — you would branch by hand |
+| a feature is | a git **branch** | a **directory**; a branch only if the `git` extension is installed |
+| `git-*` skills | in core | moved to the opt-in `git` extension |
+| agent context file | `update-agent-context.sh` in core, 25 files hardcoded | the opt-in `agent-context` extension, declared as data |
+| `spec-run` | ✅ validated live | ✅ validated live on 0.16.5 |
+| `spec-roadmap` | ✅ validated through a squash merge | ✅ **with** the `git` extension; without it there are no per-entry branches to review |
+
+⚠️ **`spec-roadmap` needs a branch per entry.** That is what makes each entry its
+own pull request, which is the whole point of the merge gate. Post-0.7.x that
+means the `git` extension must be installed — `specify extension add git`. The
+vendored bundle includes it; a project that predates it or opted out will produce
+entries with nothing to review.
 
 The phase skills come from `phases.json`; anything else comes from whatever
 `.specify/extensions.yml` hooks into those phases, with `speckit.git.feature`
@@ -661,7 +669,7 @@ reports success over a directory the rest of the pipeline cannot find.
 ## Tests
 
 ```bash
-./tests/run.sh          # shellcheck + 257 fixture assertions
+./tests/run.sh          # shellcheck + 268 fixture assertions
 ```
 
 **The suite is hermetic.** A stub runner shadows the real `claude` for the whole
@@ -755,7 +763,7 @@ not be measured are recorded `unmeasured`, never as `$0`.
 ## Tests, and what they cost to run
 
 ```bash
-./tests/run.sh          # shellcheck + 257 assertions, ~70 seconds
+./tests/run.sh          # shellcheck + 268 assertions, ~90 seconds
 ```
 
 Hermetic: a stub runner shadows the real `claude` for the whole run, so nothing
