@@ -3,3 +3,6 @@
 
 # spec-run's own state, if this repo ever runs the pipeline on itself
 specs/*/.pipeline/
+
+# run logs, for tailing while a pipeline works
+.runs/

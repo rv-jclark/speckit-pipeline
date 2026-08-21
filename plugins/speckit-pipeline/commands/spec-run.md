@@ -21,6 +21,42 @@ what it reports, and help with the parts that need a human. Re-deriving a phase
 here defeats the entire point — it puts the transcript back in this window and
 runs it on this window's model.
 
+## Make the run visible to the user
+
+A `Bash` tool call **buffers**: it returns one blob when the command finishes, and
+its output is shown to you and *not reliably to the user*. A phase takes minutes
+and a full entry far longer than the foreground window, so it will be backgrounded
+anyway. Invoking this from a slash command does not change any of that — a skill
+is instructions, not an executor.
+
+So do these two things, in this order, every time:
+
+1. **Launch it in the background, logging to a path the user can follow.** Use
+   `~/code/speckit-pipeline/.runs/<name>.log` (create the directory if needed), not
+   a random `/tmp` name only you know. Tell them the `tail -f` command.
+2. **Attach a `Monitor` to that log**, so progress reaches the conversation as it
+   happens instead of when you next check:
+
+   ```
+   Monitor({
+     command: "tail -f -n +1 <logfile> | grep -E --line-buffered '^→|^✓|^✗|^!|· (Write|Edit|MultiEdit)|done:|Traceback|Error|FAILED'",
+     description: "<what is running>",
+     timeout_ms: 3000000
+   })
+   ```
+
+   Filter deliberately: phase markers, file writes, and failure signatures. Piping
+   every tool call is a firehose, and Monitor stops itself when flooded — which
+   leaves the user with *less* visibility, not more. And per Monitor's own rule,
+   the filter must match failure states too; one that greps only for success is
+   silent through a crash, and silence is indistinguishable from progress.
+
+Pass `--stream` so there is per-step output to filter in the first place.
+
+If the user wants to watch closely, offer to let them launch it themselves —
+`! spec-run --stream "<description>"` puts the output natively in their view and sidesteps
+all of the above.
+
 ## Reading the exit code
 
 | Exit | Meaning | What you do |
