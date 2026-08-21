@@ -1737,6 +1737,29 @@ assert_contains "$out" "retrying an entry that failed" \
 assert_contains "$out" "spec-run exited" \
   "and repeats the reason it was blocked, rather than dropping it"
 
+# 🛑 And a retried entry must RESUME its feature, not cut a second one. Testing
+# only `in_progress` for that made the retry path useless in practice: a blocked
+# entry with a recorded feature_dir went down the create path and refused with
+# "cannot cut this entry from main", because the base is not an ancestor of the
+# branch the feature already sits on. Measured on the real roadmap.
+mkdir -p "$FR/specs/001-one"
+roadmap_entry_set "$FR/.specify/roadmaps/rm.state.json" one \
+  '{"status":"blocked","feature_dir":"specs/001-one","branch":"001-one","note":"spec-run exited 1"}'
+out=$(SPEC_RUN_CLAUDE_BIN=claude-broken "$SPEC_ROADMAP" run --repo "$FR" --slug rm \
+        --base main 2>&1) || true
+assert_contains "$out" "resuming its existing feature: specs/001-one" \
+  "a retried entry resumes the feature it already has"
+assert_not_contains "$out" "cannot cut this entry" \
+  "and never tries to cut a second branch for it"
+
+# the fallback names the status it actually holds
+roadmap_entry_set "$FR/.specify/roadmaps/rm.state.json" one \
+  '{"status":"blocked","feature_dir":"specs/404-gone","branch":"001-one"}'
+out=$(SPEC_RUN_CLAUDE_BIN=claude-broken "$SPEC_ROADMAP" run --repo "$FR" --slug rm \
+        --base main 2>&1) || true
+assert_contains "$out" "recorded as blocked" \
+  "a blocked entry with no feature directory is not described as in progress"
+
 # the merge gate still gates the case it was written for
 MG="$WORK/mergegate"; mkbare "$MG" main
 "$SPEC_BOOTSTRAP" "$MG" >/dev/null 2>&1

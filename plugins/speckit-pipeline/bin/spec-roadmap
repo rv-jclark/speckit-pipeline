@@ -514,15 +514,22 @@ while [ "$ei" -lt "$n_entries" ]; do
   # ---- run this entry
   info "$slug — $title"
 
-  # An entry recorded in_progress already HAS a feature. Handing spec-run the
-  # description again makes spec-kit cut a second feature branch for the same
-  # roadmap entry — two specs, two branches, one entry, and a state file that can
-  # only point at one of them. So resume the feature that exists.
+  # An entry that has already RUN has a feature. Handing spec-run the description
+  # again makes spec-kit cut a second feature branch for the same roadmap entry —
+  # two specs, two branches, one entry, and a state file that can only point at
+  # one of them. So resume the feature that exists.
   #
   # Reached by anything that interrupts a run: Ctrl-C, a rolling restart, a
   # deleted state file, a laptop closing.
+  #
+  # 🛑 `blocked` belongs here as much as `in_progress`, and testing only the
+  # latter is what made the retry path above useless in practice: a blocked entry
+  # WITH a recorded feature_dir went down the create path and refused with
+  # "cannot cut this entry from main", because the base is not an ancestor of the
+  # branch the feature already sits on. A failed entry is the likeliest one to be
+  # retried, so it is the likeliest one to need its existing feature.
   resume_dir=""
-  if [ "$status" = in_progress ]; then
+  if [ "$status" = in_progress ] || [ "$status" = blocked ]; then
     if [ -n "$fdir" ] && [ -d "$REPO/$fdir" ]; then
       resume_dir="$fdir"
     else
@@ -532,7 +539,9 @@ while [ "$ei" -lt "$n_entries" ]; do
     if [ -n "$resume_dir" ]; then
       dim "    resuming its existing feature: $resume_dir"
     else
-      warn "    recorded as in progress, but no feature directory was found —"
+      # Naming the status it actually holds, since `blocked` reaches here too and
+      # "recorded as in progress" would be a false statement about the state.
+      warn "    recorded as $status, but no feature directory was found —"
       warn "    starting this entry from the beginning"
     fi
   fi
