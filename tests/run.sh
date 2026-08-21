@@ -574,6 +574,36 @@ assert_contains "$out" "may be partially written" "and the artifact is called in
 # Deleting it would be worse: it is the only record of how far the phase got, and
 # the next attempt overwrites it anyway.
 
+# ------------------------------------------------- a name that does not exist --
+printf '\nunknown phase names\n'
+# `--only nosuchphase` used to select nothing, run nothing, print six "not
+# selected" lines and exit 0 — a silent no-op reported as success, which is the
+# one outcome indistinguishable from the work having been done.
+for flag in --only --from --stop-after --with --gate; do
+  out=$("$SPEC_RUN" --repo "$BS" --feature-dir "$BS/specs/001-t" "$flag" nosuchphase \
+          --dry-run 2>&1); rc=$?
+  [ "$rc" -eq 3 ] && t_pass "$flag with an unknown phase exits 3 (usage)" \
+    || t_fail "$flag with an unknown phase exits 3" "got $rc"
+  assert_contains "$out" "does not exist: nosuchphase" "$flag names the bad value"
+done
+out=$("$SPEC_RUN" --repo "$BS" --feature-dir "$BS/specs/001-t" --only nosuchphase --dry-run 2>&1)
+assert_contains "$out" "configured phases are:" "and lists the ones that do exist"
+
+out=$("$SPEC_RUN" --repo "$BS" --feature-dir "$BS/specs/001-t" --model nope=opus --dry-run 2>&1); rc=$?
+assert_eq "$rc" "3" "an override naming an unknown phase is a usage error too"
+out=$("$SPEC_RUN" --repo "$BS" --feature-dir "$BS/specs/001-t" --model opus --dry-run 2>&1); rc=$?
+assert_eq "$rc" "3" "and so is an override missing its ="
+
+# valid selections still work, or the check above would be a nice way to break everything
+out=$("$SPEC_RUN" --repo "$BS" --feature-dir "$BS/specs/001-t" --only specify --dry-run 2>&1); rc=$?
+assert_eq "$rc" "0" "a valid --only still runs"
+out=$("$SPEC_RUN" --repo "$BS" --feature-dir "$BS/specs/001-t" --gate all --dry-run 2>&1); rc=$?
+assert_eq "$rc" "0" "--gate all is not treated as a phase name"
+out=$("$SPEC_RUN" --repo "$BS" --feature-dir "$BS/specs/001-t" --gate none --dry-run 2>&1); rc=$?
+assert_eq "$rc" "0" "nor is --gate none"
+# That pair is the point of the check being a vocabulary rather than a guess:
+# `all` and `none` are legitimate values that are not phases.
+
 # ============================================================== invocation ====
 printf '\ninvocation (--dry-run)\n'
 argv=$("$SPEC_RUN" --repo "$BS" --feature-dir "$BS/specs/001-t" --only specify --dry-run 2>&1)

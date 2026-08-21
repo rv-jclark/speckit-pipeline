@@ -18,6 +18,9 @@ dim_s() { printf '%s%s%s' "$_c_dim" "$*" "$_c_reset"; }  # inline, no newline
 # Every failure states its own reason. A remedy that cannot help, printed over a
 # cause it does not name, is worse than no message at all.
 die() { err "$1"; [ -n "${2:-}" ] && printf '  %s\n' "$2" >&2; exit 1; }
+# A malformed invocation is exit 3, per the documented codes: a caller can tell
+# "you typed it wrong" from "the work failed" without parsing prose.
+die_usage() { err "$1"; [ -n "${2:-}" ] && printf '  %s\n' "$2" >&2; exit 3; }
 
 # ------------------------------------------------------------- utilities ------
 

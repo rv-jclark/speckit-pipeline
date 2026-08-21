@@ -156,6 +156,43 @@ esac
 # Optional phases only run when asked for; --only replaces the selection entirely.
 _in_list() { case ",$1," in *",$2,"*) return 0;; *) return 1;; esac; }
 
+# A phase name that does not exist must be a usage error, not a quiet nothing.
+# Measured before this existed: `--only nosuchphase` selected no phases, ran
+# nothing, printed six "not selected" lines and exited 0 — a silent no-op
+# reported as success, which is the one outcome indistinguishable from the work
+# having been done. The same held for --from, --with and --stop-after.
+KNOWN_PHASES=$(jq -r '[.phases[].id] | join(",")' "$CONFIG")
+_check_phase_names() { # _check_phase_names <flag> <comma-separated>
+  local flag="$1" given="$2" name bad=""
+  [ -n "$given" ] || return 0
+  local IFS=,
+  for name in $given; do
+    [ -n "$name" ] || continue
+    _in_list "$KNOWN_PHASES" "$name" || bad="${bad:+$bad, }$name"
+  done
+  [ -z "$bad" ] && return 0
+  die_usage "$flag names a phase that does not exist: $bad" \
+            "configured phases are: $(printf '%s' "$KNOWN_PHASES" | tr ',' ' ')"
+}
+_check_phase_names --only "$ONLY"
+_check_phase_names --with "$WITH"
+_check_phase_names --from "$FROM"
+_check_phase_names --stop-after "$STOP_AFTER"
+# --gate takes `all`, `none`, or a phase list; only the last form names phases.
+case "$GATE_OVERRIDE" in
+  all|none|"") ;;
+  *) _check_phase_names --gate "$GATE_OVERRIDE";;
+esac
+
+# The model/effort overrides name phases too.
+for _o in "${MODEL_OVERRIDES[@]:-}" "${EFFORT_OVERRIDES[@]:-}"; do
+  [ -n "$_o" ] || continue
+  case "$_o" in
+    *=*) _check_phase_names "--model/--effort" "${_o%%=*}";;
+    *)   die_usage "override must be <phase>=<value>, got: $_o";;
+  esac
+done
+
 phase_selected() { # phase_selected <id> <optional>
   local id="$1" optional="$2"
   if [ -n "$ONLY" ]; then _in_list "$ONLY" "$id" && return 0 || return 1; fi
@@ -584,6 +621,7 @@ reached=""
 [ -z "$FROM" ] && reached=1
 
 rc_final=0
+phases_run=0
 while IFS= read -r pj; do
   id=$(jq -r '.id' <<<"$pj")
   optional=$(jq -r '.optional // false' <<<"$pj")
@@ -593,6 +631,7 @@ while IFS= read -r pj; do
   fi
   phase_selected "$id" "$optional" || { dim "  · $id — not selected"; continue; }
 
+  phases_run=$((phases_run + 1))
   run_phase "$pj"; rc=$?
   if [ "$rc" -ne 0 ]; then rc_final=$rc; break; fi
 done < <(jq -c '.phases[]' "$CONFIG")
@@ -613,6 +652,18 @@ if [ -n "$STATE" ] && [ -f "$STATE" ] && [ "$DRY_RUN" -eq 0 ]; then
   printf '  %-10s %-8s %-7s %-12s %10s\n' TOTAL "" "" "" "\$$(state_total_cost "$STATE")"
   dim "  state: $STATE"
   say ""
+fi
+
+# A run that executed nothing is not a success, whatever emptied the selection.
+# The named-phase check above catches the common cause; this catches the rest,
+# because "everything was already ok" and "nothing was selected" print almost
+# identically and only one of them means the work is done.
+if [ "$rc_final" -eq 0 ] && [ "$phases_run" -eq 0 ]; then
+  err "no phase ran"
+  printf '  Every configured phase was filtered out by the selection.\n' >&2
+  printf '  Selected: %s\n' "${ONLY:-all}${WITH:+ (+$WITH)}${FROM:+ from $FROM}" >&2
+  printf '  Configured: %s\n' "$(printf '%s' "$KNOWN_PHASES" | tr ',' ' ')" >&2
+  exit 1
 fi
 
 exit "$rc_final"

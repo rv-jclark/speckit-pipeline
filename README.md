@@ -546,6 +546,12 @@ guarantee is bigger than it is.
 - **No `--json-schema` on the phase result.** The artifact is the authority, so a
   second, unverified report channel would add risk without adding information.
   The phase's prose is kept only to show you when something goes wrong.
+- **A phase name that does not exist is a usage error (exit 3), not a quiet
+  nothing.** `--only nosuchphase` used to select nothing, run nothing, print six
+  "not selected" lines and exit 0 — indistinguishable from the work having been
+  done. All of `--only`, `--with`, `--from`, `--stop-after`, `--gate` and the
+  `--model`/`--effort` overrides are checked against the configured phases, and a
+  run that executes zero phases fails whatever emptied the selection.
 - **A description always means a NEW feature.** `spec-run "…"` no longer adopts
   whatever `.specify/feature.json` points at; use `--resume` or `--feature-dir`
   to continue one. Before this, a second feature in the same repository silently
@@ -614,7 +620,7 @@ reports success over a directory the rest of the pipeline cannot find.
 ## Tests
 
 ```bash
-./tests/run.sh          # shellcheck + 195 fixture assertions
+./tests/run.sh          # shellcheck + 212 fixture assertions
 ```
 
 **The suite is hermetic.** A stub runner shadows the real `claude` for the whole
