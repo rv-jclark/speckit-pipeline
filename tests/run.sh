@@ -203,6 +203,19 @@ assert_eq "${late_src:-none}" "none" \
   "every library is sourced before the first assertion"
 [ -n "$late_src" ] && printf '      sourced late at line(s): %s\n' "$late_src"
 
+# And no assertion may run AFTER the tally is printed. Nine of them did on the
+# first attempt at this section: the summary reported "339 passed, 0 failed"
+# while 348 assertions had actually run, so a failure among the last nine would
+# have been counted in the exit code and NOT in the line a human reads. Same
+# class as the harness function that was shadowed and printed ticks without
+# incrementing — the tally has to describe the whole run or it describes nothing.
+summary_line=$(awk '/^printf .\\n%s passed, %s failed./{print NR; exit}' "$0")
+post_tally=$(awk -v f="${summary_line:-0}" '
+  NR > f && /^[[:space:]]*assert_[a-z_]+[[:space:]]/ { printf "%s ", NR }' "$0")
+assert_eq "${post_tally:-none}" "none" \
+  "every assertion runs before the tally is printed"
+[ -n "$post_tally" ] && printf '      asserted after the tally at line(s): %s\n' "$post_tally"
+
 # ------------------------------------------------------- documented commands ---
 # Every `spec-*` command the README tells someone to type must exist and be
 # executable. A README is the one surface where an invented command is
@@ -1738,10 +1751,96 @@ assert_eq "$rc" "1" "planning over an existing roadmap refuses"
 assert_contains "$out" "already exists" "rather than overwriting authored content"
 
 # ================================================================== summary ===
-printf '\n%s passed, %s failed' "$pass" "$fail"
-[ "$skipped" -gt 0 ] && printf ', %s skipped' "$skipped"
+# --------------------------------------------- a killed phase is not "running" --
+printf '\nan interrupted phase\n'
+# `running` with no way to falsify it means a phase killed by a Ctrl-C, a reboot
+# or an OOM stays in flight forever: "still working", "killed" and "crashed"
+# collapse into one state carrying no cost and no outcome. Measured on a real
+# run — two implement phases sat at `running` with cost `unmeasured` because
+# both were killed before their result event.
+IRD="$WORK/interrupted"; mkdir -p "$IRD"
+IRS="$IRD/state.json"
+printf '{"version":1,"phases":{}}\n' > "$IRS"
+
+# a runner that is definitely gone: claim a pid that cannot be ours
+printf '%s\n' '{"version":1,"phases":{
+  "specify":{"status":"ok","cost_usd":1.5},
+  "implement":{"status":"running","runner_pid":999999}}}' > "$IRS"
+state_reconcile_running "$IRS"
+assert_eq "$(jqd "$IRS" '.phases.implement.status' '')" "interrupted" \
+  "a running phase whose runner is gone becomes interrupted"
+assert_eq "$(jqd "$IRS" '.phases.specify.status' '')" "ok" \
+  "and a finished phase is left alone"
+assert_contains "$(jqd "$IRS" '.phases.implement.note' '')" "unmeasured" \
+  "saying the cost and turns were never recorded"
+
+# a LIVE runner must not be reclassified. $$ is this suite, whose command line
+# is not spec-run, so the pid-alive test alone would be a false negative here —
+# which is the point: liveness is checked against the command too, because a
+# reused pid reporting an interrupted phase as running would make the tool
+# refuse to re-run it, and an unsatisfiable block is worse than a wrong label.
+printf '%s\n' '{"version":1,"phases":{"plan":{"status":"running","runner_pid":1}}}' > "$IRS"
+state_reconcile_running "$IRS"
+assert_eq "$(jqd "$IRS" '.phases.plan.status' '')" "interrupted" \
+  "pid 1 is alive but is not a spec-run, so the phase is still interrupted"
+
+# a phase recorded before runner_pid existed has nothing to check against
+printf '%s\n' '{"version":1,"phases":{"tasks":{"status":"running"}}}' > "$IRS"
+state_reconcile_running "$IRS"
+assert_eq "$(jqd "$IRS" '.phases.tasks.status' '')" "interrupted" \
+  "a running phase with no runner_pid at all is interrupted, not trusted"
+
+# ------------------------------------------------ spend is read, not remembered --
+printf '\nroadmap spend\n'
+# An entry's cost_usd is only written when the entry FINISHES, so an in-progress
+# entry contributes a figure frozen at its first phase. Measured live: the entry
+# read $3.71 (specify alone) while its phases summed to $10.40 — a ceiling
+# checked against the recorded value is optimistic by everything since.
+SPD="$WORK/spend"; mkdir -p "$SPD/specs/001-a/.pipeline"
+printf '%s\n' '{"version":1,"phases":{
+  "specify":{"status":"ok","cost_usd":3.71},
+  "plan":{"status":"ok","cost_usd":5.45},
+  "tasks":{"status":"ok","cost_usd":1.24}}}' > "$SPD/specs/001-a/.pipeline/state.json"
+SPST="$SPD/state.json"
+printf '%s\n' '{"entries":{"a":{"status":"in_progress","feature_dir":"specs/001-a","cost_usd":3.71}}}' \
+  > "$SPST"
+assert_eq "$(roadmap_spent "$SPD" "$SPST")" "10.4" \
+  "an in-progress entry is priced from its phases, not its stale total"
+
+# 🛑 A state file that exists but records NO cost is not a spend of $0. Every
+# phase run by the stub carries `cost_usd: null`, and summing those with `// 0`
+# produced a confident zero that beat the recorded figure — which silently
+# disarmed five budget assertions: a $9.50 entry priced itself at nothing, so
+# the ceiling could never be reached and the tests passed on a budget check that
+# no longer checked anything.
+mkdir -p "$SPD/specs/002-b/.pipeline"
+printf '%s\n' '{"version":1,"phases":{
+  "specify":{"status":"ok","cost_usd":null},
+  "plan":{"status":"interrupted"}}}' > "$SPD/specs/002-b/.pipeline/state.json"
+printf '%s\n' '{"entries":{"b":{"status":"in_progress","feature_dir":"specs/002-b","cost_usd":9.5}}}' \
+  > "$SPST"
+assert_eq "$(roadmap_spent "$SPD" "$SPST")" "9.5" \
+  "an entry whose phases are all unmeasured keeps its recorded figure, not \$0"
+
+# 🛑 The field-collapse case, which is what actually broke five budget checks.
+# An entry with NO feature_dir emits an empty middle field; tab is IFS
+# whitespace, so bash collapses the run and every later field shifts left. This
+# fixture is the shape `roadmap_state_init` + `roadmap_entry_set` really produce.
+printf '%s\n' '{"entries":{"c":{"status":"done","cost_usd":9.5}}}' > "$SPST"
+assert_eq "$(roadmap_spent "$SPD" "$SPST")" "9.5" \
+  "an entry with no feature_dir keeps its cost in the cost field"
+
+# an entry whose feature directory is gone still contributes what was recorded
+printf '%s\n' '{"entries":{"gone":{"status":"done","feature_dir":"specs/404-x","cost_usd":7.5}}}' \
+  > "$SPST"
+assert_eq "$(roadmap_spent "$SPD" "$SPST")" "7.5" \
+  "and one whose pipeline state is gone falls back to the recorded figure"
+
+
 printf '\n'
 
+printf '\n%s passed, %s failed' "$pass" "$fail"
+[ "$skipped" -gt 0 ] && printf ', %s skipped' "$skipped"
 # The README advertises a number. If it is wrong, one of the two is stale — and
 # a count in a README is the single easiest claim to leave behind.
 if [ "${DOC_ASSERTION_COUNT:-0}" -gt 0 ] && [ $((pass + fail)) -ne "$DOC_ASSERTION_COUNT" ]; then

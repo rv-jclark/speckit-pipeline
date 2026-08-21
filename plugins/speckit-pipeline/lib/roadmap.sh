@@ -265,3 +265,45 @@ untracked_files() {
   done
   return 0
 }
+
+# ---------------------------------------------------------------- spend ---------
+roadmap_spent() { # <repo> <state_file> — total spent across the roadmap
+  # An entry's own `cost_usd` is only written when the entry finishes, so an
+  # IN-PROGRESS entry contributes a value that stops moving after its first
+  # phase. Measured on a live run: the entry read $3.71 (specify alone) while its
+  # phases summed to $10.40 — so a ceiling checked against the recorded figure is
+  # optimistic by however much the current entry has spent since. Prefer the live
+  # per-phase sum whenever the pipeline state is still on disk, and fall back to
+  # the recorded value for entries whose feature directory is gone.
+  local repo="$1" st="$2" slug fdir rec live total=0
+  # 🛑 NOT tab-delimited. Tab is IFS *whitespace*, so bash collapses a RUN of
+  # tabs — an entry with no `feature_dir` emits "one\t\t9.5", the empty middle
+  # field vanishes, and the fields shift left: fdir="9.5", rec="". Measured: a
+  # $9.50 entry then priced itself at $0 and five budget assertions went green
+  # on a ceiling that could never be reached. The unit separator is not IFS
+  # whitespace, so empty fields survive.
+  while IFS=$'\037' read -r slug fdir rec; do
+    [ -n "$slug" ] || continue
+    live=""
+    if [ -n "$fdir" ] && [ -f "$repo/$fdir/.pipeline/state.json" ]; then
+      # 🛑 A state file that EXISTS but records no cost is not a spend of $0.
+      # Every phase run by a stub (or killed before its result event) carries
+      # `cost_usd: null`, so summing with `// 0` returns a confident 0 that then
+      # beats the recorded figure — measured: five budget assertions went green
+      # on a ceiling that could never be reached, because a $9.50 entry priced
+      # itself at nothing. Unmeasured and zero are different states, and only
+      # the second one is a number.
+      live=$(jq -r 'if ([.phases[]? | select(.cost_usd != null)] | length) == 0
+                    then "" else ([.phases[].cost_usd // 0] | add) end' \
+             "$repo/$fdir/.pipeline/state.json" 2>/dev/null) || live=""
+    fi
+    total=$(awk -v t="$total" -v l="${live:-}" -v r="${rec:-0}" \
+      'BEGIN{ v = (l == "" ? r : l); printf "%.6f", t + v }')
+  done <<EOF
+$(jq -r '.entries | to_entries[]
+         | [.key, (.value.feature_dir // ""), ((.value.cost_usd // 0)|tostring)]
+         | join("\u001f")' "$st" 2>/dev/null)
+EOF
+  # Trim the trailing zeroes printf leaves, so the figure reads like money.
+  awk -v t="$total" 'BEGIN{ printf "%g", t }'
+}

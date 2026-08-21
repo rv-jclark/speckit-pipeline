@@ -58,6 +58,8 @@ say ""
 say "feature  $(dim_s "${FEATURE_DIR#"$REPO"/}")"
 
 STATE="$FEATURE_DIR/.pipeline/state.json"
+# A status report is exactly where "killed" must not read as "running".
+state_reconcile_running "$STATE"
 if [ ! -f "$STATE" ]; then
   say ""
   warn "no pipeline state recorded at ${STATE#"$REPO"/}"

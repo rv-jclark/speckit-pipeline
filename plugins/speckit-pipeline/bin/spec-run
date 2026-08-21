@@ -321,6 +321,10 @@ init_state_if_possible() {
   [ -n "$FEATURE_DIR" ] && [ -d "$FEATURE_DIR" ] || return 1
   STATE="$FEATURE_DIR/.pipeline/state.json"
   state_init "$STATE" "$FEATURE_DIR" "$(git -C "$REPO" rev-parse --abbrev-ref HEAD)" "$DESCRIPTION"
+  # Before deciding what to run, settle what the last run left behind. A phase
+  # still marked `running` from a killed invocation would otherwise be read as
+  # in flight by everything downstream.
+  state_reconcile_running "$STATE"
 }
 init_state_if_possible || true
 

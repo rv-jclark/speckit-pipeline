@@ -393,7 +393,7 @@ if [ "$CMD" = show ]; then
   say ""
   total=$(jq -r '.entries|length' "$RM")
   donen=$(jq -r '[.entries[] | select(.status=="done")] | length' "$ST")
-  spent=$(jq -r '[.entries[].cost_usd // 0] | add // 0' "$ST")
+  spent=$(roadmap_spent "$REPO" "$ST")
   say "  $donen of $total landed$( [ "$spent" != "0" ] && printf ', $%s spent' "$spent")"
   say ""
   exit 0
@@ -432,7 +432,12 @@ rc_final=0
 n_entries=$(jq -r '.entries | length' "$RM")
 ei=0
 while [ "$ei" -lt "$n_entries" ]; do
-  IFS=$'\t' read -r slug title description < <(jq -r ".entries[$ei] | [.slug, .title // \"\", .description] | @tsv" "$RM")
+  # Same collapse hazard as roadmap_spent, and here it is worse: `title` is the
+  # MIDDLE field, so a roadmap entry authored without one shifts the DESCRIPTION
+  # into the title slot and leaves the description empty — i.e. the phase would
+  # be handed no description at all. The roadmap file is documented as "a plain
+  # authored file", so an omitted title is a thing a user can do.
+  IFS=$'\037' read -r slug title description < <(jq -r ".entries[$ei] | [.slug, .title // \"\", .description] | join(\"\\u001f\")" "$RM")
   ei=$((ei + 1))
   status=$(roadmap_entry_get "$ST" "$slug" status pending)
   fdir=$(roadmap_entry_get "$ST" "$slug" feature_dir "")
@@ -598,7 +603,7 @@ while [ "$ei" -lt "$n_entries" ]; do
     # before each entry, and the per-phase max_budget_usd values are the only
     # thing that stops a phase mid-flight. With the shipped phases that is $58
     # for a single entry, which can exceed a smaller roadmap budget.
-    spent=$(jq -r '[.entries[].cost_usd // 0] | add // 0' "$ST")
+    spent=$(roadmap_spent "$REPO" "$ST")
     if awk -v s="$spent" -v b="$BUDGET" 'BEGIN{exit !(s >= b)}'; then
       err "roadmap budget of \$$BUDGET reached (\$$spent spent) before '$slug'"
       exit 1

@@ -190,11 +190,52 @@ state_phase_get() { # state_phase_get <state_file> <phase> <field> <default>
 state_phase_start() { # state_phase_start <state_file> <phase> <session_id> <model> <effort>
   local f="$1" tmp
   tmp=$(mktemp)
+  # `runner_pid` is what makes "running" falsifiable. Without it, a phase killed
+  # by a Ctrl-C, a reboot or an OOM stays `running` forever, and "in flight",
+  # "killed" and "crashed" become one state with no cost and no outcome — the
+  # shape where the absence of a record is itself unrecorded.
   jq --arg p "$2" --arg sid "$3" --arg m "$4" --arg e "$5" --arg t "$(now_iso)" \
+     --arg pid "$$" \
     '.phases[$p] = ((.phases[$p] // {}) + {
         status:"running", session_id:$sid, model:$m, effort:$e,
-        started_at:$t, attempts:(((.phases[$p].attempts) // 0) + 1)
+        started_at:$t, runner_pid:($pid|tonumber),
+        attempts:(((.phases[$p].attempts) // 0) + 1)
      })' "$f" > "$tmp" && mv "$tmp" "$f"
+}
+
+_runner_alive() { # <pid> — true only if the pid is live AND is a spec-run
+  local pid="${1:-}"
+  case "$pid" in ''|*[!0-9]*) return 1;; esac
+  kill -0 "$pid" 2>/dev/null || return 1
+  # Checking the command too, because a bare `kill -0` is defeated by pid reuse,
+  # and the wrong direction of that error is the expensive one: a reused pid
+  # would report an interrupted phase as still running, and the tool would then
+  # refuse to re-run it — an unsatisfiable block is worse than a wrong label.
+  ps -o command= -p "$pid" 2>/dev/null | grep -q spec-run
+}
+
+state_reconcile_running() { # <state_file> — a `running` phase whose runner is
+  # gone is `interrupted`: it ran, it produced no outcome, and nobody recorded
+  # why. That is a distinct state from `failed` (which was measured) and from
+  # never having started, and only the reader can tell the difference, because
+  # by definition the writer was killed before it could.
+  local f="$1" tmp stale p
+  [ -f "$f" ] || return 0
+  stale=$(jq -r '.phases | to_entries[]
+                 | select(.value.status == "running")
+                 | "\(.key)\t\(.value.runner_pid // "")"' "$f" 2>/dev/null) || return 0
+  [ -n "$stale" ] || return 0
+  while IFS="$(printf '\t')" read -r p pid; do
+    [ -n "$p" ] || continue
+    _runner_alive "$pid" && continue
+    tmp=$(mktemp)
+    jq --arg p "$p" --arg t "$(now_iso)" \
+      '.phases[$p] += {status:"interrupted", ended_at:$t,
+                       note:"the runner exited without recording an outcome; cost and turns are unmeasured"}' \
+      "$f" > "$tmp" && mv "$tmp" "$f"
+  done <<EOF
+$stale
+EOF
 }
 
 state_phase_finish() { # ... <state_file> <phase> <status> <cost> <turns> <duration_ms> <artifact_sha> <note>
