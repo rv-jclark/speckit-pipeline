@@ -1719,6 +1719,40 @@ assert_eq "$rc" "1" "a failing entry fails the roadmap"
 assert_contains "$out" "the roadmap stops here" "and says it is stopping rather than continuing"
 assert_eq "$(jq -r '.entries.one.status' "$FR/.specify/roadmaps/rm.state.json")" "blocked" \
   "recording the entry as blocked"
+
+# 🛑 A blocked entry must be reported as ITSELF, and must be retryable. Both
+# halves were wrong: `blocked` shared the merge gate, so a FAILED pipeline was
+# announced as "this entry's pipeline is finished — review and merge it" (the
+# opposite remedy), and because that gate always exited 2 a blocked entry could
+# never be retried without hand-editing the state file. The status and its
+# recorded note were both on hand and both discarded.
+out=$(SPEC_RUN_CLAUDE_BIN=claude-broken "$SPEC_ROADMAP" run --repo "$FR" --slug rm \
+        --base main 2>&1) || true
+assert_not_contains "$out" "pipeline is finished" \
+  "a blocked entry is never described as finished-and-ready-to-merge"
+assert_not_contains "$out" "Review and merge it" \
+  "nor handed the merge remedy for a failure"
+assert_contains "$out" "retrying an entry that failed" \
+  "it says it is retrying"
+assert_contains "$out" "spec-run exited" \
+  "and repeats the reason it was blocked, rather than dropping it"
+
+# the merge gate still gates the case it was written for
+MG="$WORK/mergegate"; mkbare "$MG" main
+"$SPEC_BOOTSTRAP" "$MG" >/dev/null 2>&1
+git -C "$MG" add -A >/dev/null 2>&1; git -C "$MG" commit -qm bootstrap
+mkdir -p "$MG/.specify/roadmaps"
+printf '{"goal":"g","base":"main","entries":[{"slug":"one","title":"t","description":"d"}]}\n' \
+  > "$MG/.specify/roadmaps/rm.json"
+MGST="$MG/.specify/roadmaps/rm.state.json"
+roadmap_state_init "$MGST" ".specify/roadmaps/rm.json" rm main
+roadmap_entry_set "$MGST" one \
+  '{"status":"awaiting_merge","branch":"001-one","feature_dir":"specs/001-one"}'
+out=$(SPEC_RUN_CLAUDE_BIN=claude-pipeline "$SPEC_ROADMAP" run --repo "$MG" --slug rm \
+        --base main 2>&1); rc=$?
+assert_eq "$rc" "2" "an entry awaiting merge still stops the roadmap"
+assert_contains "$out" "Review and merge it" "with the merge remedy"
+assert_not_contains "$out" "retrying" "and is not mistaken for a failure"
 assert_not_contains "$out" "second" "and never reaches the next entry"
 # Carrying on past a failed entry would build entry two against a base that does
 # not contain entry one's work — a spec written on a false premise, which is the

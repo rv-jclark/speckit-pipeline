@@ -455,28 +455,56 @@ while [ "$ei" -lt "$n_entries" ]; do
   # The gate. An entry that ran but has not landed stops the roadmap here, and an
   # UNKNOWN answer stops it too rather than guessing — "not merged yet" and "I
   # could not tell" have different remedies, and only one of them is waiting.
-  if [ "$status" = awaiting_merge ] || [ "$status" = blocked ]; then
-    case "$landed" in
-      not_landed)
-        warn "$slug — waiting on you"
-        say ""
-        say "  This entry's pipeline is finished; its work is not on $BASE yet."
-        say "    $how"
-        [ -n "$branch" ] && say "  branch: $branch"
-        [ -n "$fdir" ]   && say "  specs:  $fdir"
-        say ""
-        say "  Review and merge it, then: spec-roadmap run $SLUG"
-        say "  (merging is yours — no phase here is given the tools to do it)"
-        say "";;
-      unknown)
-        warn "$slug — cannot tell whether this has landed"
-        say "    $how"
-        say ""
-        say "  Not treated as unmerged: that would start the next entry against a"
-        say "  base that may already contain this one. Resolve the cause and re-run."
-        say "";;
-    esac
+  # An UNKNOWN answer stops the roadmap whatever the entry's status, rather than
+  # guessing — "not merged yet" and "I could not tell" have different remedies,
+  # and only one of them is waiting on a human.
+  # Scoped to entries that have actually RUN. Broadening this to "any non-pending
+  # status" looked equivalent and was not: a `done` entry with no branch recorded
+  # answers `unknown` too, so the wider form stopped the roadmap before the
+  # budget check and took five budget assertions down with it.
+  if [ "$landed" = unknown ] && { [ "$status" = awaiting_merge ] || [ "$status" = blocked ]; }; then
+    warn "$slug — cannot tell whether this has landed"
+    say "    $how"
+    say ""
+    say "  Not treated as unmerged: that would start the next entry against a"
+    say "  base that may already contain this one. Resolve the cause and re-run."
+    say ""
     exit 2
+  fi
+
+  # The merge gate. This is for an entry whose pipeline FINISHED and now needs a
+  # human to merge it — the one thing no phase here is given the tools to do.
+  if [ "$status" = awaiting_merge ]; then
+    warn "$slug — waiting on you"
+    say ""
+    say "  This entry's pipeline is finished; its work is not on $BASE yet."
+    say "    $how"
+    [ -n "$branch" ] && say "  branch: $branch"
+    [ -n "$fdir" ]   && say "  specs:  $fdir"
+    say ""
+    say "  Review and merge it, then: spec-roadmap run $SLUG"
+    say "  (merging is yours — no phase here is given the tools to do it)"
+    say ""
+    exit 2
+  fi
+
+  # 🛑 `blocked` used to share the gate above, which was wrong twice over. It
+  # printed "this entry's pipeline is finished — review and merge it" about an
+  # entry whose pipeline had FAILED, so the remedy named was the opposite of the
+  # one needed; and because the gate always exited 2, a blocked entry could
+  # never be retried at all without hand-editing the state file. The status and
+  # its recorded `note` were both already on hand and both discarded.
+  #
+  # A blocked entry is RETRIED, because that is what the artifact-as-authority
+  # model already supports: spec-run skips the phases whose artifacts are good
+  # and re-runs the one that failed. `run` takes one entry and stops, so a human
+  # is invoking each attempt — there is no loop to guard against.
+  if [ "$status" = blocked ]; then
+    note=$(roadmap_entry_get "$ST" "$slug" note "")
+    warn "$slug — retrying an entry that failed"
+    [ -n "$note" ] && say "    previously: $note"
+    say "    completed phases are kept; only what failed re-runs"
+    say ""
   fi
 
   if [ "$landed" = unknown ] && [ "$status" = pending ]; then
