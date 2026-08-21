@@ -68,6 +68,42 @@ pipeline_version() {
   fi
 }
 
+# ------------------------------------------------------------ live progress ----
+# A phase is a separate process, so by default the only thing visible is its
+# result: one line, minutes later. `--output-format stream-json` emits an event
+# per step, so a filter over that stream can show what the phase is DOING without
+# putting its whole transcript on screen.
+#
+# The filter passes every line through unchanged — the result event is the last
+# JSON object on stdout, which is what the caller parses — and writes its
+# condensed view to STDERR, so capturing stdout with $(...) still works and the
+# progress is visible while it happens.
+
+stream_progress() { # reads the event stream on stdin
+  local line kind
+  while IFS= read -r line; do
+    printf '%s\n' "$line"
+    # Only assistant events can carry tool calls; skipping the rest keeps this
+    # from spawning a jq per token.
+    case "$line" in
+      *'"tool_use"'*) ;;
+      *'"type":"result"'*) ;;
+      *) continue;;
+    esac
+    kind=$(printf '%s' "$line" | jq -r '
+      if .type == "result" then
+        "      \(if .is_error then "!" else "·" end) done: \(.num_turns) turns, $\(.total_cost_usd // 0)"
+      else
+        [ (.message.content // [])[] | select(.type == "tool_use") |
+          "      · \(.name) \(
+             ( .input.file_path // .input.pattern // .input.command // .input.path
+               // .input.description // "" ) | tostring | .[0:78] )"
+        ] | join("\n")
+      end' 2>/dev/null) || kind=""
+    [ -n "$kind" ] && printf '%s%s%s\n' "$_c_dim" "$kind" "$_c_reset" >&2
+  done
+}
+
 # ------------------------------------------------------------- preflight ------
 # Check every prerequisite BEFORE spending a phase budget. A missing dependency
 # discovered three phases in has already cost real money; and a run that reaches
@@ -180,12 +216,27 @@ state_phase_push_session() { # <state_file> <phase> <session_id>
      })' "$f" > "$tmp" && mv "$tmp" "$f"
 }
 
-# The last line of output that parses as a JSON object. A wrapper may print its
-# own chatter around the CLI's result, so the whole stream failing to parse is not
-# proof that no result was returned.
+# The LAST JSON object in the output.
+#
+# Two shapes arrive here and they must not be confused. `--output-format json`
+# returns one pretty-printed object across many lines; `--output-format
+# stream-json` returns one object PER LINE, with the result last. An earlier
+# version short-circuited on "does the whole text parse as an object?", which is
+# TRUE for JSONL — jq reads each line as its own input — so the streaming path
+# handed every later `jq` the entire stream. `.permission_denials | length` then
+# produced one 0 per event, `[ "0\n0\n0…" -gt 0 ]` failed as a non-integer, and
+# the run printed a column of zeroes. Slurping answers the real question: how many
+# objects are there, and what is the last one.
 extract_json() { # extract_json <text>
-  local text="$1" line
-  if jq -e 'type == "object"' >/dev/null 2>&1 <<<"$text"; then printf '%s' "$text"; return 0; fi
+  local text="$1" n line
+  n=$(printf '%s' "$text" | jq -s 'length' 2>/dev/null) || n=""
+  case "${n:-x}" in
+    1)  printf '%s' "$text" | jq -c '.' 2>/dev/null && return 0;;
+    ''|x|0) ;;
+    *)  printf '%s' "$text" | jq -c -s '.[-1]' 2>/dev/null && return 0;;
+  esac
+  # Not wholly parseable: a wrapper may have printed its own chatter around the
+  # result, so look for the last line that is an object on its own.
   while IFS= read -r line; do
     case "$line" in
       \{*\}) jq -e 'type == "object"' >/dev/null 2>&1 <<<"$line" && printf '%s' "$line" && return 0;;

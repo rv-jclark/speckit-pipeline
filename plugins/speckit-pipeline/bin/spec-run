@@ -70,6 +70,8 @@ OPTIONS
   --effort <phase>=<e>   override one phase's effort      (repeatable)
   --budget <usd>         ceiling across the whole run
   --force                re-run phases already recorded ok
+  --stream               show each phase's steps as they happen, instead of one
+                         line per phase. Also settable as SPEC_RUN_STREAM=1.
   --dry-run              print the exact claude invocations, run nothing
   --list                 print the configured phases and exit
   --version              print the version and where this copy is installed
@@ -90,6 +92,7 @@ EOF
 # ----------------------------------------------------------------- args -------
 
 REPO=""; FEATURE_DIR=""; DESCRIPTION=""; CLAUDE_BIN="${SPEC_RUN_CLAUDE_BIN:-}"
+STREAM=${SPEC_RUN_STREAM:-0}
 declare -a ADD_DIRS=()
 FROM=""; STOP_AFTER=""; WITH=""; ONLY=""; GATE_OVERRIDE=""
 BUDGET=""; FORCE=0; DRY_RUN=0; LIST=0
@@ -112,6 +115,8 @@ while [ $# -gt 0 ]; do
     --effort)       EFFORT_OVERRIDES+=("${2:-}"); shift 2 || exit 3;;
     --force)        FORCE=1; shift;;
     --dry-run)      DRY_RUN=1; shift;;
+    --stream)       STREAM=1; shift;;
+    --no-stream)    STREAM=0; shift;;
     --list)         LIST=1; shift;;
     --resume)       shift;;   # resuming is the default when no description is given
     -h|--help)      usage; exit 0;;
@@ -429,14 +434,20 @@ run_phase() { # run_phase <phase_json>
   sid=$(new_uuid)
 
   # ---- assemble argv
+  local out_format=json
+  # stream-json emits an event per step rather than one blob at the end. The
+  # result event is still the last JSON object on stdout, so everything
+  # downstream — cost, turns, denials, the artifact verdict — is unchanged.
+  [ "$STREAM" -eq 1 ] && out_format=stream-json
   local -a argv=("$CLAUDE_BIN" -p "$prompt"
     --model "$model"
     --effort "$effort"
-    --output-format json
+    --output-format "$out_format"
     --permission-mode "$(jqd "$CONFIG" '.defaults.permission_mode' acceptEdits)"
     --session-id "$sid"
     --append-system-prompt "$(handoff_contract "$id" "$skill_ref" "${FEATURE_DIR:-}")"
   )
+  [ "$STREAM" -eq 1 ] && argv+=(--verbose)
   [ -n "$maxt" ] && argv+=(--max-turns "$maxt")
   [ -n "$maxb" ] && argv+=(--max-budget-usd "$maxb")
   [ -n "$deny" ] && argv+=(--disallowed-tools "$deny")
@@ -506,7 +517,13 @@ run_phase() { # run_phase <phase_json>
   # </dev/null so the phase cannot consume anything the caller is reading. The
   # index-based loop above already removes the dependency; this makes it
   # impossible to reintroduce by restructuring the loop later.
-  out=$( cd "$REPO" && "${argv[@]}" 2>"$errf" </dev/null ); rc=$?
+  if [ "$STREAM" -eq 1 ]; then
+    # The filter writes its condensed view to stderr and passes the stream
+    # through, so this capture is unchanged and the progress appears live.
+    out=$( cd "$REPO" && "${argv[@]}" 2>"$errf" </dev/null | stream_progress ); rc=$?
+  else
+    out=$( cd "$REPO" && "${argv[@]}" 2>"$errf" </dev/null ); rc=$?
+  fi
 
   # The feature directory only exists once specify has run: /speckit-specify is
   # what creates the branch and the directory. So the first phase of a new

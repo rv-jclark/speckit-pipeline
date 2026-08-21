@@ -47,6 +47,7 @@ OPTIONS
   --stop-after <p>    passed through to spec-run
   --with <p[,p]>      passed through to spec-run
   --add-dir <path>    passed through to spec-run (repeatable)
+  --stream            passed through to spec-run: show each phase's steps live
   --from-doc <path>   with `plan`: read an EXISTING roadmap document and turn the
                       sequence its author already decided into entries, instead of
                       decomposing a goal from scratch
@@ -86,6 +87,7 @@ while [ $# -gt 0 ]; do
     --model|--effort)      PASSTHROUGH+=("$1" "${2:-}"); shift 2 || exit 3;;
     --add-dir)             PASSTHROUGH+=("$1" "${2:-}"); ADD_DIRS+=("${2:-}"); shift 2 || exit 3;;
     --stop-after|--with)   PASSTHROUGH+=("$1" "${2:-}"); shift 2 || exit 3;;
+    --stream|--no-stream)  PASSTHROUGH+=("$1"); shift;;
     -h|--help)     usage; exit 0;;
     --version)     pipeline_version "${REPO:-}"; exit 0;;
     -*)            err "unknown option: $1"; exit 3;;
@@ -546,16 +548,37 @@ while [ "$ei" -lt "$n_entries" ]; do
   # the half-finished work behind and resume against the wrong tree.
   if [ -z "$resume_dir" ]; then
     base_local=${BASE##*/}
-    if [ "$(git -C "$REPO" rev-parse --abbrev-ref HEAD)" != "$base_local" ]; then
+    head_branch=$(git -C "$REPO" rev-parse --abbrev-ref HEAD 2>/dev/null)
+    if [ "$head_branch" != "$base_local" ]; then
       if ! git -C "$REPO" checkout --quiet "$base_local" 2>/dev/null; then
-        # A fresh clone has the remote ref but no local branch of that name.
-        git -C "$REPO" checkout --quiet -b "$base_local" --track "$BASE" 2>/dev/null || \
-          die "could not check out $base_local to cut this entry from" \
-              "create or switch to it yourself, then re-run"
+        # A branch can only be checked out in ONE worktree, and this workspace's
+        # normal flow is several at once — so `git checkout main` inside a worktree
+        # fails with "already used by worktree at …". Cutting from the remote ref
+        # instead would be worse than failing: it would silently drop whatever this
+        # worktree has committed that the base does not have, which here was the
+        # scaffold upgrade itself.
+        #
+        # If the base is already an ancestor of HEAD, this branch contains
+        # everything the base does and is the right thing to cut from. Say so, and
+        # carry on.
+        if git -C "$REPO" merge-base --is-ancestor "$BASE" HEAD 2>/dev/null; then
+          say "    $base_local is checked out elsewhere; cutting this entry from"
+          say "    $head_branch instead, which already contains $BASE"
+        elif git -C "$REPO" checkout --quiet -b "$base_local" --track "$BASE" 2>/dev/null; then
+          : # a fresh clone had the remote ref but no local branch of that name
+        else
+          held=$(git -C "$REPO" worktree list 2>/dev/null | grep "\[$base_local\]" | awk '{print $1}')
+          die "cannot cut this entry from $base_local" \
+              "${held:+it is checked out at $held, and }$head_branch does not contain $BASE — merge $BASE in, or pass --base $head_branch"
+        fi
       fi
     fi
-    git -C "$REPO" merge --ff-only --quiet "$BASE" 2>/dev/null || \
-      warn "could not fast-forward $base_local to $BASE — this entry starts from $base_local as it is"
+    # Only fast-forward when we are actually ON the base branch; a worktree on its
+    # own branch must not be pulled onto the base.
+    if [ "$(git -C "$REPO" rev-parse --abbrev-ref HEAD)" = "$base_local" ]; then
+      git -C "$REPO" merge --ff-only --quiet "$BASE" 2>/dev/null || \
+        warn "could not fast-forward $base_local to $BASE — this entry starts from $base_local as it is"
+    fi
   fi
 
   roadmap_entry_set "$ST" "$slug" '{"status":"in_progress"}'

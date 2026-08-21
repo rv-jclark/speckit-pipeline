@@ -395,6 +395,38 @@ to read it.
 Measured on a real 345-line roadmap: 6 entries transcribed in the author's order
 with their numbering preserved, $1.48 on opus/high.
 
+### Watching a phase work
+
+By default each phase prints one line when it finishes, which for a long phase
+means several silent minutes. `--stream` shows the steps as they happen:
+
+```bash
+spec-run --stream "..."        # or SPEC_RUN_STREAM=1, or spec-roadmap --stream
+```
+
+```
+→ specify — opus/high, ≤$5, ≤60 turns
+      · Bash cat .specify/feature.json 2>/dev/null; ls .specify
+      · Bash git rev-parse --is-inside-work-tree; .specify/extensions/git/scripts/…
+      · Bash mkdir -p specs/001-add-version-flag/checklists
+      · Write /…/specs/001-add-version-flag/spec.md
+      · done: 13 turns, $0.36
+```
+
+It switches the phase to `--output-format stream-json` and filters the event
+stream, writing the condensed view to **stderr** and passing the stream through
+unchanged — so cost, turns, denials and the artifact verdict are all still parsed
+from the same result event. Redirect stderr away if you want the quiet version
+back.
+
+⚠️ That change of format broke metric parsing the first time, in a way worth
+knowing about: `extract_json` short-circuited on "does the whole output parse as
+an object?", which is **true for JSONL** because jq reads each line as its own
+input. Every later `jq` then received the entire stream, `permission_denials |
+length` produced one `0` per event, and an integer comparison against
+`"0\n0\n0…"` failed. It now slurps and takes the last object, which answers the
+question that was actually being asked.
+
 ### Reading code that lives elsewhere
 
 ```bash
@@ -800,7 +832,7 @@ reports success over a directory the rest of the pipeline cannot find.
 ## Tests
 
 ```bash
-./tests/run.sh          # shellcheck + 316 fixture assertions
+./tests/run.sh          # shellcheck + 324 fixture assertions
 ```
 
 **The suite is hermetic.** A stub runner shadows the real `claude` for the whole
@@ -894,7 +926,7 @@ not be measured are recorded `unmeasured`, never as `$0`.
 ## Tests, and what they cost to run
 
 ```bash
-./tests/run.sh          # shellcheck + 316 assertions, ~2 minutes
+./tests/run.sh          # shellcheck + 324 assertions, ~2 minutes
 ```
 
 Hermetic: a stub runner shadows the real `claude` for the whole run, so nothing

@@ -273,6 +273,15 @@ assert_eq "$status" "failed" "a spec.md below the byte floor fails"
 status=$(verify_phase specify "$FD" spec.md | cut -f1)
 assert_eq "$status" "ok" "a full spec.md passes"
 
+# Prose ABOUT the marker must not count as a marker. A real plan wrote
+# 'Every "NEEDS CLARIFICATION" candidate was resolved by reading the tree' above a
+# table of resolutions, and the pipeline stopped a roadmap for a question that did
+# not exist. Mutation: match the bare phrase again and this assertion fails.
+printf 'Every "NEEDS CLARIFICATION" candidate was resolved; see research.md.\n' >> "$FD/spec.md"
+res=$(verify_phase specify "$FD" spec.md)
+assert_eq "$(cut -f1 <<<"$res")" "ok" "prose mentioning the marker is NOT an open marker"
+assert_contains "$(cut -f2 <<<"$res")" "no open markers" "and it says so"
+
 printf '[NEEDS CLARIFICATION: which auth provider?]\n' >> "$FD/spec.md"
 res=$(verify_phase specify "$FD" spec.md)
 assert_eq "$(cut -f1 <<<"$res")" "needs_input" "an unresolved marker is needs_input, not failure"
@@ -1421,6 +1430,48 @@ assert_not_contains "$out" "uncommitted tracked changes" "and does not refuse ov
 git -C "$IR" checkout -- f 2>/dev/null || true
 # Mutation: hoist the tree checks back above the resume decision and the first
 # two assertions fail — the run refuses instead of resuming.
+
+# ------------------------------------------- roadmap: inside a git worktree ----
+printf '\nroadmap: a base checked out in another worktree\n'
+# A branch can only be checked out in ONE worktree, and running several at once is
+# normal practice in some workspaces. So `git checkout main` inside a worktree
+# fails with "already used by worktree at …". Cutting from the remote ref instead
+# would be WORSE than failing: it silently drops whatever the worktree has
+# committed that the base does not have — which, the first time this was hit, was
+# the scaffold upgrade the run depended on.
+WTBASE="$WORK/wtbase"; mkbare "$WTBASE" main
+"$SPEC_BOOTSTRAP" "$WTBASE" >/dev/null 2>&1
+git -C "$WTBASE" add -A >/dev/null 2>&1; git -C "$WTBASE" commit -qm bootstrap
+mkdir -p "$WTBASE/.specify/roadmaps"
+printf '{"goal":"g","base":"main","entries":[{"slug":"one","title":"first","description":"do one"}]}\n' \
+  > "$WTBASE/.specify/roadmaps/rm.json"
+git -C "$WTBASE" add -A >/dev/null 2>&1; git -C "$WTBASE" commit -qm roadmap
+
+WTREE="$WORK/wtree"
+git -C "$WTBASE" worktree add -q -b feature-branch "$WTREE" main 2>/dev/null
+printf 'work only on the branch\n' > "$WTREE/branch-only.txt"
+git -C "$WTREE" add -A >/dev/null 2>&1; git -C "$WTREE" commit -qm "a commit the base does not have"
+
+# COUNT, do not `grep -q`. Under `set -o pipefail`, grep -q exits on the first
+# match and SIGPIPEs its writer, so the pipeline reports failure DESPITE the
+# match — which made this assertion fail against a fixture that reproduces the
+# case perfectly.
+held_msg=$(git -C "$WTREE" checkout main 2>&1 | grep -c "already used by worktree" || true)
+[ "${held_msg:-0}" -gt 0 ] \
+  && t_pass "the fixture reproduces it: the worktree cannot check out main" \
+  || t_fail "the fixture reproduces the held-branch case" "main was checkoutable"
+
+out=$(SPEC_RUN_CLAUDE_BIN=claude-pipeline "$SPEC_ROADMAP" run --repo "$WTREE" --slug rm \
+        --base main 2>&1); rc=$?
+assert_contains "$out" "checked out elsewhere" "the run says why it cannot use the base branch"
+assert_contains "$out" "already contains" "and that the current branch supersedes it"
+assert_eq "$(git -C "$WTREE" log --format=%s -1 main..feature-branch 2>/dev/null | grep -c . || echo 1)" "1" \
+  "the worktree's own commit is still reachable"
+[ -f "$WTREE/branch-only.txt" ] && t_pass "and its work is still present" \
+  || t_fail "the worktree's work survives" "cutting from the remote ref dropped it"
+assert_eq "$rc" "2" "and the entry runs, stopping at its merge gate"
+# Mutation: replace the ancestor branch with a plain `checkout` and the run dies
+# with "could not check out main", naming neither the holder nor the remedy.
 
 # ------------------------------------------------ roadmap: the gate releases ---
 printf '\nroadmap: the merge gate\n'

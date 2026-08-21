@@ -29,10 +29,18 @@ _bytes() { [ -f "$1" ] && wc -c < "$1" | tr -d ' ' || echo 0; }
 _clarification_markers() { # count unresolved template markers
   local n
   [ -f "$1" ] || { echo 0; return; }
+  # The BRACKETED form only. spec-kit writes a real marker as
+  # `[NEEDS CLARIFICATION: what is unclear]`, and matching the bare phrase is
+  # defeated by prose ABOUT the phrase — which is not hypothetical: a real plan
+  # wrote "Every \"NEEDS CLARIFICATION\" candidate was resolved by reading the
+  # tree" above a table of resolutions, and the pipeline stopped the roadmap for
+  # a question that did not exist. A guard whose target phrase can appear in a
+  # sentence saying the target is absent has to match the SYNTAX, not the words.
+  #
   # grep -c PRINTS 0 and EXITS 1 when there is no match, so `|| echo 0` emits
   # two lines and every later integer test on it errors out — while still
-  # reaching the right branch, which is how this survived a passing suite.
-  n=$(grep -c 'NEEDS CLARIFICATION' "$1" 2>/dev/null || true)
+  # reaching the right branch, which is how that survived a passing suite too.
+  n=$(grep -cE '\[NEEDS CLARIFICATION' "$1" 2>/dev/null || true)
   printf '%s\n' "${n:-0}"
 }
 
