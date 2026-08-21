@@ -558,7 +558,7 @@ done its part and the next move is a human's.
 |---|---|---|---|---|---|
 | specify | opus | high | $5 / 60 turns | dropped | |
 | clarify | opus | high | $3 / 40 turns | dropped | `--with clarify` |
-| plan | opus | high | $8 / 80 turns | dropped | |
+| plan | opus | high | $12 / 80 turns | dropped | |
 | tasks | sonnet | medium | $5 / 60 turns | dropped | |
 | analyze | opus | high | $3 / 30 turns | dropped | `--with analyze` |
 | implement | sonnet | medium | $40 / 400 turns | kept | |
@@ -872,7 +872,7 @@ reports success over a directory the rest of the pipeline cannot find.
 ## Tests
 
 ```bash
-./tests/run.sh          # shellcheck + 363 fixture assertions
+./tests/run.sh          # shellcheck + 364 fixture assertions
 ```
 
 **The suite is hermetic.** A stub runner shadows the real `claude` for the whole
@@ -966,7 +966,7 @@ not be measured are recorded `unmeasured`, never as `$0`.
 ## Tests, and what they cost to run
 
 ```bash
-./tests/run.sh          # shellcheck + 363 assertions, ~2 minutes
+./tests/run.sh          # shellcheck + 364 assertions, ~2 minutes
 ```
 
 Hermetic: a stub runner shadows the real `claude` for the whole run, so nothing

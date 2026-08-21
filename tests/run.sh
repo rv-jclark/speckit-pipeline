@@ -216,6 +216,28 @@ assert_eq "${post_tally:-none}" "none" \
   "every assertion runs before the tally is printed"
 [ -n "$post_tally" ] && printf '      asserted after the tally at line(s): %s\n' "$post_tally"
 
+# A per-entry total written into prose goes stale the moment a ceiling moves —
+# which just happened: raising plan from $8 to $12 left "$58 for one entry"
+# asserted in two files, a false statement about the code in the exact shape of
+# "a doc line is a claim; assert it or delete it". So it is derived and compared.
+# 🛑 Scan the SHIPPED code only, and never restate the figure here. Two earlier
+# attempts both failed, in opposite directions, and the pair is the lesson:
+#
+#   1. Scanning this file too matched the test's OWN explanatory prose, which had
+#      to name the stale figure in order to explain it — reported got '5868'.
+#   2. "Just strip comments" then broke it the other way: the claim being checked
+#      LIVES in a comment, so stripping them left nothing to compare and the
+#      figure became unverifiable while looking guarded.
+#
+# A comment cannot be told apart from a comment-about-the-comment by shape, so
+# the scan is scoped to one file that states the figure once, and this file
+# refers to phases.json instead of quoting a number.
+declared=$(grep -ohE 'that is \$[0-9]+' "$PKG/bin/spec-roadmap" 2>/dev/null \
+           | grep -oE '[0-9]+' | sort -u | tr '\n' ' ')
+actual=$(jq -r '[.phases[].max_budget_usd] | add' "$PKG/lib/phases.json")
+assert_eq "$(printf '%s' "$declared" | tr -d ' ')" "$actual" \
+  "the per-entry ceiling quoted in prose equals the sum in phases.json"
+
 # ------------------------------------------------------- documented commands ---
 # Every `spec-*` command the README tells someone to type must exist and be
 # executable. A README is the one surface where an invented command is
@@ -1184,7 +1206,8 @@ out=$(SPEC_RUN_CLAUDE_BIN=claude-pipeline "$SPEC_ROADMAP" run --repo "$BR2" --sl
 assert_eq "$rc" "0" "--budget overrides the file for a single run"
 # The bound is documented rather than fixed: this is checked BEFORE each entry, so
 # it caps how many entries start, not what one entry spends. The per-phase
-# ceilings are the only mid-flight stop, and they total $58 for one entry.
+# ceilings are the only mid-flight stop, and their sum over all phases in
+# phases.json is what one entry can spend.
 
 # ------------------------------------------------------ reading outside the repo
 printf '\n--add-dir\n'

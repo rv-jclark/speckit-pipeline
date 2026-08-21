@@ -25,8 +25,8 @@
     "permission_mode is bypassPermissions, and the reason is measured rather than",
     "assumed. Under acceptEdits (and dontAsk) a Bash command with a LEADING",
     "ENVIRONMENT ASSIGNMENT is denied: `PROBE=1 echo hi` is refused where `echo hi`",
-    "is allowed. That is exactly the shape spec-kit's own branch script needs —",
-    "`GIT_BRANCH_NAME=... create-new-feature-branch.sh` — so a real specify phase",
+    "is allowed. That is exactly the shape spec-kit's own branch script needs \u2014",
+    "`GIT_BRANCH_NAME=... create-new-feature-branch.sh` \u2014 so a real specify phase",
     "was refused four times, created no feature branch, and still reported success.",
     "",
     "The safety this trades away is less than it looks, and that too was measured:",
@@ -42,12 +42,14 @@
     "flags this engine passes, and a flag it does not accept is reported rather",
     "than dropped: a ceiling that was never applied must not read as one that was."
   ],
-
   "defaults": {
     "claude_bin": "claude",
     "permission_mode": "bypassPermissions",
     "max_turns": 80,
-    "write_scope": ["specs/", ".specify/"],
+    "write_scope": [
+      "specs/",
+      ".specify/"
+    ],
     "deny_tools": [
       "Bash(git push:*)",
       "Bash(gh pr merge:*)",
@@ -57,7 +59,6 @@
       "Bash(gh api:*)"
     ]
   },
-
   "phases": [
     {
       "id": "specify",
@@ -90,7 +91,7 @@
       "effort": "high",
       "mcp": "none",
       "artifact": "plan.md",
-      "max_budget_usd": 8,
+      "max_budget_usd": 12,
       "max_turns": 80,
       "gate": "on_needs_input"
     },
