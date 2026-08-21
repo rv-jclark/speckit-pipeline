@@ -312,7 +312,14 @@ for other in "$RMDIR"/*.state.json; do
 done
 
 rc_final=0
-while IFS=$'\t' read -r slug title description; do
+# By index, for the same reason spec-run iterates by index: the loop body runs
+# spec-run, which runs a process that reads stdin, and a stream-fed loop hands it
+# the remaining entries to eat.
+n_entries=$(jq -r '.entries | length' "$RM")
+ei=0
+while [ "$ei" -lt "$n_entries" ]; do
+  IFS=$'\t' read -r slug title description < <(jq -r ".entries[$ei] | [.slug, .title // \"\", .description] | @tsv" "$RM")
+  ei=$((ei + 1))
   status=$(roadmap_entry_get "$ST" "$slug" status pending)
   fdir=$(roadmap_entry_get "$ST" "$slug" feature_dir "")
   branch=$(roadmap_entry_get "$ST" "$slug" branch "")
@@ -504,7 +511,7 @@ while IFS=$'\t' read -r slug title description; do
        rc_final=1
        break;;
   esac
-done < <(jq -r '.entries[] | [.slug, .title // "", .description] | @tsv' "$RM")
+done
 
 if [ "$rc_final" -eq 0 ]; then
   total=$(jq -r '.entries|length' "$RM")

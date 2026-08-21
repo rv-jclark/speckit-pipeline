@@ -436,7 +436,10 @@ run_phase() { # run_phase <phase_json>
   # kind of tidy number.
   local out rc errf
   errf=$(mktemp)
-  out=$( cd "$REPO" && "${argv[@]}" 2>"$errf" ); rc=$?
+  # </dev/null so the phase cannot consume anything the caller is reading. The
+  # index-based loop above already removes the dependency; this makes it
+  # impossible to reintroduce by restructuring the loop later.
+  out=$( cd "$REPO" && "${argv[@]}" 2>"$errf" </dev/null ); rc=$?
 
   # The feature directory only exists once specify has run: /speckit-specify is
   # what creates the branch and the directory. So the first phase of a new
@@ -620,9 +623,47 @@ fi
 reached=""
 [ -z "$FROM" ] && reached=1
 
+# What SHOULD run, worked out before anything does. The stdin bug ended the loop
+# after one iteration, and the only reason that was invisible is that nothing
+# compared the phases executed against the phases selected. A count of what was
+# meant to happen turns "the loop ended early" into a detectable event whatever
+# the cause — this is the general form of that fix, and the reason it is worth
+# having is that the specific fix only covers the specific cause.
+phases_selected=""
+_sel_i=0
+_sel_n=$(jq -r '.phases | length' "$CONFIG")
+_sel_reached=""
+[ -z "$FROM" ] && _sel_reached=1
+while [ "$_sel_i" -lt "$_sel_n" ]; do
+  _sel_id=$(jq -r ".phases[$_sel_i].id" "$CONFIG")
+  _sel_opt=$(jq -r ".phases[$_sel_i].optional // false" "$CONFIG")
+  _sel_i=$((_sel_i + 1))
+  if [ -z "$_sel_reached" ]; then
+    [ "$_sel_id" = "$FROM" ] && _sel_reached=1 || continue
+  fi
+  phase_selected "$_sel_id" "$_sel_opt" || continue
+  phases_selected="${phases_selected:+$phases_selected }$_sel_id"
+done
+phases_selected_count=$(printf '%s\n' "$phases_selected" | wc -w | tr -d ' ')
+
 rc_final=0
 phases_run=0
-while IFS= read -r pj; do
+
+# Iterated BY INDEX, not from a stream. `while read; done < <(jq …)` gives the
+# loop body a stdin it does not own, and `claude -p` reads stdin — so the first
+# phase swallowed every remaining phase's JSON and the loop ended after one
+# iteration. Measured on a real roadmap entry: specify ran, plan/tasks/implement
+# never did, and the run reported "pipeline complete" with a summary listing one
+# phase. Nothing failed; three quarters of the work simply did not happen.
+#
+# It was invisible to everything: every real run until then had been --only <one
+# phase>, and the fake runner in the tests does not read stdin.
+n_phases=$(jq -r '.phases | length' "$CONFIG")
+i=0
+while [ "$i" -lt "$n_phases" ]; do
+  pj=$(jq -c ".phases[$i]" "$CONFIG")
+  i=$((i + 1))
+
   id=$(jq -r '.id' <<<"$pj")
   optional=$(jq -r '.optional // false' <<<"$pj")
 
@@ -634,7 +675,7 @@ while IFS= read -r pj; do
   phases_run=$((phases_run + 1))
   run_phase "$pj"; rc=$?
   if [ "$rc" -ne 0 ]; then rc_final=$rc; break; fi
-done < <(jq -c '.phases[]' "$CONFIG")
+done
 
 # ---------------------------------------------------------------- summary -----
 
@@ -663,6 +704,19 @@ if [ "$rc_final" -eq 0 ] && [ "$phases_run" -eq 0 ]; then
   printf '  Every configured phase was filtered out by the selection.\n' >&2
   printf '  Selected: %s\n' "${ONLY:-all}${WITH:+ (+$WITH)}${FROM:+ from $FROM}" >&2
   printf '  Configured: %s\n' "$(printf '%s' "$KNOWN_PHASES" | tr ',' ' ')" >&2
+  exit 1
+fi
+
+# A clean exit that ran fewer phases than it selected did not finish, whatever
+# the reason. Anything that stops deliberately — a gate, needs_input, a failure —
+# has already returned non-zero, so reaching here with a shortfall means the loop
+# ended without deciding to.
+if [ "$rc_final" -eq 0 ] && [ "$phases_run" -lt "$phases_selected_count" ]; then
+  err "only $phases_run of $phases_selected_count selected phases ran, and nothing reported a reason"
+  printf '  Selected: %s\n' "$phases_selected" >&2
+  printf '  This is a bug in spec-run, not in your project: the phase loop ended\n' >&2
+  printf '  early without a gate, a failure or a question. Please report it with\n' >&2
+  printf '  the state file at %s\n' "${STATE:-<no state file>}" >&2
   exit 1
 fi
 

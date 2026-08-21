@@ -620,7 +620,7 @@ reports success over a directory the rest of the pipeline cannot find.
 ## Tests
 
 ```bash
-./tests/run.sh          # shellcheck + 211 fixture assertions
+./tests/run.sh          # shellcheck + 233 fixture assertions
 ```
 
 **The suite is hermetic.** A stub runner shadows the real `claude` for the whole
@@ -659,6 +659,36 @@ one of them passed while checking nothing:
   so the check was correctly silent and the test failed against working code. The
   fix is ordering, and the lesson is that a baseline taken too late proves
   nothing.
+
+## The bug worth reading about
+
+Every other defect in this repository's history was found by a real run and then
+guarded by a test. This one was found by a real run that had *never happened
+before*, and it is the reason the suite now insists on it.
+
+`spec-run` ran **only the specify phase** and reported `pipeline complete`, with a
+summary listing one phase. Plan, tasks and implement never ran — and no line was
+printed for them at all. Nothing failed. Three quarters of the work simply did
+not happen.
+
+The driver loop was fed by `done < <(jq -c '.phases[]' "$CONFIG")`, and
+`claude -p` **reads stdin**. So the first phase's process swallowed the remaining
+phases' JSON and the loop ended after one iteration.
+
+What makes it worth writing down is why nothing caught it:
+
+- every real run until then had been `--only <one phase>`, so two phases had
+  never been executed in a single invocation;
+- the fake runner in the tests does not read stdin, so the fixtures ran all four
+  phases happily;
+- and the outcome was `exit 0` with a cheerful summary, so there was nothing to
+  investigate.
+
+The loop now iterates by index and the phase gets `</dev/null`, either of which
+would have been enough. The regression test uses a runner that deliberately
+drains stdin, because that is the only kind of fake that can reproduce it —
+mutation-verified: restoring the stream-fed loop makes the assertion report
+`specify` alone, exactly as production did.
 
 ## What it cost, measured
 

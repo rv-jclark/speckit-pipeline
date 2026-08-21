@@ -44,6 +44,15 @@ assert_eq() { [ "$1" = "$2" ] && t_pass "$3" || t_fail "$3" "expected '$2', got 
 # not looked at the content, and one that passes on it is worse.
 unquote() { printf '%s' "$1" | LC_ALL=C tr -d '\\'; }
 
+# Defined up here with the other helpers, not partway down: a fixture helper
+# declared below its first use fails with "command not found" in the middle of an
+# assertion block, which reads exactly like a product bug.
+mkbare() { # mkbare <path> <branch>
+  mkdir -p "$1"; git -C "$1" init -q -b "$2"
+  git -C "$1" config user.email t@t.invalid; git -C "$1" config user.name t
+  printf 'x\n' > "$1/f"; git -C "$1" add -A >/dev/null 2>&1; git -C "$1" commit -qm i
+}
+
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/speckit-pipeline-tests.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
 
@@ -574,6 +583,59 @@ assert_contains "$out" "may be partially written" "and the artifact is called in
 # Deleting it would be worse: it is the only record of how far the phase got, and
 # the next attempt overwrites it anyway.
 
+# ------------------------------------ every selected phase actually runs -------
+printf '\nmulti-phase run\n'
+# The bug this guards was invisible to every other test here. The driver loop was
+# fed by `done < <(jq …)`, and `claude -p` READS STDIN — so the first phase
+# swallowed the remaining phases' JSON and the loop ended after one iteration.
+# Measured on a real roadmap entry: specify ran, plan/tasks/implement did not, and
+# the run reported "pipeline complete" over a summary listing one phase.
+#
+# Reproducing it needs a runner that consumes stdin, which the ordinary fake does
+# not — that is exactly why the suite was green while the tool did a quarter of
+# its job.
+cat > "$FAKE/claude-eats-stdin" <<'FAKEEOF'
+#!/usr/bin/env bash
+[ "${1:-}" = "--help" ] && exit 0
+cat >/dev/null 2>&1 || true       # drain stdin, as the real CLI may
+root=$(git rev-parse --show-toplevel 2>/dev/null)
+prompt=""
+for a in "$@"; do case "$a" in /speckit-*) prompt="$a";; esac; done
+cur=$(sed -n 's/.*"feature_directory": *"\([^"]*\)".*/\1/p' "$root/.specify/feature.json" 2>/dev/null)
+case "$prompt" in
+  /speckit-specify*)
+    rel="specs/001-multi"; mkdir -p "$root/$rel"
+    git -C "$root" checkout -q -b 001-multi 2>/dev/null
+    printf '{\n  "feature_directory": "%s"\n}\n' "$rel" > "$root/.specify/feature.json";;
+  *) rel="$cur";;
+esac
+dir="$root/$rel"; mkdir -p "$dir"
+pad() { for i in $(seq 1 40); do printf 'padding %s\n' "$i"; done; }
+case "$prompt" in
+  /speckit-specify*)   { printf '# Spec\n'; pad; } > "$dir/spec.md";;
+  /speckit-plan*)      { printf '# Plan\n'; pad; } > "$dir/plan.md";;
+  /speckit-tasks*)     { printf '# Tasks\n'; pad; printf -- '- [ ] T001 x\n'; } > "$dir/tasks.md";;
+  /speckit-implement*) { printf '# Tasks\n'; pad; printf -- '- [x] T001 x\n'; } > "$dir/tasks.md";;
+esac
+echo '{"total_cost_usd":0.01,"num_turns":1,"duration_ms":5,"result":"STATUS: ok"}'
+FAKEEOF
+chmod +x "$FAKE/claude-eats-stdin"
+
+MP="$WORK/multiphase"; mkbare "$MP" main
+"$SPEC_BOOTSTRAP" "$MP" >/dev/null 2>&1
+git -C "$MP" add -A >/dev/null 2>&1; git -C "$MP" commit -qm bootstrap
+out=$(SPEC_RUN_CLAUDE_BIN=claude-eats-stdin "$SPEC_RUN" --repo "$MP" "build the thing" 2>&1); rc=$?
+assert_eq "$rc" "0" "a full run with a stdin-reading runner completes"
+ran=$(jq -r '[.phases | to_entries[] | select(.value.status=="ok") | .key] | join(",")' \
+      "$MP/specs/001-multi/.pipeline/state.json" 2>/dev/null)
+assert_eq "$ran" "specify,plan,tasks,implement" \
+  "and ALL FOUR default phases ran, in order, not just the first"
+# Mutation: restore `done < <(jq -c '.phases[]' "$CONFIG")` and this reports
+# "specify" alone — the exact shape the real run produced.
+assert_contains "$out" "→ implement" "the last phase was reached"
+n_phase_lines=$(printf '%s\n' "$out" | grep -cE '^→ (specify|plan|tasks|implement)' || true)
+assert_eq "$n_phase_lines" "4" "four phases were announced, so none was silently skipped"
+
 # ------------------------------------------------- a name that does not exist --
 printf '\nunknown phase names\n'
 # `--only nosuchphase` used to select nothing, run nothing, print six "not
@@ -649,6 +711,77 @@ assert_contains "$out" "/speckit-clarify" "--with clarify includes it"
 out=$("$SPEC_RUN" --repo "$BS" --feature-dir "$BS/specs/001-t" --from tasks --dry-run 2>&1)
 assert_not_contains "$out" "/speckit-plan" "--from tasks skips the earlier phases"
 assert_contains "$out" "/speckit-tasks" "--from tasks starts where it says"
+
+# =================================================================== spec-status
+printf '\nspec-status\n'
+SPEC_STATUS="$PKG/bin/spec-status"
+ST_REPO="$WORK/statusrepo"; mkbare "$ST_REPO" main
+"$SPEC_BOOTSTRAP" "$ST_REPO" >/dev/null 2>&1
+
+out=$("$SPEC_STATUS" --repo "$ST_REPO" 2>&1); rc=$?
+assert_eq "$rc" "1" "with no current feature it exits 1"
+assert_contains "$out" "no current feature" "and says so rather than printing an empty table"
+
+# A feature with artifacts but NO recorded state: the distinction spec-status
+# exists to make.
+mkdir -p "$ST_REPO/specs/001-thing"
+printf '{"feature_directory":"specs/001-thing"}\n' > "$ST_REPO/.specify/feature.json"
+{ printf '# Plan\n'; for i in $(seq 1 40); do printf 'line %s\n' "$i"; done; } > "$ST_REPO/specs/001-thing/plan.md"
+out=$("$SPEC_STATUS" --repo "$ST_REPO" 2>&1); rc=$?
+assert_eq "$rc" "1" "artifacts without state is not a success"
+assert_contains "$out" "no pipeline state recorded" "it says nothing is recorded"
+assert_contains "$out" "does not guess" "and refuses to infer progress from the file listing"
+assert_contains "$out" "plan.md" "while still showing what is present, so the reader can look"
+# A present plan.md cannot distinguish "planning finished" from "planning was
+# killed halfway through writing it". Inferring from the listing is exactly the
+# mistake this tool exists to avoid, so it must not make it in its own reporting.
+
+# With state, it reports the table and what to do next.
+mkdir -p "$ST_REPO/specs/001-thing/.pipeline"
+cat > "$ST_REPO/specs/001-thing/.pipeline/state.json" <<'STEOF'
+{"version":1,"feature_dir":"specs/001-thing","branch":"001-thing","phases":{
+  "specify":{"status":"ok","model":"opus","effort":"high","cost_usd":0.61,"num_turns":15},
+  "plan":{"status":"needs_input","model":"opus","effort":"high","cost_usd":0.3,
+          "num_turns":9,"note":"plan.md carries 2 unresolved markers",
+          "session_id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"}}}
+STEOF
+out=$("$SPEC_STATUS" --repo "$ST_REPO" 2>&1); rc=$?
+assert_eq "$rc" "0" "with state it exits 0"
+assert_contains "$out" "specify" "listing each phase"
+assert_contains "$out" "0.61" "with its cost"
+assert_contains "$out" "TOTAL" "and a total"
+assert_contains "$out" "plan needs input" "naming the blocked phase"
+assert_contains "$out" "2 unresolved markers" "quoting its recorded reason"
+assert_contains "$out" "claude --resume aaaaaaaa" "and offering that phase's own thread"
+# The resume command is the whole point of recording session ids; a status
+# display that knows the id and does not offer it is making the reader look it up.
+
+# An unmeasured cost must not read as zero.
+python3 - "$ST_REPO/specs/001-thing/.pipeline/state.json" <<'PYEOF'
+import json,sys
+f=sys.argv[1]; d=json.load(open(f))
+d["phases"]["tasks"]={"status":"ok","model":"sonnet","effort":"medium",
+                      "cost_usd":None,"num_turns":None}
+json.dump(d,open(f,"w"))
+PYEOF
+out=$("$SPEC_STATUS" --repo "$ST_REPO" 2>&1)
+assert_contains "$out" "unmeasured" "a null cost prints as unmeasured, never \$0"
+assert_not_contains "$out" '$null' "and never leaks the raw null"
+
+# no phase blocked -> it says so positively rather than staying silent
+python3 - "$ST_REPO/specs/001-thing/.pipeline/state.json" <<'PYEOF'
+import json,sys
+f=sys.argv[1]; d=json.load(open(f))
+for k in d["phases"]: d["phases"][k]["status"]="ok"
+json.dump(d,open(f,"w"))
+PYEOF
+out=$("$SPEC_STATUS" --repo "$ST_REPO" 2>&1)
+assert_contains "$out" "no phase is blocked" "an unblocked pipeline says so positively"
+# Silence would be ambiguous with "I did not check".
+
+out=$("$SPEC_STATUS" --help 2>&1); assert_eq "$?" "0" "--help exits 0"
+out=$("$SPEC_STATUS" --repo "$WORK" 2>&1); rc=$?
+assert_eq "$rc" "1" "a directory that is not a git repo exits 1"
 
 # ==================================================================== roadmap =
 printf '\nroadmap: has this entry landed?\n'
@@ -833,11 +966,6 @@ printf '\nroadmap: which branch is the base?\n'
 # and a repo whose remote is not called origin — and it does not fail cleanly:
 # the ref does not resolve, every entry reports unknown, and the roadmap refuses
 # to move while complaining about fetching.
-mkbare() { # mkbare <path> <branch>
-  mkdir -p "$1"; git -C "$1" init -q -b "$2"
-  git -C "$1" config user.email t@t.invalid; git -C "$1" config user.name t
-  printf 'x\n' > "$1/f"; git -C "$1" add -A >/dev/null 2>&1; git -C "$1" commit -qm i
-}
 mkbare "$WORK/b-main" main
 IFS=$'\t' read -r base how < <(detect_base "$WORK/b-main")
 assert_eq "$base" "main" "a local main is found"
