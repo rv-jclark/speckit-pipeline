@@ -80,12 +80,39 @@ pipeline_version() {
 # progress is visible while it happens.
 
 stream_progress() { # reads the event stream on stdin; $1 = repo root to strip
-  local line kind repo="${1:-}"
+  local line kind repo="${1:-}" turns=0 out_tok=0 delta running=""
   # `|| [ -n "$line" ]` handles a final line with no trailing newline. Claude's
   # stream is newline-terminated, so this looks redundant — but a phase killed
   # mid-write leaves a partial last line, and that is the one worth showing.
   while IFS= read -r line || [ -n "$line" ]; do
     printf '%s\n' "$line"
+
+    # Count BEFORE the display filter. A phase's spend was invisible until its
+    # result event, so a run killed partway through reported `unmeasured` and
+    # there was no way to see how far it had got — the stream carried
+    # `message.usage` all along and it was thrown away.
+    #
+    # 🛑 Turns and output tokens only, never a dollar estimate. Converting
+    # tokens to money needs a per-model price table, and a hardcoded table that
+    # decides the figures this tool reports cannot be corrected without a
+    # release — the authoritative cost arrives in the result event, which is the
+    # one number that should ever be printed with a currency sign.
+    case "$line" in
+      *'"type":"assistant"'*)
+        turns=$((turns + 1))
+        delta=$(printf '%s' "$line" | jq -r '.message.usage.output_tokens // 0' 2>/dev/null) || delta=0
+        case "$delta" in ''|*[!0-9]*) delta=0;; esac
+        out_tok=$((out_tok + delta))
+        ;;
+    esac
+    if [ "$turns" -gt 0 ]; then
+      if [ "$out_tok" -ge 1000 ]; then
+        running=$(printf '[%dt · %d.%dk out]' "$turns" $((out_tok / 1000)) $(( (out_tok % 1000) / 100 )))
+      else
+        running=$(printf '[%dt · %d out]' "$turns" "$out_tok")
+      fi
+    fi
+
     case "$line" in
       *'"tool_use"'*) ;;
       *'"type":"result"'*) ;;
@@ -116,7 +143,10 @@ stream_progress() { # reads the event stream on stdin; $1 = repo root to strip
                // .input.path // .input.description // "" ) | shorten )"
         ] | join("\n")
       end' 2>/dev/null) || kind=""
-    [ -n "$kind" ] && printf '%s%s%s\n' "$_c_dim" "$kind" "$_c_reset" >&2
+    case "$line" in
+      *'"type":"result"'*) [ -n "$kind" ] && printf '%s%s%s\n' "$_c_dim" "$kind" "$_c_reset" >&2;;
+      *) [ -n "$kind" ] && printf '%s%s %s%s\n' "$_c_dim" "$kind" "$running" "$_c_reset" >&2;;
+    esac
   done
 }
 

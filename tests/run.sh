@@ -1131,6 +1131,26 @@ assert_contains "$sk" "Skill speckit-plan" "a Skill call names the skill it invo
 long='{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Edit","input":{"file_path":"/repo/services/blueprint/app/orgs/[podSlug]/scorecard-dashboards/team-cards/TeamCardsSummary.tsx"}}]}}'
 out=$(printf '%s' "$long" | stream_progress /repo 2>&1 >/dev/null)
 assert_contains "$out" "TeamCardsSummary.tsx" "a long path keeps its FILENAME"
+
+# A running phase's spend was invisible until its result event, so a run killed
+# partway through reported `unmeasured` with no way to see how far it got — while
+# `message.usage` was in the stream all along and being discarded.
+prog=$(printf '%s\n' \
+ '{"type":"assistant","message":{"usage":{"output_tokens":1200},"content":[{"type":"tool_use","name":"Edit","input":{"file_path":"/r/a/b.ts"}}]}}' \
+ '{"type":"assistant","message":{"usage":{"output_tokens":900},"content":[{"type":"tool_use","name":"Bash","input":{"command":"pnpm test"}}]}}' \
+ '{"type":"result","is_error":false,"num_turns":2,"total_cost_usd":0.42}' \
+ | stream_progress /r 2>&1 >/dev/null)
+assert_contains "$prog" "[1t · 1.2k out]" "a running phase reports its turn count and output tokens"
+assert_contains "$prog" "[2t · 2.1k out]" "and both accumulate across turns"
+
+# 🛑 The guard that matters: turns and tokens are FACTS the stream carries, but a
+# dollar figure mid-run would have to be computed from a per-model price table,
+# and a hardcoded table deciding the figures this tool reports cannot be
+# corrected without a release. The authoritative cost arrives in the result
+# event, so that is the ONLY line allowed to print a currency sign.
+midrun=$(printf '%s\n' "$prog" | grep -v 'done:' || true)
+assert_not_contains "$midrun" '$' "no progress line ever prints an estimated cost"
+assert_contains "$prog" 'done: 2 turns, $0.42' "the measured cost is reported once, with the result"
 assert_not_contains "$out" "/repo/" "with the repo prefix stripped"
 # Truncating first left every line reading ".../worktrees/<name>/services/bluepri"
 # — identical for every file, filename always cut. And no downstream sed can
