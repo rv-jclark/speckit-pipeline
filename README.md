@@ -40,7 +40,7 @@ pick that phase back up interactively. See [Gates](#gates).
 ### Option A — clone and run
 
 ```bash
-git clone https://github.com/<you>/speckit-pipeline ~/code/speckit-pipeline
+git clone git@github.com:rv-jclark/speckit-pipeline.git ~/code/speckit-pipeline
 ln -s ~/code/speckit-pipeline/bin/spec-run      /usr/local/bin/spec-run
 ln -s ~/code/speckit-pipeline/bin/spec-bootstrap /usr/local/bin/spec-bootstrap
 ```
@@ -48,13 +48,18 @@ ln -s ~/code/speckit-pipeline/bin/spec-bootstrap /usr/local/bin/spec-bootstrap
 ### Option B — as a Claude Code plugin
 
 ```
-/plugin marketplace add <you>/speckit-pipeline
+/plugin marketplace add rv-jclark/speckit-pipeline
 /plugin install speckit-pipeline
 ```
 
 Installed at user scope, so `/spec-run` and `/spec-status` are available in
 **every** project without per-project setup. The plugin bundles the engine, so
 both options give you the same thing.
+
+⚠️ **This repository is private.** The marketplace install resolves over git, so
+it works for anyone with read access and fails for everyone else. To share it,
+either make the repository public or add the person as a collaborator — there is
+no third option, and "it worked on my machine" here means "I am the owner".
 
 Requires `claude`, `jq`, `git`, and `bash`. `spec-run` checks all of them before
 spending anything.
@@ -291,6 +296,12 @@ guarantee is bigger than it is.
   want isolation, make the worktree yourself and point `--repo` at it.
 - **`--bare` is deliberately unused.** It would trim the phase's context, but it
   forces `ANTHROPIC_API_KEY`-only auth and never reads OAuth or the keychain.
+
+## Licence
+
+MIT, with one thing worth knowing: `plugins/speckit-pipeline/assets/` is vendored
+from [github/spec-kit](https://github.com/github/spec-kit) (also MIT) and stays
+under its own upstream licence. See `assets/UPSTREAM.md`.
 
 ## Vendored spec-kit
 
