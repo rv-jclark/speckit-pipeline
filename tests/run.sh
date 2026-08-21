@@ -70,8 +70,10 @@ if command -v shellcheck >/dev/null 2>&1; then
   # thing on a laptop as in CI.
   out=$(shellcheck --version | awk '/^version:/{print $2}')
   t_note "shellcheck $out"
-  files=("$SPEC_RUN" "$SPEC_BOOTSTRAP" "$PKG/lib/common.sh" "$PKG/lib/verify.sh"
-         "$ROOT/bin/spec-run" "$ROOT/bin/spec-bootstrap" "$ROOT/tests/run.sh")
+  files=("$SPEC_RUN" "$SPEC_BOOTSTRAP" "$PKG/bin/spec-status"
+         "$PKG/lib/common.sh" "$PKG/lib/verify.sh"
+         "$ROOT/bin/spec-run" "$ROOT/bin/spec-bootstrap" "$ROOT/bin/spec-status"
+         "$ROOT/tests/run.sh")
   if sc=$(shellcheck -x -S warning "${files[@]}" 2>&1); then
     t_pass "all scripts clean at -S warning"
   else
@@ -126,6 +128,76 @@ assert_eq "$(jq -r '.phases[]|select(.id=="implement").model' "$CONFIG")" "sonne
 # unbounded spend that looks identical to a bounded one until it runs away.
 uncapped=$(jq -r '[.phases[] | select((.max_budget_usd|not) and (.max_turns|not)) | .id] | join(",")' "$CONFIG")
 assert_eq "$uncapped" "" "every phase has a budget or turn ceiling"
+
+# ------------------------------------------------------- documented commands ---
+# Every `spec-*` command the README tells someone to type must exist and be
+# executable. A README is the one surface where an invented command is
+# indistinguishable from a real one until somebody tries it — and this caught a
+# real instance: the usage section told readers to run `spec-status` when only the
+# plugin's /spec-status existed and there was no such script.
+printf '\ndocumented commands\n'
+README="$ROOT/README.md"
+doc_cmds=$(grep -oE '(^|[^a-zA-Z/-])spec-[a-z]+' "$README" |
+           grep -oE 'spec-[a-z]+' | sort -u |
+           grep -vE '^spec-(kit|run-config)$' || true)
+missing=""
+for c in $doc_cmds; do
+  [ -x "$ROOT/bin/$c" ] || missing="$missing $c"
+done
+assert_eq "$missing" "" "every spec-* command the README names exists in bin/"
+n_cmds=$(printf '%s\n' "$doc_cmds" | grep -c . || true)
+[ "${n_cmds:-0}" -ge 3 ] && t_pass "and there are $n_cmds of them to check" \
+  || t_fail "the extraction found commands" "only $n_cmds — the pattern has drifted"
+# The second assertion is the one that keeps the first honest: a grep that
+# matches nothing reports no missing commands, which reads exactly like success.
+
+# ------------------------------------------------------------- doc claims -----
+# The README states which model, effort and ceiling each phase uses, in a table
+# and again in the diagram at the top. Those are CLAIMS about phases.json, and a
+# claim that matched when it was written is exactly what drifts the first time
+# somebody retunes a model. Assert them, or delete them from the README.
+printf '\ndocumented claims\n'
+README="$ROOT/README.md"
+
+# the table: "| id | model | effort | $B / T turns | mcp | ... |"
+doc_table=$(sed -n '/^| Phase | Model | Effort/,/^$/p' "$README" |
+  awk -F'|' '$2 ~ /[a-z]/ && $2 !~ /Phase/ {
+      gsub(/^[ \t]+|[ \t]+$/,"",$2); gsub(/^[ \t]+|[ \t]+$/,"",$3)
+      gsub(/^[ \t]+|[ \t]+$/,"",$4); gsub(/^[ \t]+|[ \t]+$/,"",$5)
+      gsub(/^[ \t]+|[ \t]+$/,"",$6)
+      gsub(/\$/,"",$5); gsub(/ turns/,"",$5); gsub(/ \/ /,"\t",$5)
+      print $2"\t"$3"\t"$4"\t"$5"\t"$6 }')
+cfg_table=$(jq -r '.phases[] | [.id, .model, .effort,
+                    (.max_budget_usd|tostring), (.max_turns|tostring),
+                    (if .mcp == "none" then "dropped" else "kept" end)] | @tsv' "$CONFIG")
+if [ "$doc_table" = "$cfg_table" ]; then
+  t_pass "the README phase table matches phases.json exactly"
+else
+  t_fail "the README phase table matches phases.json" \
+    "$(diff <(printf '%s\n' "$cfg_table") <(printf '%s\n' "$doc_table") | head -6 | tr '\n' ' ')"
+fi
+# Mutation-verified: changing any model, effort or ceiling in phases.json fails
+# this, naming the row. That is the point — the config is the source of truth and
+# the README is a projection of it, so the projection has to be checked.
+
+# the diagram at the top of the README: two rows of bare words under the phases
+diag_models=$(grep -A2 '^specify  →' "$README" | sed -n '2p' | tr -s ' ' '\n' | grep -c . || true)
+diag_models_list=$(grep -A2 '^specify  →' "$README" | sed -n '2p' | tr -s ' ' ' ' | sed 's/^ //;s/ $//')
+cfg_models=$(jq -r '[.phases[].model] | join(" ")' "$CONFIG")
+assert_eq "$diag_models_list" "$cfg_models" "the README diagram names the same models, in order"
+diag_efforts=$(grep -A3 '^specify  →' "$README" | sed -n '3p' | tr -s ' ' ' ' | sed 's/^ //;s/ $//')
+cfg_efforts=$(jq -r '[.phases[].effort] | join(" ")' "$CONFIG")
+assert_eq "$diag_efforts" "$cfg_efforts" "and the same effort levels, in order"
+[ "$diag_models" -eq 6 ] && t_pass "the diagram covers all six phases" \
+  || t_fail "the diagram covers all six phases" "found $diag_models model labels"
+# Position matters, not just membership: the diagram is the first thing a reader
+# sees, and a correct set in the wrong order is the more misleading failure.
+
+# the assertion count the README advertises must be the count this suite reaches
+doc_count=$(grep -oE 'shellcheck \+ [0-9]+ fixture assertions' "$README" | grep -oE '[0-9]+' || true)
+[ -n "$doc_count" ] && t_pass "the README states an assertion count ($doc_count)" \
+  || t_fail "the README states an assertion count" "no 'N fixture assertions' line found"
+DOC_ASSERTION_COUNT="${doc_count:-0}"    # checked against the real tally at the end
 
 # ================================================================== verify ====
 printf '\nartifact verification\n'
@@ -387,6 +459,29 @@ assert_contains "$(cat "$RJ/specs/001-x/.pipeline/plan.result.json" 2>/dev/null)
 # This says strictly more than the probe did: the reader gets the exact flag the
 # runner objected to, in the runner's words.
 
+# ---------------------------------------------------- configuration sources ----
+printf '\nconfiguration sources\n'
+MYCFG="$WORK/my-phases.json"
+jq '(.phases[] | select(.id=="plan").model) = "haiku"' "$CONFIG" > "$MYCFG"
+
+argv=$(SPEC_RUN_CONFIG="$MYCFG" "$SPEC_RUN" --repo "$BS" --feature-dir "$BS/specs/001-t" \
+        --only plan --dry-run 2>&1)
+assert_contains "$argv" "--model haiku" "SPEC_RUN_CONFIG points at your own phases.json"
+# In plugin mode the bundled config lives under ~/.claude/plugins/cache/ and a
+# plugin UPDATE replaces that directory, so editing it there is a customisation
+# with a deletion date. This is the durable route.
+
+argv=$(SPEC_RUN_CONFIG="$MYCFG" "$SPEC_RUN" --repo "$BS" --feature-dir "$BS/specs/001-t" \
+        --only plan --config "$CONFIG" --dry-run 2>&1)
+assert_contains "$argv" "--model opus" "--config beats the environment, for a one-off"
+
+out=$(SPEC_RUN_CONFIG="$WORK/not-a-file.json" "$SPEC_RUN" --repo "$BS" \
+        --feature-dir "$BS/specs/001-t" --only plan --dry-run 2>&1); rc=$?
+assert_eq "$rc" "1" "a SPEC_RUN_CONFIG that does not exist fails loudly"
+assert_contains "$out" "phase config not found" "naming the file, not falling back silently"
+# Falling back to the bundled default here would run every phase on a model the
+# user thought they had changed — the worst kind of working.
+
 # ------------------------------------------------------- permission denials ----
 printf '\npermission denials\n'
 cat > "$FAKE/claude-denied" <<'FAKEEOF'
@@ -501,6 +596,15 @@ assert_contains "$out" "/speckit-tasks" "--from tasks starts where it says"
 printf '\n%s passed, %s failed' "$pass" "$fail"
 [ "$skipped" -gt 0 ] && printf ', %s skipped' "$skipped"
 printf '\n'
+
+# The README advertises a number. If it is wrong, one of the two is stale — and
+# a count in a README is the single easiest claim to leave behind.
+if [ "${DOC_ASSERTION_COUNT:-0}" -gt 0 ] && [ $((pass + fail)) -ne "$DOC_ASSERTION_COUNT" ]; then
+  printf '\n  \033[31m✗\033[0m the README advertises %s assertions; this run had %s.\n' \
+    "$DOC_ASSERTION_COUNT" "$((pass + fail))"
+  printf '    Update the count in README.md, or work out which assertions stopped running.\n\n'
+  exit 1
+fi
 
 if [ $((pass + fail)) -lt "$TALLY_FLOOR" ]; then
   printf '\n  \033[31m✗\033[0m only %s assertions were COUNTED, expected at least %s.\n' \

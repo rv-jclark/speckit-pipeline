@@ -5,9 +5,12 @@ Run the [spec-kit](https://github.com/github/spec-kit) phases as **separate
 ceiling per phase — instead of one long conversation that does all four.
 
 ```
-specify → [clarify] → plan → tasks → [analyze] → implement
- opus                 opus   sonnet            sonnet
+specify  →  [clarify]  →  plan  →  tasks  →  [analyze]  →  implement
+ opus         opus         opus    sonnet      opus         sonnet
+ high         high         high    medium      high         medium
 ```
+Bracketed phases are opt-in (`--with clarify`). Every value there is data, not
+code — see [Phases](#phases).
 
 ## Why processes rather than one session
 
@@ -37,52 +40,218 @@ pick that phase back up interactively. See [Gates](#gates).
 
 ## Install
 
-### Option A — clone and run
+### Step 0 — prerequisites
+
+```bash
+jq --version        # required
+git --version       # required
+bash --version      # 3.2 is the floor (that is what macOS ships)
+claude --version    # or your wrapper — see "Using a different runner" below
+```
+
+`spec-run` checks all of these before the first phase is billed for anything, and
+names whichever one is missing rather than failing later and vaguely.
+
+### Step 1 — get the tool
+
+**Either** clone it:
 
 ```bash
 git clone git@github.com:rv-jclark/speckit-pipeline.git ~/code/speckit-pipeline
-ln -s ~/code/speckit-pipeline/bin/spec-run      /usr/local/bin/spec-run
-ln -s ~/code/speckit-pipeline/bin/spec-bootstrap /usr/local/bin/spec-bootstrap
+sudo ln -s ~/code/speckit-pipeline/bin/spec-run       /usr/local/bin/spec-run
+sudo ln -s ~/code/speckit-pipeline/bin/spec-bootstrap /usr/local/bin/spec-bootstrap
+spec-run --list      # should print the six phases
 ```
 
-### Option B — as a Claude Code plugin
+**Or** install it as a Claude Code plugin, which gives you `/spec-run` and
+`/spec-status` inside every project with no per-project setup:
 
 ```
 /plugin marketplace add rv-jclark/speckit-pipeline
 /plugin install speckit-pipeline
 ```
 
-Installed at user scope, so `/spec-run` and `/spec-status` are available in
-**every** project without per-project setup. The plugin bundles the engine, so
-both options give you the same thing.
+Both paths ship the same engine — the plugin bundles it — so this is a matter of
+whether you want a shell command, slash commands, or both. The clone also gives
+you a place to edit `lib/phases.json` that a plugin update will not overwrite.
 
 ⚠️ **This repository is private.** The marketplace install resolves over git, so
 it works for anyone with read access and fails for everyone else. To share it,
-either make the repository public or add the person as a collaborator — there is
-no third option, and "it worked on my machine" here means "I am the owner".
+make the repository public or add the person as a collaborator. There is no third
+option, and "it worked on my machine" here means "I am the owner".
 
-Requires `claude`, `jq`, `git`, and `bash`. `spec-run` checks all of them before
-spending anything.
+### Step 2 — prepare each project (once per repo)
 
-## Use
+**You do not need to install spec-kit separately.** This tool vendors it: the
+spec-kit skills and the `.specify` scaffold ship inside
+`plugins/speckit-pipeline/assets/`. There is no `uvx specify init`, no separate
+package, and no network access needed.
 
-Once per repository:
-
-```bash
-spec-bootstrap                    # installs .claude/skills/speckit-* and .specify/
-```
-
-Then, per feature:
+But installing the tool does not prepare a *project*. Run this once in each repo
+you want to use it in:
 
 ```bash
-spec-run "add a CSV export to the metrics page"   # start
-spec-run --resume                                 # continue where it stopped
-spec-run --with clarify --stop-after plan "..."   # scope only, no code
-spec-run --dry-run --only plan                    # print the invocation, run nothing
-spec-run --list                                   # show the configured phases
+cd ~/code/my-project
+spec-bootstrap                    # or: ~/code/speckit-pipeline/bin/spec-bootstrap .
 ```
 
-Or from inside Claude Code: `/spec-run <description>` and `/spec-status`.
+That copies in, without overwriting anything you have authored:
+
+| Path | What it is |
+|---|---|
+| `.claude/skills/speckit-*` | the 14 spec-kit skills the phases invoke |
+| `.specify/scripts/`, `templates/`, `extensions/` | the scaffold those skills execute |
+| `.specify/memory/constitution.md` | seeded from the template **only if absent** |
+| `specs/` | where features land |
+
+It is idempotent — run it again any time; a second run reports `0 installed`. If a
+vendored file already exists and differs, it says so and **leaves yours alone**
+unless you pass `--force`. A difference is not necessarily wrong: you may have
+customised a template deliberately.
+
+### Step 3 — write your constitution
+
+`spec-bootstrap` says this out loud when it seeds one, and it is worth repeating:
+a freshly-seeded `.specify/memory/constitution.md` is a **template**, not a
+neutral default. Every phase reads it, so placeholder text shapes every artifact
+the pipeline produces. Fill it in, or generate it:
+
+```bash
+claude "/speckit-constitution"
+```
+
+### Step 4 — first run
+
+```bash
+spec-run "add a CSV export to the metrics page"
+```
+
+You should see the specify phase start on opus, a feature branch appear, and
+`specs/NNN-slug/spec.md` written. If specify verifies clean, plan follows on
+opus, then tasks and implement on sonnet.
+
+## Using a different runner (e.g. `claude-edits`)
+
+If your organisation blocks permission bypass and you drive Claude through a
+wrapper that answers the prompts, point the engine at it. Three ways, in
+increasing order of how long the setting survives:
+
+**One run** — a flag:
+
+```bash
+spec-run --claude-bin claude-edits "add a CSV export"
+```
+
+**Every run** — an environment variable, so put it in `~/.zshrc`:
+
+```bash
+export SPEC_RUN_CLAUDE_BIN=claude-edits
+```
+
+This is the one to use in plugin mode. The `/spec-run` command shells out to the
+engine, which inherits your shell environment, so it applies to both the CLI and
+the slash command.
+
+**Committed with your tuning** — `claude_bin` in `phases.json`, alongside the
+per-phase models:
+
+```json
+{ "defaults": { "claude_bin": "claude-edits", "permission_mode": "acceptEdits" } }
+```
+
+🛑 **In plugin mode, do not edit the bundled `phases.json` in place.** It lives
+under `~/.claude/plugins/cache/…`, and a plugin update replaces that directory —
+your tuning is a customisation with a deletion date. Keep your own copy and point
+at it:
+
+```bash
+cp ~/.claude/plugins/cache/*/speckit-pipeline/*/lib/phases.json ~/.config/spec-run/phases.json
+export SPEC_RUN_CONFIG=~/.config/spec-run/phases.json     # in ~/.zshrc
+```
+
+`--config <file>` beats `SPEC_RUN_CONFIG` for a one-off. A `SPEC_RUN_CONFIG` that
+does not exist is a hard error naming the file — it does **not** fall back to the
+bundled default, because that would silently run every phase on the model you
+thought you had changed.
+
+Whatever you name is checked for existence and runnability before the first phase
+is billed. The check looks for **the runner you configured**, not for `claude` —
+which was a real defect: `preflight()` once hardcoded `command -v claude` and so
+blocked anyone whose only runner was a wrapper, exactly the case this option
+exists to serve.
+
+## Day-to-day usage
+
+```bash
+# start a feature (runs specify → plan → tasks → implement)
+spec-run "add a CSV export to the metrics page"
+
+# scope only — spec and plan, no code. The stop is structural, not a request.
+spec-run --stop-after plan "rework the auth flow"
+
+# ask me the ambiguous questions first
+spec-run --with clarify "rework the auth flow"
+
+# pick up where it stopped; phases already verified ok are skipped, so this is
+# cheap and safe to repeat
+spec-run --resume
+
+# re-run one phase after editing its input
+spec-run --only plan --force
+
+# see the invocation without spending anything
+spec-run --dry-run --only implement
+
+# what has run, on what, for how much
+spec-run --list                  # the configured phases
+spec-status                      # inside Claude Code: /spec-status
+cat specs/*/.pipeline/cost.log  # per-attempt cost, turns, duration
+```
+
+Per-run overrides, when a phase deserves a different model than the config says:
+
+```bash
+spec-run --model plan=sonnet --effort tasks=low --budget 25 "..."
+```
+
+### When it stops
+
+It stops for one of three reasons, and says which:
+
+| It printed | What happened | What to do |
+|---|---|---|
+| `needs_input` | the artifact exists but records an open question | answer it, then `spec-run --resume` |
+| `failed` | the artifact is absent, thin, or the phase did not complete | read the reason; fix the cause before retrying |
+| `gate:` | a configured pause (`clarify`, or `--stop-after`) | review the artifact, then `spec-run --resume` |
+
+In the first two cases it prints the phase's own account and two commands:
+
+```
+claude --resume 6f2c…     # pick that phase's thread back up, in conversation
+spec-run --resume         # carry on
+```
+
+Resuming the phase's own session is usually what you want — your answers land in
+the context that asked the question, with its full history. The engine cannot ask
+you anything mid-run (see below), so this is the channel.
+
+### Where everything is written
+
+```
+specs/NNN-my-feature/
+├── spec.md, plan.md, tasks.md      the artifacts, written by the skills
+├── research.md, data-model.md …    plan's supporting output
+└── .pipeline/
+    ├── state.json                  per-phase status, model, cost, session ids
+    ├── cost.log                    one tab-separated line per attempt
+    └── <phase>.result.json         that phase's stdout, stderr and exit code
+```
+
+`.pipeline/` is run state, not source. To keep it out of git:
+
+```bash
+echo 'specs/*/.pipeline/' >> .gitignore
+```
 
 ## Phases
 
@@ -108,54 +277,44 @@ Phases that talk to nothing external run with `--strict-mcp-config` and an empty
 server list: a phase should not pay for a tool list it cannot use. Implementation
 keeps its MCP servers.
 
-## Permissions, and a custom phase runner
+## Permissions
 
-Each phase runs `--permission-mode acceptEdits` (configurable in
-`phases.json`). In print mode there is **no interactive prompt**: a tool call the
-harness will not allow is *denied and reported to the model*, which then either
-works around it or gives up — it does not hang waiting for a human. Measured on
-the smoke runs, spec-kit's own `create-new-feature.sh` and
-`update-agent-context.sh` both ran fine under `acceptEdits`.
+Each phase runs `--permission-mode acceptEdits` (configurable as
+`defaults.permission_mode` in `phases.json`). In print mode there is **no
+interactive prompt**: a tool call the harness will not allow is *denied and
+reported to the model*, which then works around it or gives up — it does not hang
+waiting for a human. Measured on the smoke runs, spec-kit's own
+`create-new-feature.sh` and `update-agent-context.sh` both ran fine under
+`acceptEdits`.
 
-If your organisation blocks permission bypass and you drive Claude through a
-wrapper that answers the prompts, point the engine at it:
+Denied tool calls are **counted and named**, not inferred. The CLI reports its own
+refusals in the result (`permission_denials`), so a phase's note reads
+`3 tool call(s) were DENIED to this phase (Bash, Write)` rather than leaving you
+to guess from a thin artifact. An empty spec and "17 denials" are the same
+artifact with completely different remedies.
 
-```bash
-spec-run --claude-bin claude-edits "..."     # or SPEC_RUN_CLAUDE_BIN=claude-edits
-                                             # or defaults.claude_bin in phases.json
-```
+Worth trying before reaching for a wrapper: the CLI accepts `dontAsk` and
+`bypassPermissions` as well as `acceptEdits`, and that is one line of data in
+`phases.json`. If your organisation's policy is what blocks those, a wrapper is
+the answer — see [Using a different runner](#using-a-different-runner-eg-claude-edits).
 
-The named command is checked for two things before the first phase is billed:
-that it **exists**, and that it **runs**. Flag support is deliberately *not*
-probed. The version that tried was vacuously permissive — passing a flag
-alongside `--help` short-circuits before option validation, so a flag that cannot
-exist came back "accepted", and a second probe form disagreed with the first
-about the same input. A check whose verdict depends on how you phrase it gets
-reported as a guarantee and isn't one, so it was removed rather than softened
-into a warning.
+**Flag support is deliberately not probed.** The version that tried was vacuously
+permissive: passing a flag alongside `--help` short-circuits before option
+validation, so a flag that cannot exist came back "accepted", and a second probe
+form disagreed with the first about the same input. A check whose verdict depends
+on how you phrase it gets reported as a guarantee and is not one, so it was
+removed rather than softened into a warning.
 
-That failure is caught where it actually happens instead. A runner that rejects a
-flag exits without doing any work, so the phase's artifact does not move and the
-non-run rule fails it by name — with the runner's own stderr, stdout and exit
-code preserved in `.pipeline/<phase>.result.json`. You get the exact flag it
-objected to, in its own words, which is strictly more than the probe was telling
-you.
+That failure is caught where it happens instead. A runner that rejects a flag
+exits without doing any work, so its artifact does not move, the completion check
+fails the phase by name, and the runner's own stderr, stdout and exit code are
+kept in `.pipeline/<phase>.result.json`. You get the exact flag it objected to, in
+its own words — strictly more than the probe was telling you.
 
 One measured aside on why documentation is a bad basis for this: `--max-turns` is
 accepted by `claude` 2.1.238 and appears **nowhere** in its `--help`. The
 help-reading probe duly warned that a ceiling was missing while it was being
 applied.
-
-Denied tool calls are **counted and named**, not inferred. The CLI reports its
-own refusals in the result (`permission_denials`), so a phase's note reads
-`3 tool call(s) were DENIED to this phase (Bash, Write)` rather than leaving you
-to guess from a thin artifact. An empty spec and "17 denials" are the same
-artifact with completely different remedies.
-
-Worth trying before reaching for a wrapper: `permission_mode` is already data in
-`phases.json`, and the CLI accepts `dontAsk` and `bypassPermissions` as well as
-`acceptEdits`. If your organisation's policy is what blocks those, the wrapper is
-the answer; if it was only the interactive prompt, a one-line config change is.
 
 ### Can a phase ask you something mid-run?
 
@@ -299,9 +458,16 @@ guarantee is bigger than it is.
 
 ## Licence
 
-MIT, with one thing worth knowing: `plugins/speckit-pipeline/assets/` is vendored
-from [github/spec-kit](https://github.com/github/spec-kit) (also MIT) and stays
-under its own upstream licence. See `assets/UPSTREAM.md`.
+MIT (`LICENSE`), with the vendored-code position recorded separately in
+`NOTICE`: `plugins/speckit-pipeline/assets/` comes from
+[github/spec-kit](https://github.com/github/spec-kit) (also MIT) and stays under
+its own upstream copyright.
+
+The split is deliberate rather than tidy-mindedness. That note was originally
+appended to `LICENSE`, which broke GitHub's exact-match detection — the
+repository reported *"no licence detected"* while containing a complete MIT
+grant, and a licence tooling cannot see is one some consumers will treat as
+absent.
 
 ## Vendored spec-kit
 
@@ -309,6 +475,28 @@ under its own upstream licence. See `assets/UPSTREAM.md`.
 scaffold, so a fresh repository needs one `spec-bootstrap` and no separate
 spec-kit install. Provenance and the pinned version are in
 [`assets/UPSTREAM.md`](plugins/speckit-pipeline/assets/UPSTREAM.md).
+
+Two deliberate deviations from the scaffold it was copied from, both recorded in
+`UPSTREAM.md` so neither is silent:
+
+- **The plan template's Constitution Check is upstream's placeholder.** The
+  scaffold had five concrete gates written into it — one project's architecture
+  principles, naming an internal service, hardcoded into the template every other
+  project would inherit. Gates belong in a project's own
+  `.specify/memory/constitution.md`, which is where the plan phase reads them
+  from; `.specify/templates/overrides/` is there if you do want them at template
+  level.
+- **The spec template's `Testing Strategy *(mandatory)*` section is kept.** It is
+  an addition to upstream, but unlike the gates it names nothing
+  project-specific: it asks what needs automated coverage, and what is
+  deliberately not covered, before planning starts.
+
+⚠️ These assets are a **0.7.3-era** scaffold, not upstream `main`, and the gap is
+wide — measured 2026-08-20, `common.sh` is 12KB here against 38KB upstream. Most
+of what a diff shows as local customisation is simply age. The pin is held rather
+than chased because the engine depends on the `feature.json` and
+`check-prerequisites.sh --json` contracts, which have not been re-validated
+against main; refreshing is a real piece of work with real regression risk.
 
 The skills install into the project as **unnamespaced** `.claude/skills/speckit-*`
 rather than being served from the plugin namespace. That is not incidental:
@@ -320,13 +508,24 @@ reports success over a directory the rest of the pipeline cannot find.
 ## Tests
 
 ```bash
-./tests/run.sh          # shellcheck + 92 fixture assertions
+./tests/run.sh          # shellcheck + 104 fixture assertions
 ```
 
-No test spends money: the invocation assertions run under `--dry-run` and check
-the exact argv. Assertions here are mutation-checked, and where a mutation is not
-obvious it is named in a comment. Three defects in this suite are worth knowing
-about, because each one passed while checking nothing:
+**The suite is hermetic.** A stub runner shadows the real `claude` for the whole
+run, so nothing spends money, nothing needs a login, and the result is the same
+on a laptop as in CI. It asserts that property explicitly, because it is
+invisible on a machine where the real binary happens to be installed. The tests
+that care about a *missing* runner name one explicitly and so are unaffected by
+`PATH`.
+
+That was not free either: CI has no `claude`, and the first run there failed
+**30** assertions that were green locally — they exited at the prerequisite check
+having never reached an argv. The fixture was more permissive than the
+environment it claimed to describe.
+
+Assertions are mutation-checked, and where a mutation is not obvious it is named
+in a comment. Five defects in this suite are worth knowing about, because every
+one of them passed while checking nothing:
 
 - Two assertions matched `printf %q` **escaping** rather than content, and passed
   against a build that denied pushing to every phase.
@@ -344,3 +543,22 @@ about, because each one passed while checking nothing:
   exited 0. Hence `TALLY_FLOOR` — a run that counts fewer assertions than the
   floor fails, because nothing else distinguishes "all of them ran" from "most of
   them printed".
+- A scope assertion snapshotted the tree **after** the write it meant to detect,
+  so the check was correctly silent and the test failed against working code. The
+  fix is ordering, and the lesson is that a baseline taken too late proves
+  nothing.
+
+## What it cost, measured
+
+Real numbers from the smoke feature (a `--version` flag on a one-file CLI), with
+both phases **overridden to sonnet** — so read them as a floor, not as what the
+configured opus defaults cost:
+
+| Phase | Model | Turns | Cost | Wall clock |
+|---|---|---|---|---|
+| specify | sonnet | 15 | $0.62 | 75s |
+| plan | sonnet | 18 | $0.31 | 70s |
+
+Every run appends to `specs/<feature>/.pipeline/cost.log`, so the answer to "is
+opus on plan worth it" is measurable in your repo rather than arguable. Attempts
+that could not be measured are recorded `unmeasured`, never as `$0`.

@@ -28,7 +28,12 @@ export SPECKIT_PIPELINE_ROOT
 # shellcheck source=../lib/verify.sh
 . "$SPECKIT_PIPELINE_ROOT/lib/verify.sh"
 
-CONFIG="$SPECKIT_PIPELINE_ROOT/lib/phases.json"
+# The bundled config is the default. SPEC_RUN_CONFIG lets you keep your own
+# outside the package, which matters in plugin mode: the plugin lives under
+# ~/.claude/plugins/cache/... and a plugin UPDATE replaces that directory, so an
+# edit made there is a customisation with a deletion date. --config still wins
+# over the environment, for a one-off.
+CONFIG="${SPEC_RUN_CONFIG:-$SPECKIT_PIPELINE_ROOT/lib/phases.json}"
 
 # ------------------------------------------------------------------ usage -----
 
@@ -48,7 +53,9 @@ OPTIONS
                          organisation's permission prompts. The named command is
                          probed, and any flag it does not advertise is reported.
   --feature-dir <path>   skip discovery, use this feature directory
-  --config <file>        alternate phases.json
+  --config <file>        alternate phases.json (or set SPEC_RUN_CONFIG; the flag
+                         wins). Use this to keep your tuning outside the plugin,
+                         which a plugin update would otherwise overwrite.
   --from <phase>         start at this phase
   --stop-after <phase>   stop after this phase, whatever the config says
   --with <p[,p]>         also run optional phases (clarify, analyze)

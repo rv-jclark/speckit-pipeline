@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+#
+# spec-status — what has run for the current feature, on what, and for how much.
+#
+# Reads the state file rather than inferring from which artifacts exist. A present
+# plan.md cannot distinguish "planning finished" from "planning was killed halfway
+# through writing it", and that distinction is the whole reason the state file
+# exists — so when there is no state file this says so plainly instead of
+# guessing from the directory listing.
+
+set -uo pipefail
+
+SPECKIT_PIPELINE_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+export SPECKIT_PIPELINE_ROOT
+# shellcheck source=../lib/common.sh
+. "$SPECKIT_PIPELINE_ROOT/lib/common.sh"
+
+REPO=""; FEATURE_DIR=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --repo)        REPO="${2:-}"; shift 2 || exit 3;;
+    --feature-dir) FEATURE_DIR="${2:-}"; shift 2 || exit 3;;
+    -h|--help)
+      cat <<'EOF'
+spec-status — show the current feature's pipeline state
+
+USAGE
+  spec-status [--repo <path>] [--feature-dir <path>]
+
+Prints each phase's status, model, effort, cost and turns, the total, and what
+to do next. Exit 0 if there is state to show, 1 if there is not.
+EOF
+      exit 0;;
+    *) die "unknown option: $1";;
+  esac
+done
+
+if [ -z "$REPO" ]; then
+  REPO=$(git rev-parse --show-toplevel 2>/dev/null) || \
+    die "not inside a git repository" "pass --repo <path>"
+fi
+REPO=$(cd -- "$REPO" && pwd)
+command -v jq >/dev/null 2>&1 || die "jq not on PATH" "install: brew install jq"
+
+if [ -z "$FEATURE_DIR" ]; then
+  rel=$(jq -r '.feature_directory // empty' "$REPO/.specify/feature.json" 2>/dev/null)
+  if [ -z "$rel" ] && [ -x "$REPO/.specify/scripts/bash/check-prerequisites.sh" ]; then
+    rel=$( cd "$REPO" && ./.specify/scripts/bash/check-prerequisites.sh --json 2>/dev/null |
+           jq -r '.FEATURE_DIR // empty' 2>/dev/null )
+  fi
+  [ -n "$rel" ] || die "no current feature found in $REPO" \
+    "start one: spec-run \"<what you want built>\""
+  case "$rel" in /*) FEATURE_DIR="$rel";; *) FEATURE_DIR="$REPO/$rel";; esac
+fi
+
+say ""
+say "feature  $(dim_s "${FEATURE_DIR#"$REPO"/}")"
+
+STATE="$FEATURE_DIR/.pipeline/state.json"
+if [ ! -f "$STATE" ]; then
+  say ""
+  warn "no pipeline state recorded at ${STATE#"$REPO"/}"
+  say  "  Artifacts may exist, but nothing here knows whether the phase that was"
+  say  "  meant to write them finished. Which files are present cannot tell you"
+  say  "  that, so this does not guess."
+  say ""
+  say  "  present in the feature directory:"
+  ls -1 "$FEATURE_DIR" 2>/dev/null | sed 's/^/    /'
+  say ""
+  exit 1
+fi
+
+say ""
+printf '  %-10s %-8s %-7s %-12s %10s %6s\n' PHASE MODEL EFFORT STATUS COST TURNS
+jq -r '.phases | to_entries[] |
+       [.key, (.value.model // "-"), (.value.effort // "-"), (.value.status // "-"),
+        (if .value.cost_usd == null then "unmeasured" else "$" + (.value.cost_usd|tostring) end),
+        (if .value.num_turns == null then "?" else (.value.num_turns|tostring) end)] | @tsv' "$STATE" |
+  while IFS=$'\t' read -r a b c d e f; do
+    printf '  %-10s %-8s %-7s %-12s %10s %6s\n' "$a" "$b" "$c" "$d" "$e" "$f"
+  done
+printf '  %-10s %-8s %-7s %-12s %10s\n' TOTAL "" "" "" "\$$(state_total_cost "$STATE")"
+
+# What to do next, derived from the recorded statuses rather than announced.
+say ""
+blocked=$(jq -r '[.phases | to_entries[] | select(.value.status=="needs_input" or .value.status=="failed")]
+                 | if length==0 then "" else .[0].key + "\t" + .[0].value.status + "\t"
+                     + (.[0].value.note // "") + "\t" + (.[0].value.session_id // "") end' "$STATE")
+if [ -n "$blocked" ]; then
+  IFS=$'\t' read -r bphase bstatus bnote bsid <<<"$blocked"
+  case "$bstatus" in
+    needs_input) warn "$bphase needs input: $bnote";;
+    failed)      err  "$bphase failed: $bnote";;
+  esac
+  say ""
+  [ -n "$bsid" ] && say "  pick that phase up in conversation:  claude --resume $bsid"
+  say "  then continue:                       spec-run --resume"
+else
+  ok "no phase is blocked"
+  say "  continue with: spec-run --resume"
+fi
+
+if [ -f "$FEATURE_DIR/.pipeline/cost.log" ]; then
+  say ""
+  say "cost log ($(( $(grep -c '' "$FEATURE_DIR/.pipeline/cost.log") - 1 )) attempt(s)):"
+  dim "  ${FEATURE_DIR#"$REPO"/}/.pipeline/cost.log"
+fi
+say ""
