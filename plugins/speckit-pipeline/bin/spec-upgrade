@@ -1,0 +1,460 @@
+#!/usr/bin/env bash
+#
+# spec-upgrade — bring a project's spec-kit scaffold up to the version this
+# pipeline vendors, without losing what the project changed.
+#
+# Upstream has no project-upgrade command. `specify self` upgrades the CLI, not a
+# project; the only way to refresh a scaffold is `specify init --here --force`,
+# which overwrites — no diff, no backup, and no notion of what the project
+# customised. That is the gap this fills.
+#
+# Three things make it safe rather than brave:
+#
+#   * git is the undo. It refuses to run over uncommitted changes in the paths it
+#     will touch, so `git diff` is the review and `git checkout` is the revert.
+#     A backup directory nobody reads is not a safety feature.
+#   * customised templates are copied to .specify/templates/overrides/ BEFORE
+#     the pristine upstream files land. Overrides are Priority 1 in spec-kit's
+#     own resolution order (verified in 0.16.5's common.sh), so the project keeps
+#     its behaviour and still gets the upgrade.
+#   * it never touches .specify/memory/constitution.md, .specify/feature.json or
+#     specs/. Those are the project's own assertions and state, not scaffold.
+#
+# Exit codes:  0 upgraded, already current, or a clean --check
+#              1 refused, or something needs a human
+#              2 --check found drift (so CI can gate on it)
+#              3 usage error
+
+set -uo pipefail
+
+SPECKIT_PIPELINE_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+export SPECKIT_PIPELINE_ROOT
+# shellcheck source=../lib/common.sh
+. "$SPECKIT_PIPELINE_ROOT/lib/common.sh"
+
+ASSETS="$SPECKIT_PIPELINE_ROOT/assets"
+TARGET_VERSION=$(jqd "$SPECKIT_PIPELINE_ROOT/.claude-plugin/plugin.json" '.metadata.speckit_version' unknown)
+
+# Never scaffold. The project's own assertions and state.
+_is_sacred() {
+  case "$1" in
+    .specify/memory/*|.specify/feature.json|.specify/templates/overrides/*) return 0;;
+    # The integration record: which agent is installed, and which spec-kit version
+    # the project is on. Not scaffold to replace, and emphatically not to prune —
+    # the first dry-run offered to delete it, which would have left the project
+    # unversioned and every later --check unable to answer. Its `version` field is
+    # UPDATED at the end instead, or the project reports the old version forever.
+    .specify/integration.json) return 0;;
+    *) return 1;;
+  esac
+}
+
+# Did the PROJECT change this file, or did upstream? "Differs from what we vendor"
+# answers neither, and conflating them is how an upgrade quietly freezes a
+# project on its old templates: preserving all four of quests's templates as
+# overrides would have pinned it to 0.7.3-era behaviour forever, which is the
+# opposite of upgrading.
+#
+# git answers it offline and exactly: a scaffold file imported once and never
+# touched has one commit. Measured — quests, unmodified: every template 1 commit.
+# agents, customised: plan-template 3, spec-template 2, tasks-template 1, which
+# is precisely which ones had been edited.
+_is_customized() { # _is_customized <repo> <rel>  -> 0 customised, 1 pristine
+  local r="$1" rel="$2" n
+  git -C "$r" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
+  n=$(git -C "$r" log --format=%H -- "$rel" 2>/dev/null | grep -c . || echo 0)
+  # Untracked (0) means we cannot tell, so assume customised: keeping a file
+  # somebody may have written beats replacing it.
+  [ "${n:-0}" -eq 1 ] && return 1
+  return 0
+}
+
+usage() {
+  cat <<'EOF'
+spec-upgrade — bring a project's spec-kit scaffold up to the vendored version
+
+USAGE
+  spec-upgrade [--repo <path>]         upgrade one project
+  spec-upgrade --check [--repo <path>] report its version and drift, change nothing
+  spec-upgrade --scan <dir>            report every spec-kit project under <dir>
+  spec-upgrade --dry-run               print the exact plan, change nothing
+
+OPTIONS
+  --repo <path>   project to act on (default: git toplevel of cwd)
+  --scan <dir>    report on every git repository under <dir> that has .specify/
+  --check         report only; exit 2 if the project is not on the vendored version
+  --dry-run       print the plan without touching anything
+  --pristine      do NOT preserve customised templates as overrides (replace them)
+  --prune         delete scaffold files that the new version no longer ships
+  --yes           skip the confirmation prompt
+  --version       print the version and where this copy is installed
+  -h, --help
+
+WHAT IT PRESERVES
+  A template you have customised is copied to .specify/templates/overrides/
+  before the pristine upstream file lands. Overrides are Priority 1 in spec-kit's
+  own template resolution, so your version keeps winning.
+
+  Never touched: .specify/memory/constitution.md, .specify/feature.json, specs/.
+  Extensions the project has that the vendored bundle lacks are left alone.
+
+WHAT IT REFUSES
+  Uncommitted changes in the paths it would write. git is the undo here, and it
+  cannot be if your work is sitting on top of the scaffold.
+EOF
+}
+
+REPO=""; SCAN=""; CHECK=0; DRY_RUN=0; PRISTINE=0; PRUNE=0; ASSUME_YES=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --repo)      REPO="${2:-}"; shift 2 || exit 3;;
+    --scan)      SCAN="${2:-}"; shift 2 || exit 3;;
+    --check)     CHECK=1; shift;;
+    --dry-run)   DRY_RUN=1; shift;;
+    --pristine)  PRISTINE=1; shift;;
+    --prune)     PRUNE=1; shift;;
+    --yes|-y)    ASSUME_YES=1; shift;;
+    --version)   pipeline_version "${REPO:-}"; exit 0;;
+    -h|--help)   usage; exit 0;;
+    *)           die_usage "unknown option: $1";;
+  esac
+done
+
+command -v jq >/dev/null 2>&1 || die "jq not on PATH" "install: brew install jq"
+[ -d "$ASSETS/specify" ] || die "vendored assets missing: $ASSETS/specify" \
+  "this looks like an incomplete clone of speckit-pipeline"
+
+# ------------------------------------------------------- project version -------
+# Two files record it and they can disagree, so read both and say which answered.
+project_version() { # project_version <repo>  -> prints "<version>\t<source>"
+  local r="$1" v
+  v=$(jqd "$r/.specify/integration.json" '.version' "")
+  if [ -n "$v" ]; then printf '%s\tintegration.json\n' "$v"; return 0; fi
+  v=$(jqd "$r/.specify/init-options.json" '.speckit_version' "")
+  if [ -n "$v" ]; then printf '%s\tinit-options.json\n' "$v"; return 0; fi
+  printf 'unknown\tneither integration.json nor init-options.json records one\n'
+}
+
+# --------------------------------------------------------------- the scan ------
+if [ -n "$SCAN" ]; then
+  [ -d "$SCAN" ] || die "no such directory: $SCAN"
+  SCAN=$(cd -- "$SCAN" && pwd)
+  say ""
+  say "spec-kit across $SCAN   $(dim_s "(this pipeline vendors $TARGET_VERSION)")"
+  say ""
+  printf '    %-24s %-10s %-12s %-6s %s\n' PROJECT VERSION INTEGRATION SPECS ""
+  drift=0; total=0
+  for d in "$SCAN"/*/; do
+    d=${d%/}
+    [ -d "$d/.specify" ] || continue
+    total=$((total + 1))
+    IFS=$'\t' read -r v _src < <(project_version "$d")
+    sk=0; for x in "$d"/.claude/skills/speckit-*; do [ -d "$x" ] && sk=$((sk + 1)); done
+    cm=0; for x in "$d"/.claude/commands/speckit*; do [ -f "$x" ] && cm=$((cm + 1)); done
+    sp=0; for x in "$d"/specs/*/; do [ -d "$x" ] && sp=$((sp + 1)); done
+    # How spec-kit is exposed here, which is a different fact from its version and
+    # the one that decides whether this pipeline can drive it at all.
+    if [ "$sk" -gt 0 ]; then shape="skills:$sk"
+    elif [ "$cm" -gt 0 ]; then shape="commands:$cm"
+    else shape="none"; fi
+    if [ "$v" = "$TARGET_VERSION" ] && [ "$sk" -gt 0 ]; then
+      mark="✓"; note=""
+    else
+      mark="·"; drift=$((drift + 1))
+      case "$shape" in
+        commands:*) note="pre-skills — spec-run cannot drive it";;
+        none)       note="scaffold only, no integration installed";;
+        *)          note="→ $TARGET_VERSION";;
+      esac
+    fi
+    printf '  %s %-24s %-10s %-12s %-6s %s\n' "$mark" "$(basename "$d")" "$v" "$shape" "$sp" "$note"
+  done
+  say ""
+  if [ "$total" -eq 0 ]; then
+    say "  no spec-kit projects found under $SCAN"
+    exit 0
+  fi
+  # The denominator matters: "3 behind" means nothing without the total.
+  say "  $((total - drift)) of $total on $TARGET_VERSION${drift:+, $drift behind}"
+  [ "$drift" -gt 0 ] && say "  upgrade one:  spec-upgrade --repo <path> --dry-run"
+  say ""
+  [ "$drift" -gt 0 ] && exit 2
+  exit 0
+fi
+
+# --------------------------------------------------------------- one repo ------
+if [ -z "$REPO" ]; then
+  REPO=$(git rev-parse --show-toplevel 2>/dev/null) || \
+    die "not inside a git repository" "pass --repo <path>, or --scan <dir> for a survey"
+fi
+REPO=$(cd -- "$REPO" && pwd)
+[ -d "$REPO/.specify" ] || die "no .specify/ in $REPO — nothing to upgrade" \
+  "to set it up from scratch: spec-bootstrap $REPO"
+
+IFS=$'\t' read -r CURRENT VSOURCE < <(project_version "$REPO")
+
+say ""
+say "project  $(dim_s "$REPO")"
+say "spec-kit $CURRENT $(dim_s "(per $VSOURCE)")  →  $TARGET_VERSION $(dim_s "(vendored)")"
+say ""
+
+# ------------------------------------------------------------- the plan --------
+# Classify every vendored file against the project, and every scaffold file the
+# project has that the new version no longer ships. Report before acting: an
+# upgrade that cannot be previewed is a leap.
+PLAN=$(mktemp); trap 'rm -f "$PLAN"' EXIT
+
+classify() { # classify <src_abs> <rel_in_project>
+  local src="$1" rel="$2"
+  local dst="$REPO/$rel"
+  _is_sacred "$rel" && { printf 'sacred\t%s\n' "$rel" >> "$PLAN"; return; }
+  if [ ! -e "$dst" ]; then printf 'new\t%s\n' "$rel" >> "$PLAN"; return; fi
+  if cmp -s "$src" "$dst"; then printf 'same\t%s\n' "$rel" >> "$PLAN"
+  else printf 'differs\t%s\n' "$rel" >> "$PLAN"; fi
+}
+
+# vendored skills
+while IFS= read -r f; do
+  classify "$f" ".claude/skills/${f#"$ASSETS/claude-skills/"}"
+done < <(find "$ASSETS/claude-skills" -type f 2>/dev/null)
+# vendored .specify
+while IFS= read -r f; do
+  classify "$f" ".specify/${f#"$ASSETS/specify/"}"
+done < <(find "$ASSETS/specify" -type f 2>/dev/null)
+
+# scaffold the project has that the new version does not ship
+while IFS= read -r f; do
+  rel=".specify/${f#"$REPO/.specify/"}"
+  _is_sacred "$rel" && continue
+  case "$rel" in .specify/extensions/*) continue;; esac   # extensions handled below
+  [ -e "$ASSETS/specify/${f#"$REPO/.specify/"}" ] || printf 'retired\t%s\n' "$rel" >> "$PLAN"
+done < <(find "$REPO/.specify" -type f 2>/dev/null)
+while IFS= read -r f; do
+  rel=".claude/skills/${f#"$REPO/.claude/skills/"}"
+  case "$rel" in .claude/skills/speckit-*) ;; *) continue;; esac
+  [ -e "$ASSETS/claude-skills/${f#"$REPO/.claude/skills/"}" ] || printf 'retired\t%s\n' "$rel" >> "$PLAN"
+done < <(find "$REPO/.claude/skills" -type f 2>/dev/null)
+
+# A commands-era install is not "retired scaffold" — it is a different, older
+# integration for the same tool. Installing skills alongside it leaves two ways
+# to invoke the same phases, which can then drift apart.
+LEGACY_COMMANDS=""
+for x in "$REPO"/.claude/commands/speckit*; do
+  [ -f "$x" ] && LEGACY_COMMANDS="${LEGACY_COMMANDS:+$LEGACY_COMMANDS }$(basename "$x")"
+done
+
+n_of() { grep -c "^$1	" "$PLAN" 2>/dev/null || true; }
+N_NEW=$(n_of new); N_DIFF=$(n_of differs); N_SAME=$(n_of same); N_RET=$(n_of retired)
+
+# Extensions are the project's choice, not ours to revoke.
+EXT_PROJECT=""; EXT_BUNDLE=""; EXT_ONLY_PROJECT=""
+[ -d "$REPO/.specify/extensions" ] && EXT_PROJECT=$(ls -1 "$REPO/.specify/extensions" 2>/dev/null | tr '\n' ' ')
+[ -d "$ASSETS/specify/extensions" ] && EXT_BUNDLE=$(ls -1 "$ASSETS/specify/extensions" 2>/dev/null | tr '\n' ' ')
+for e in $EXT_PROJECT; do
+  case " $EXT_BUNDLE " in *" $e "*) ;; *) EXT_ONLY_PROJECT="${EXT_ONLY_PROJECT:+$EXT_ONLY_PROJECT }$e";; esac
+done
+
+printf '  %-10s %s\n' "unchanged" "$N_SAME file(s) already identical"
+printf '  %-10s %s\n' "new" "$N_NEW file(s) this version adds"
+printf '  %-10s %s\n' "changed" "$N_DIFF file(s) differ"
+printf '  %-10s %s\n' "retired" "$N_RET file(s) the new version no longer ships"
+say ""
+say "  extensions here:   ${EXT_PROJECT:-none}"
+say "  extensions vendored: ${EXT_BUNDLE:-none}"
+[ -n "$EXT_ONLY_PROJECT" ] && say "  kept as-is (yours):  $EXT_ONLY_PROJECT"
+
+# Which of the changed files are templates? Those are where customisation lives,
+# and they are the whole reason this tool is not `cp -R`.
+CUSTOM_TEMPLATES=""; PRISTINE_TEMPLATES=""
+while IFS= read -r rel; do
+  [ -n "$rel" ] || continue
+  case "$rel" in */overrides/*) continue;; esac
+  if _is_customized "$REPO" "$rel"; then
+    CUSTOM_TEMPLATES="${CUSTOM_TEMPLATES:+$CUSTOM_TEMPLATES
+}$rel"
+  else
+    PRISTINE_TEMPLATES="${PRISTINE_TEMPLATES:+$PRISTINE_TEMPLATES
+}$rel"
+  fi
+done <<EOF
+$(grep "^differs	.specify/templates/" "$PLAN" 2>/dev/null | sed 's/^differs	//')
+EOF
+
+if [ -n "$PRISTINE_TEMPLATES" ]; then
+  say ""
+  say "  these templates differ only because upstream changed them — one commit each,"
+  say "  never edited here — so they are simply upgraded:"
+  printf '%s\n' "$PRISTINE_TEMPLATES" | sed 's|^|      |'
+fi
+if [ -n "$CUSTOM_TEMPLATES" ]; then
+  say ""
+  if [ "$PRISTINE" -eq 1 ]; then
+    warn "  these templates were EDITED here and --pristine will replace them:"
+  else
+    say "  these templates were edited here (more than one commit), so each is copied"
+    say "  to templates/overrides/ first — spec-kit resolves overrides before the core"
+    say "  copy, so your version keeps winning while the rest upgrades:"
+  fi
+  printf '%s\n' "$CUSTOM_TEMPLATES" | sed 's|^|      |'
+fi
+
+if [ "$N_RET" -gt 0 ]; then
+  say ""
+  if [ "$PRUNE" -eq 1 ]; then
+    warn "  --prune will DELETE these, which the new version no longer ships:"
+  else
+    say "  no longer shipped upstream (left in place; --prune removes them):"
+  fi
+  grep "^retired	" "$PLAN" | sed 's/^retired	/      /'
+fi
+say ""
+
+if [ -n "$LEGACY_COMMANDS" ]; then
+  say ""
+  warn "  this project uses the pre-skills COMMAND integration:"
+  printf '      %s\n' "$LEGACY_COMMANDS"
+  say  "  Upgrading installs the skills integration alongside it, leaving two ways"
+  say  "  to invoke the same phases. They can then drift. Remove the old commands"
+  say  "  yourself once you are satisfied — this tool will not delete files it did"
+  say  "  not install."
+fi
+
+if [ "$CHECK" -eq 1 ]; then
+  if [ "$CURRENT" = "$TARGET_VERSION" ] && [ "$N_DIFF" -eq 0 ] && [ "$N_NEW" -eq 0 ]; then
+    ok "already on $TARGET_VERSION with no drift"
+    exit 0
+  fi
+  warn "not on the vendored version, or drifted from it"
+  say  "  preview the upgrade: spec-upgrade --repo $REPO --dry-run"
+  exit 2
+fi
+
+if [ "$N_DIFF" -eq 0 ] && [ "$N_NEW" -eq 0 ] && [ "$N_RET" -eq 0 ]; then
+  ok "nothing to do — already identical to the vendored $TARGET_VERSION"
+  exit 0
+fi
+
+if [ "$DRY_RUN" -eq 1 ]; then
+  say "  (--dry-run: nothing was changed)"
+  say ""
+  exit 0
+fi
+
+# --------------------------------------------------------------- refuse --------
+# git is the undo, and it cannot be if uncommitted work sits on the scaffold.
+DIRTY=$(git -C "$REPO" status --porcelain -- .specify .claude/skills 2>/dev/null |
+        grep -v '^?? ' || true)
+if [ -n "$DIRTY" ]; then
+  err "uncommitted changes in the paths this would rewrite:"
+  printf '%s\n' "$DIRTY" | head -20 | sed 's/^/    /'
+  say ""
+  say "  Commit or stash them first. git diff is how you review this upgrade and"
+  say "  git checkout is how you undo it, and neither works over existing edits."
+  exit 1
+fi
+
+if [ "$ASSUME_YES" -eq 0 ]; then
+  printf '  Proceed? [y/N] '
+  read -r reply </dev/tty 2>/dev/null || reply=""
+  case "$reply" in y|Y|yes|YES) ;; *) say "  nothing changed"; exit 1;; esac
+fi
+
+# --------------------------------------------------------------- apply ---------
+say ""
+# 1. preserve customised templates as overrides, before anything is replaced
+if [ "$PRISTINE" -eq 0 ] && [ -n "$CUSTOM_TEMPLATES" ]; then
+  mkdir -p "$REPO/.specify/templates/overrides"
+  while IFS= read -r rel; do
+    [ -n "$rel" ] || continue
+    base=$(basename "$rel")
+    ovr="$REPO/.specify/templates/overrides/$base"
+    if [ -e "$ovr" ]; then
+      warn "an override already exists, leaving it: templates/overrides/$base"
+    else
+      cp "$REPO/$rel" "$ovr"
+      ok "preserved as an override: templates/overrides/$base"
+    fi
+  done <<EOF
+$CUSTOM_TEMPLATES
+EOF
+fi
+
+# 2. land the vendored files
+installed=0
+while IFS=$'\t' read -r kind rel; do
+  case "$kind" in new|differs) ;; *) continue;; esac
+  case "$rel" in
+    .claude/skills/*) src="$ASSETS/claude-skills/${rel#.claude/skills/}";;
+    .specify/*)       src="$ASSETS/specify/${rel#.specify/}";;
+    *) continue;;
+  esac
+  mkdir -p "$(dirname "$REPO/$rel")"
+  cp "$src" "$REPO/$rel"
+  installed=$((installed + 1))
+done < "$PLAN"
+find "$REPO/.specify" -name '*.sh' -exec chmod +x {} \; 2>/dev/null || true
+
+# 3. prune only if asked
+pruned=0
+if [ "$PRUNE" -eq 1 ]; then
+  while IFS=$'\t' read -r kind rel; do
+    [ "$kind" = retired ] || continue
+    rm -f "$REPO/$rel"; pruned=$((pruned + 1))
+  done < "$PLAN"
+  find "$REPO/.specify" -type d -empty -delete 2>/dev/null || true
+fi
+
+ok "$installed file(s) written${pruned:+, $pruned pruned}"
+
+# --------------------------------------------------------------- verify --------
+# The same check spec-run makes, so a scaffold that cannot run the pipeline is
+# reported here rather than at the start of somebody's next feature.
+say ""
+missing=""
+_ri=0; _rn=$(jq -r '.phases | length' "$SPECKIT_PIPELINE_ROOT/lib/phases.json")
+while [ "$_ri" -lt "$_rn" ]; do
+  sk=$(jq -r ".phases[$_ri].skill" "$SPECKIT_PIPELINE_ROOT/lib/phases.json")
+  _ri=$((_ri + 1))
+  [ -d "$REPO/.claude/skills/$sk" ] || missing="${missing:+$missing }$sk"
+done
+if [ -f "$REPO/.specify/extensions.yml" ]; then
+  while IFS= read -r c; do
+    [ -n "$c" ] || continue
+    sk=$(printf '%s' "$c" | tr '.' '-')
+    [ -d "$REPO/.claude/skills/$sk" ] || missing="${missing:+$missing }$sk"
+  done <<EOF
+$(grep -E '^[[:space:]]*-?[[:space:]]*command:[[:space:]]*speckit\.' "$REPO/.specify/extensions.yml" 2>/dev/null |
+   sed 's/.*command:[[:space:]]*//' | sort -u)
+EOF
+fi
+if [ -n "$missing" ]; then
+  err "the upgraded scaffold is missing skills the pipeline needs: $missing"
+  say "  This is a bug in the vendored bundle, not in your project. git checkout"
+  say "  .specify .claude/skills to revert, and please report it."
+  exit 1
+fi
+ok "the upgraded scaffold passes the pipeline's own skill check"
+
+# The version marker is the project's own record, so it is edited rather than
+# replaced — and it MUST be edited, or --check reports drift forever and the next
+# reader believes the upgrade did not happen.
+IJ="$REPO/.specify/integration.json"
+if [ -f "$IJ" ]; then
+  tmpj=$(mktemp)
+  if jq --arg v "$TARGET_VERSION" '.version = $v' "$IJ" > "$tmpj" 2>/dev/null; then
+    mv "$tmpj" "$IJ"; ok "recorded spec-kit $TARGET_VERSION in .specify/integration.json"
+  else
+    rm -f "$tmpj"
+    warn "could not update the version in .specify/integration.json — it still reads $CURRENT"
+  fi
+else
+  printf '{\n  "integration": "claude",\n  "version": "%s"\n}\n' "$TARGET_VERSION" > "$IJ"
+  ok "wrote .specify/integration.json recording spec-kit $TARGET_VERSION"
+fi
+
+say ""
+say "review it:  git -C $REPO diff --stat -- .specify .claude/skills"
+say "undo it:    git -C $REPO checkout -- .specify .claude/skills"
+[ -n "$CUSTOM_TEMPLATES" ] && [ "$PRISTINE" -eq 0 ] && \
+  say "your customised templates now live in .specify/templates/overrides/"
+say ""

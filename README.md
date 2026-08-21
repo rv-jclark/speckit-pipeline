@@ -257,6 +257,78 @@ specs/NNN-my-feature/
 echo 'specs/*/.pipeline/' >> .gitignore
 ```
 
+## Upgrading a project's spec-kit
+
+Upstream has no project-upgrade command. `specify self` upgrades the CLI, not a
+project; the only way to refresh a scaffold is `specify init --here --force`,
+which overwrites — no diff, no backup, and no notion of what you customised.
+
+```bash
+spec-upgrade --scan ~/code          # which projects are on what (read-only)
+spec-upgrade --check                # is THIS project current? exit 2 if not
+spec-upgrade --dry-run              # the exact plan, nothing touched
+spec-upgrade                        # do it
+```
+
+### The distinction the whole tool rests on
+
+"Differs from what we vendor" answers two different questions at once, and
+conflating them breaks the upgrade in the quietest possible way. A template can
+differ because **you edited it** or because **upstream changed it**. Preserving
+everything that differs pins the project on its old templates forever — the
+opposite of upgrading. Replacing everything that differs silently discards your
+work.
+
+git answers it exactly, offline: a scaffold file imported once and never touched
+has **one commit**. Measured on two real projects — one unmodified (every template
+1 commit) and one customised (`plan-template` 3, `spec-template` 2,
+`tasks-template` 1, which is precisely which ones had been edited).
+
+So an edited template is copied to `.specify/templates/overrides/` before the
+pristine upstream file lands. Overrides are **Priority 1** in spec-kit's own
+template resolution, so your version keeps winning while everything else
+upgrades. A file it cannot classify — untracked, or no git — is treated as
+customised, because keeping something somebody may have written beats replacing
+it.
+
+### What it will not do
+
+- **Touch `.specify/memory/constitution.md`, `.specify/feature.json`, or `specs/`.**
+  Your assertions and your state, not scaffold.
+- **Run over uncommitted changes** in the paths it would rewrite. git is the undo
+  here — `git diff` is the review, `git checkout` is the revert — and neither
+  works on top of existing edits.
+- **Delete anything it did not install.** Files the new version retired are
+  reported and left; `--prune` removes them. A pre-skills command install is
+  called out as superseded and left for you.
+- **Revoke your extensions.** Extensions the project has that the bundle lacks
+  stay.
+
+It updates `.specify/integration.json`'s `version` field rather than replacing the
+file — that record is the project's, and it *must* be updated or `--check`
+reports drift forever. (The first dry-run of this tool offered to **prune** that
+file, which would have left the project unversioned.)
+
+Afterwards it runs the same skill check `spec-run` does, so a scaffold that cannot
+drive the pipeline is reported there rather than at the start of your next
+feature.
+
+### The fleet view
+
+`--scan` answers a question upstream cannot: which of my projects are on what.
+It reports the **integration shape** as well as the version, because those are
+different facts and only the first decides whether the pipeline can drive a
+project at all:
+
+```
+  · agents          0.7.3    skills:14    259    → 0.16.5
+  · ganttlet-web    0.11.3   skills:11    0      → 0.16.5
+  · some-old-repo   unknown  commands:9   9      pre-skills — spec-run cannot drive it
+  ✓ fresh-project   0.16.5   skills:16    0
+```
+
+Exit 2 when anything is behind, so it can gate CI. Read-only.
+
 ## Roadmaps — a series of specs that ship in order
 
 When the work is bigger than one spec, a roadmap holds the ordered series and
@@ -669,7 +741,7 @@ reports success over a directory the rest of the pipeline cannot find.
 ## Tests
 
 ```bash
-./tests/run.sh          # shellcheck + 268 fixture assertions
+./tests/run.sh          # shellcheck + 303 fixture assertions
 ```
 
 **The suite is hermetic.** A stub runner shadows the real `claude` for the whole
@@ -763,7 +835,7 @@ not be measured are recorded `unmeasured`, never as `$0`.
 ## Tests, and what they cost to run
 
 ```bash
-./tests/run.sh          # shellcheck + 268 assertions, ~90 seconds
+./tests/run.sh          # shellcheck + 303 assertions, ~2 minutes
 ```
 
 Hermetic: a stub runner shadows the real `claude` for the whole run, so nothing

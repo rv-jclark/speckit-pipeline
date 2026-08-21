@@ -79,10 +79,10 @@ if command -v shellcheck >/dev/null 2>&1; then
   # thing on a laptop as in CI.
   out=$(shellcheck --version | awk '/^version:/{print $2}')
   t_note "shellcheck $out"
-  files=("$SPEC_RUN" "$SPEC_BOOTSTRAP" "$PKG/bin/spec-status" "$PKG/bin/spec-roadmap"
+  files=("$SPEC_RUN" "$SPEC_BOOTSTRAP" "$PKG/bin/spec-status" "$PKG/bin/spec-roadmap" "$PKG/bin/spec-upgrade"
          "$PKG/lib/common.sh" "$PKG/lib/verify.sh" "$PKG/lib/roadmap.sh"
          "$ROOT/bin/spec-run" "$ROOT/bin/spec-bootstrap" "$ROOT/bin/spec-status"
-         "$ROOT/bin/spec-roadmap" "$ROOT/tests/run.sh")
+         "$ROOT/bin/spec-roadmap" "$ROOT/bin/spec-upgrade" "$ROOT/tests/run.sh")
   if sc=$(shellcheck -x -S warning "${files[@]}" 2>&1); then
     t_pass "all scripts clean at -S warning"
   else
@@ -883,6 +883,135 @@ assert_contains "$out" "no phase is blocked" "an unblocked pipeline says so posi
 out=$("$SPEC_STATUS" --help 2>&1); assert_eq "$?" "0" "--help exits 0"
 out=$("$SPEC_STATUS" --repo "$WORK" 2>&1); rc=$?
 assert_eq "$rc" "1" "a directory that is not a git repo exits 1"
+
+# =================================================================== spec-upgrade
+printf '\nspec-upgrade\n'
+SPEC_UPGRADE="$PKG/bin/spec-upgrade"
+
+# A project on an older scaffold. Built by hand rather than bootstrapped, so the
+# "older" files are genuinely different from the vendored ones.
+mkold() { # mkold <path>
+  mkbare "$1" main
+  mkdir -p "$1/.specify/scripts/bash" "$1/.specify/templates" "$1/.specify/memory" "$1/specs/001-old"
+  for sk in specify plan tasks implement analyze clarify constitution checklist \
+            taskstoissues converge git-commit git-feature git-initialize \
+            git-remote git-validate agent-context-update; do
+    mkdir -p "$1/.claude/skills/speckit-$sk"
+    printf -- '---\nname: speckit-%s\n---\nold body\n' "$sk" > "$1/.claude/skills/speckit-$sk/SKILL.md"
+  done
+  printf 'old plan template\n' > "$1/.specify/templates/plan-template.md"
+  printf 'old spec template\n' > "$1/.specify/templates/spec-template.md"
+  printf 'MY CONSTITUTION, hands off\n' > "$1/.specify/memory/constitution.md"
+  printf '{"feature_directory":"specs/001-old"}\n' > "$1/.specify/feature.json"
+  printf 'my spec\n' > "$1/specs/001-old/spec.md"
+  printf '{"integration":"claude","version":"0.7.3"}\n' > "$1/.specify/integration.json"
+  printf 'hooks:\n  before_specify:\n  - extension: git\n    command: speckit.git.feature\n' \
+    > "$1/.specify/extensions.yml"
+  git -C "$1" add -A >/dev/null 2>&1; git -C "$1" commit -qm scaffold
+}
+
+UP="$WORK/upgrade"; mkold "$UP"
+
+# --- --check reports drift without touching anything
+before=$(git -C "$UP" rev-parse HEAD)
+out=$("$SPEC_UPGRADE" --repo "$UP" --check 2>&1); rc=$?
+assert_eq "$rc" "2" "--check exits 2 when the project is behind (so CI can gate)"
+assert_contains "$out" "0.7.3" "reporting the version it found"
+assert_eq "$(git -C "$UP" rev-parse HEAD)" "$before" "and changes nothing"
+assert_eq "$(git -C "$UP" status --porcelain | grep -c . || true)" "0" "not even in the working tree"
+
+# --- --dry-run prints the plan and changes nothing
+out=$("$SPEC_UPGRADE" --repo "$UP" --dry-run 2>&1); rc=$?
+assert_eq "$rc" "0" "--dry-run exits 0"
+assert_contains "$out" "nothing was changed" "and says so"
+assert_eq "$(git -C "$UP" status --porcelain | grep -c . || true)" "0" "leaving the tree clean"
+
+# --- it refuses over uncommitted work in the paths it would rewrite
+printf 'my edit\n' >> "$UP/.specify/templates/plan-template.md"
+out=$("$SPEC_UPGRADE" --repo "$UP" --yes 2>&1); rc=$?
+assert_eq "$rc" "1" "it refuses when the scaffold has uncommitted changes"
+assert_contains "$out" "git diff is how you review" "explaining that git is the undo"
+assert_contains "$(cat "$UP/.specify/templates/plan-template.md")" "my edit" "and leaves the edit alone"
+git -C "$UP" checkout -- .specify
+
+# --- an EDITED template is preserved as an override; an untouched one is upgraded
+printf 'MY OWN GATES\n' >> "$UP/.specify/templates/plan-template.md"
+git -C "$UP" add -A >/dev/null 2>&1; git -C "$UP" commit -qm "customise the plan template"
+out=$("$SPEC_UPGRADE" --repo "$UP" --yes 2>&1); rc=$?
+assert_eq "$rc" "0" "the upgrade succeeds"
+assert_contains "$(cat "$UP/.specify/templates/overrides/plan-template.md" 2>/dev/null)" "MY OWN GATES" \
+  "the EDITED template is preserved as an override"
+assert_not_contains "$(cat "$UP/.specify/templates/spec-template.md")" "old spec template" \
+  "while the untouched one is actually upgraded"
+[ -f "$UP/.specify/templates/overrides/spec-template.md" ] \
+  && t_fail "an untouched template is NOT preserved" "it was frozen as an override" \
+  || t_pass "and is NOT frozen as an override"
+# That distinction is the whole tool. "Differs from what we vendor" answers
+# neither question; preserving everything that differs pins the project on its old
+# templates forever, which is the opposite of upgrading. git answers it exactly:
+# a scaffold file imported once and never touched has one commit.
+
+# --- the project's own assertions and state are untouched
+assert_eq "$(cat "$UP/.specify/memory/constitution.md")" "MY CONSTITUTION, hands off" \
+  "the constitution is never rewritten"
+assert_contains "$(cat "$UP/.specify/feature.json")" "001-old" "nor the current-feature pointer"
+assert_eq "$(cat "$UP/specs/001-old/spec.md")" "my spec" "nor anything under specs/"
+
+# --- the version marker is UPDATED, not replaced and not pruned
+assert_eq "$(jq -r '.version' "$UP/.specify/integration.json")" "0.16.5" \
+  "the recorded version is updated to the vendored one"
+assert_eq "$(jq -r '.integration' "$UP/.specify/integration.json")" "claude" \
+  "while the rest of the record survives"
+# The first dry-run of this tool offered to PRUNE integration.json, which would
+# have left the project unversioned and every later --check unable to answer.
+
+# --- idempotent, and --check now agrees
+out=$("$SPEC_UPGRADE" --repo "$UP" --check 2>&1); rc=$?
+assert_eq "$rc" "0" "--check exits 0 once upgraded"
+assert_contains "$out" "no drift" "reporting no drift"
+out=$("$SPEC_UPGRADE" --repo "$UP" --yes 2>&1)
+assert_contains "$out" "nothing to do" "and a second upgrade is a no-op"
+
+# --- the upgraded scaffold must satisfy the pipeline it feeds
+out=$("$SPEC_RUN" --repo "$UP" --only specify --dry-run "probe" 2>&1); rc=$?
+assert_eq "$rc" "0" "spec-run accepts the upgraded project"
+
+printf '\nspec-upgrade: the fleet view\n'
+# --scan answers a question upstream cannot: which of my projects are on what.
+FLEET="$WORK/fleet"; mkdir -p "$FLEET"
+mkold "$FLEET/behind"
+mkbare "$FLEET/current" main; "$SPEC_BOOTSTRAP" "$FLEET/current" >/dev/null 2>&1
+mkbare "$FLEET/legacy" main
+mkdir -p "$FLEET/legacy/.specify/templates" "$FLEET/legacy/.claude/commands"
+for c in specify plan tasks implement; do printf 'old command\n' > "$FLEET/legacy/.claude/commands/speckit.$c.md"; done
+mkbare "$FLEET/notspeckit" main
+
+out=$("$SPEC_UPGRADE" --scan "$FLEET" 2>&1); rc=$?
+assert_eq "$rc" "2" "--scan exits 2 when anything is behind"
+assert_contains "$out" "behind" "listing the project that is"
+assert_contains "$out" "commands:4" "and naming the pre-skills integration by shape"
+assert_contains "$out" "pre-skills" "with a note that the pipeline cannot drive it"
+assert_not_contains "$out" "notspeckit" "while skipping directories with no .specify at all"
+assert_contains "$out" "of 3 on" "and reporting the count against the total, not a bare number"
+# "unknown / 0 skills" was the first version of that column, and it reads like a
+# broken install when it is a legitimate older generation. An absent value has to
+# state its reason.
+
+# a legacy command install is reported, never deleted
+out=$("$SPEC_UPGRADE" --repo "$FLEET/legacy" --dry-run 2>&1)
+assert_contains "$out" "pre-skills COMMAND integration" "an older command install is called out"
+assert_contains "$out" "will not delete files it did" "and left for the human to remove"
+# Matched on a fragment that cannot span the wrap: the message is printed across
+# two say() calls, so the full sentence never appears on one line. Asserting the
+# whole sentence failed against output that says exactly the right thing.
+[ -f "$FLEET/legacy/.claude/commands/speckit.specify.md" ] \
+  && t_pass "the old commands are still there after a dry run" \
+  || t_fail "the old commands survive" "they were removed"
+
+out=$("$SPEC_UPGRADE" --help 2>&1); assert_eq "$?" "0" "--help exits 0"
+out=$("$SPEC_UPGRADE" --nonsense 2>&1); assert_eq "$?" "3" "an unknown option exits 3"
+out=$("$SPEC_UPGRADE" --scan "$WORK/does-not-exist" 2>&1); rc=$?
+assert_eq "$rc" "1" "--scan on a missing directory fails"
 
 # ==================================================================== roadmap =
 printf '\nroadmap: has this entry landed?\n'
