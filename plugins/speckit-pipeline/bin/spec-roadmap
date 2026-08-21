@@ -1,0 +1,424 @@
+#!/usr/bin/env bash
+#
+# spec-roadmap — plan and execute a series of specs that must ship in order.
+#
+# A roadmap is one authored JSON file listing entries. `run` takes each entry
+# through the full spec-run pipeline, then STOPS: the entry's work has to be
+# reviewed and merged before the next entry starts, because the next entry plans
+# against the code the previous one landed. Merging is yours — no phase here can
+# do it, and this runner cannot either.
+#
+# Exit codes:  0 the roadmap is complete
+#              1 an entry failed, or a prerequisite is missing
+#              2 waiting on you — a merge, a gate, or a question
+#              3 usage error
+
+set -uo pipefail
+
+SPECKIT_PIPELINE_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+export SPECKIT_PIPELINE_ROOT
+# shellcheck source=../lib/common.sh
+. "$SPECKIT_PIPELINE_ROOT/lib/common.sh"
+# shellcheck source=../lib/roadmap.sh
+. "$SPECKIT_PIPELINE_ROOT/lib/roadmap.sh"
+
+SPEC_RUN="$SPECKIT_PIPELINE_ROOT/bin/spec-run"
+
+usage() {
+  cat <<'EOF'
+spec-roadmap — plan and execute a series of specs that must ship in order
+
+USAGE
+  spec-roadmap plan  "<the larger goal>" [--slug <name>]   decompose into entries
+  spec-roadmap show  [slug]                                 status of every entry
+  spec-roadmap run   [slug]                                 run the next entry
+  spec-roadmap list                                         roadmaps in this repo
+
+OPTIONS
+  --repo <path>       repository root (default: git toplevel of cwd)
+  --base <ref>        branch entries are cut from and merged into
+                      (default: origin/main)
+  --slug <name>       roadmap name; with `plan`, names the new file
+  --budget <usd>      ceiling across the whole roadmap
+  --dry-run           print what would happen, run nothing
+  --model <p>=<m>     passed through to spec-run  (repeatable)
+  --effort <p>=<e>    passed through to spec-run  (repeatable)
+  --stop-after <p>    passed through to spec-run
+  --with <p[,p]>      passed through to spec-run
+  -h, --help
+
+HOW IT RUNS
+  Each entry goes through specify → plan → tasks → implement, then the roadmap
+  stops and hands you the branch. You review and merge; `spec-roadmap run` picks
+  up the next entry from the updated base. An entry is treated as landed when its
+  branch is an ancestor of the base OR its tasks.md is present there — the second
+  check is what makes this work in a repository that squash-merges, where a
+  merged branch is never an ancestor of anything.
+EOF
+}
+
+# ------------------------------------------------------------------ args ------
+CMD="${1:-}"; [ $# -gt 0 ] && shift
+case "$CMD" in
+  plan|show|run|list) ;;
+  -h|--help|"") usage; exit 0;;
+  *) err "unknown command: $CMD"; usage >&2; exit 3;;
+esac
+
+REPO=""; BASE="origin/main"; SLUG=""; GOAL=""; BUDGET=""; DRY_RUN=0
+declare -a PASSTHROUGH=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --repo)        REPO="${2:-}"; shift 2 || exit 3;;
+    --base)        BASE="${2:-}"; shift 2 || exit 3;;
+    --slug)        SLUG="${2:-}"; shift 2 || exit 3;;
+    --budget)      BUDGET="${2:-}"; shift 2 || exit 3;;
+    --dry-run)     DRY_RUN=1; shift;;
+    --model|--effort)      PASSTHROUGH+=("$1" "${2:-}"); shift 2 || exit 3;;
+    --stop-after|--with)   PASSTHROUGH+=("$1" "${2:-}"); shift 2 || exit 3;;
+    -h|--help)     usage; exit 0;;
+    -*)            err "unknown option: $1"; exit 3;;
+    *)             GOAL="${GOAL:+$GOAL }$1"; shift;;
+  esac
+done
+
+if [ -z "$REPO" ]; then
+  REPO=$(git rev-parse --show-toplevel 2>/dev/null) || \
+    die "not inside a git repository" "pass --repo <path>"
+fi
+REPO=$(cd -- "$REPO" && pwd)
+preflight "$REPO" || exit 1
+
+RMDIR=$(roadmap_dir "$REPO")
+
+# `show`/`run` with no slug: if there is exactly one roadmap, use it; if there
+# are several, say which rather than picking.
+resolve_slug() {
+  [ -n "$SLUG" ] && return 0
+  local -a found=()
+  local f
+  for f in "$RMDIR"/*.json; do
+    [ -f "$f" ] || continue
+    case "$f" in *.state.json) continue;; esac
+    found+=("$(basename "${f%.json}")")
+  done
+  case "${#found[@]}" in
+    0) die "no roadmaps in ${RMDIR#"$REPO"/}" \
+           "create one: spec-roadmap plan \"<the larger goal>\"";;
+    1) SLUG="${found[0]}";;
+    *) die "several roadmaps here; name one with --slug" \
+           "$(printf '%s ' "${found[@]}")";;
+  esac
+}
+
+# ------------------------------------------------------------------ list ------
+if [ "$CMD" = list ]; then
+  n=0
+  for f in "$RMDIR"/*.json; do
+    [ -f "$f" ] || continue
+    case "$f" in *.state.json) continue;; esac
+    slug=$(basename "${f%.json}")
+    total=$(jq -r '(.entries // []) | length' "$f" 2>/dev/null || echo '?')
+    st=$(roadmap_state "$REPO" "$slug")
+    donen=$( [ -f "$st" ] && jq -r '[.entries[] | select(.status=="done")] | length' "$st" || echo 0 )
+    printf '  %-28s %s/%s done\n' "$slug" "$donen" "$total"
+    n=$((n+1))
+  done
+  [ "$n" -eq 0 ] && say "  no roadmaps in ${RMDIR#"$REPO"/}"
+  exit 0
+fi
+
+# ------------------------------------------------------------------ plan ------
+if [ "$CMD" = plan ]; then
+  [ -n "$GOAL" ] || die "no goal given" \
+    "spec-roadmap plan \"the larger thing you want built\""
+  if [ -z "$SLUG" ]; then
+    SLUG=$(printf '%s' "$GOAL" | tr '[:upper:]' '[:lower:]' |
+           tr -cs 'a-z0-9' '-' | cut -c1-40 | sed 's/^-//;s/-$//')
+  fi
+  RM=$(roadmap_file "$REPO" "$SLUG")
+  [ -e "$RM" ] && die "a roadmap already exists at ${RM#"$REPO"/}" \
+    "read it with: spec-roadmap show $SLUG   (or choose another --slug)"
+  mkdir -p "$RMDIR"
+
+  model=$(jqd "$SPECKIT_PIPELINE_ROOT/lib/phases.json" '.phases[0].model' opus)
+  effort=$(jqd "$SPECKIT_PIPELINE_ROOT/lib/phases.json" '.phases[0].effort' high)
+  bin="${SPEC_RUN_CLAUDE_BIN:-$(jqd "$SPECKIT_PIPELINE_ROOT/lib/phases.json" '.defaults.claude_bin' claude)}"
+
+  prompt=$(cat <<EOF
+Decompose this into an ORDERED series of specs, and write the result to
+$RM as JSON.
+
+The goal: $GOAL
+
+Read the repository first — its code, its CLAUDE.md or README, and
+.specify/memory/constitution.md — so the split follows what is actually here
+rather than a generic template.
+
+Write exactly this shape:
+
+{
+  "goal": "<the goal, in one sentence>",
+  "base": "$BASE",
+  "entries": [
+    {
+      "slug": "short-kebab-name",
+      "title": "One line a human reads in a status table",
+      "description": "The feature description handed verbatim to the specify phase. Write it as though briefing someone who will implement only this entry: what it must do, and what it must NOT take on because a later entry owns it.",
+      "rationale": "Why this entry comes here rather than earlier or later — what it depends on from the entries before it."
+    }
+  ]
+}
+
+Rules for the split, which matter more than the JSON:
+
+1. Every entry must be SHIPPABLE ON ITS OWN. Each becomes its own branch and its
+   own pull request, merged before the next entry starts. An entry that leaves
+   the repository broken until a later entry lands is a wrong split.
+2. Order by real dependency, and say what it is in "rationale". If two entries do
+   not depend on each other, the earlier one should be the one that reduces the
+   most uncertainty for the rest.
+3. Prefer FEWER, larger entries. Each entry costs a full pipeline and a human
+   review cycle, so splitting for neatness is expensive. Two to six is the useful
+   range; if you find yourself writing eight, the split is probably by code layer
+   rather than by shippable outcome.
+4. Do not carve work out to make an entry smaller. Anything needed to make an
+   entry correct belongs in that entry.
+5. Say in each description what the entry does NOT do, naming the entry that
+   picks it up. That boundary is the thing the specify phase most often gets
+   wrong when it cannot see the roadmap.
+
+Write the file, then confirm what you wrote. Do not create branches, do not run
+any other phase, and do not begin implementing anything.
+
+Finish your final message with:
+STATUS: ok | needs_input | failed — <one sentence>
+EOF
+)
+
+  info "planning roadmap '$SLUG' — $model/$effort"
+  if [ "$DRY_RUN" -eq 1 ]; then
+    say "  would write: ${RM#"$REPO"/}"
+    printf '  %s -p <decomposition prompt> --model %s --effort %s\n' "$bin" "$model" "$effort"
+    exit 0
+  fi
+
+  errf=$(mktemp)
+  out=$( cd "$REPO" && "$bin" -p "$prompt" --model "$model" --effort "$effort" \
+           --output-format json --permission-mode acceptEdits \
+           --session-id "$(new_uuid)" \
+           --disallowed-tools "Bash(git push:*),Bash(gh pr merge:*),Bash(git checkout:*),Bash(git commit:*)" \
+           2>"$errf" ); rc=$?
+  json=$(extract_json "$out") || json=""
+  cost=$( [ -n "$json" ] && jq -r '.total_cost_usd // empty' <<<"$json" || echo "" )
+
+  if [ ! -f "$RM" ]; then
+    err "the planning phase did not write ${RM#"$REPO"/} (exit $rc, $(fmt_cost "$cost"))"
+    [ -n "$json" ] && dim "  $(jq -r '.result // empty' <<<"$json" | head -5)"
+    [ -s "$errf" ] && dim "  stderr: $(head -c 400 "$errf")"
+    rm -f "$errf"; exit 1
+  fi
+  rm -f "$errf"
+
+  if ! reason=$(roadmap_validate "$RM"); then
+    err "the roadmap it wrote is not usable: $reason"
+    say "  left in place for you to fix: ${RM#"$REPO"/}"
+    exit 1
+  fi
+  ok "wrote ${RM#"$REPO"/} — $(jq -r '(.entries|length)' "$RM") entries ($(fmt_cost "$cost"))"
+  say ""
+  say "read it:  spec-roadmap show $SLUG"
+  say "start it: spec-roadmap run $SLUG"
+  say ""
+  exit 0
+fi
+
+# ------------------------------------------------------------------ show ------
+resolve_slug
+RM=$(roadmap_file "$REPO" "$SLUG")
+if ! reason=$(roadmap_validate "$RM"); then die "$reason"; fi
+ST=$(roadmap_state "$REPO" "$SLUG")
+BASE=$(jqd "$RM" '.base' "$BASE")
+roadmap_state_init "$ST" "${RM#"$REPO"/}" "$SLUG" "$BASE"
+
+if [ "$CMD" = show ]; then
+  say ""
+  say "roadmap  $(dim_s "$SLUG")   base $(dim_s "$BASE")"
+  say "goal     $(jq -r '.goal // "(none stated)"' "$RM")"
+  say ""
+  roadmap_fetch_base "$REPO" "$BASE"; fresh=$?
+  [ "$fresh" -ne 0 ] && warn "could not fetch $BASE — landed/not-landed below may be stale"
+  i=0
+  while IFS=$'\t' read -r slug title; do
+    i=$((i+1))
+    status=$(roadmap_entry_get "$ST" "$slug" status pending)
+    fdir=$(roadmap_entry_get "$ST" "$slug" feature_dir "")
+    branch=$(roadmap_entry_get "$ST" "$slug" branch "")
+    IFS=$'\t' read -r landed how < <(entry_landed "$REPO" "$BASE" "$fdir" "$branch" "$fresh")
+    [ "$landed" = "done" ] && status="done"
+    case "$status" in
+      done)           mark="✓";;
+      awaiting_merge) mark="⏸";;
+      blocked)        mark="✗";;
+      in_progress)    mark="▸";;
+      *)              mark="·";;
+    esac
+    printf '  %s %-2s %-26s %-15s %s\n' "$mark" "$i" "$slug" "$status" "$title"
+    [ "$status" = awaiting_merge ] && dim "        $how"
+    [ "$status" = blocked ] && dim "        $(roadmap_entry_get "$ST" "$slug" note "")"
+  done < <(jq -r '.entries[] | [.slug, .title // ""] | @tsv' "$RM")
+  say ""
+  total=$(jq -r '.entries|length' "$RM")
+  donen=$(jq -r '[.entries[] | select(.status=="done")] | length' "$ST")
+  spent=$(jq -r '[.entries[].cost_usd // 0] | add // 0' "$ST")
+  say "  $donen of $total landed$( [ "$spent" != "0" ] && printf ', $%s spent' "$spent")"
+  say ""
+  exit 0
+fi
+
+# ------------------------------------------------------------------- run ------
+say ""
+say "roadmap  $(dim_s "$SLUG")   base $(dim_s "$BASE")"
+say ""
+
+roadmap_fetch_base "$REPO" "$BASE"; fresh=$?
+[ "$fresh" -ne 0 ] && warn "could not fetch $BASE; working from the ref as last fetched"
+
+rc_final=0
+while IFS=$'\t' read -r slug title description; do
+  status=$(roadmap_entry_get "$ST" "$slug" status pending)
+  fdir=$(roadmap_entry_get "$ST" "$slug" feature_dir "")
+  branch=$(roadmap_entry_get "$ST" "$slug" branch "")
+
+  IFS=$'\t' read -r landed how < <(entry_landed "$REPO" "$BASE" "$fdir" "$branch" "$fresh")
+
+  if [ "$landed" = "done" ]; then
+    [ "$status" != "done" ] && roadmap_entry_set "$ST" "$slug" '{"status":"done"}'
+    ok "$slug — landed on $BASE"
+    dim "    $how"
+    continue
+  fi
+
+  # The gate. An entry that ran but has not landed stops the roadmap here, and an
+  # UNKNOWN answer stops it too rather than guessing — "not merged yet" and "I
+  # could not tell" have different remedies, and only one of them is waiting.
+  if [ "$status" = awaiting_merge ] || [ "$status" = blocked ]; then
+    case "$landed" in
+      not_landed)
+        warn "$slug — waiting on you"
+        say ""
+        say "  This entry's pipeline is finished; its work is not on $BASE yet."
+        say "    $how"
+        [ -n "$branch" ] && say "  branch: $branch"
+        [ -n "$fdir" ]   && say "  specs:  $fdir"
+        say ""
+        say "  Review and merge it, then: spec-roadmap run $SLUG"
+        say "  (merging is yours — no phase here is given the tools to do it)"
+        say "";;
+      unknown)
+        warn "$slug — cannot tell whether this has landed"
+        say "    $how"
+        say ""
+        say "  Not treated as unmerged: that would start the next entry against a"
+        say "  base that may already contain this one. Resolve the cause and re-run."
+        say "";;
+    esac
+    exit 2
+  fi
+
+  if [ "$landed" = unknown ] && [ "$status" = pending ]; then
+    : # a pending entry has nothing to have landed; unknown is expected here
+  fi
+
+  # ---- run this entry
+  info "$slug — $title"
+  if [ "$DRY_RUN" -eq 1 ]; then
+    printf '    would run: spec-run %s\n' "$(printf '%q ' "${PASSTHROUGH[@]:-}" "$description")"
+    continue
+  fi
+
+  # Switching branches over somebody's uncommitted work is not this tool's call
+  # to make, and stashing on their behalf is worse.
+  if ! dirty=$(tree_is_clean "$REPO"); then
+    err "the working tree has uncommitted changes; not starting a new entry over them"
+    printf '%s\n' "$dirty" | sed 's/^/    /'
+    say ""
+    say "  Commit, or stash them yourself, then: spec-roadmap run $SLUG"
+    exit 1
+  fi
+
+  # Each entry is cut from the base, which by now contains everything the
+  # previous entries landed. That is the whole point of the merge gate.
+  base_local=${BASE##*/}
+  if [ "$(git -C "$REPO" rev-parse --abbrev-ref HEAD)" != "$base_local" ]; then
+    git -C "$REPO" checkout --quiet "$base_local" 2>/dev/null || \
+      die "could not check out $base_local to cut this entry from" \
+          "switch to it yourself, then re-run"
+  fi
+  git -C "$REPO" merge --ff-only --quiet "$BASE" 2>/dev/null || \
+    warn "could not fast-forward $base_local to $BASE — this entry starts from $base_local as it is"
+
+  roadmap_entry_set "$ST" "$slug" '{"status":"in_progress"}'
+
+  if [ -n "$BUDGET" ]; then
+    spent=$(jq -r '[.entries[].cost_usd // 0] | add // 0' "$ST")
+    if awk -v s="$spent" -v b="$BUDGET" 'BEGIN{exit !(s >= b)}'; then
+      err "roadmap budget of \$$BUDGET reached (\$$spent spent) before '$slug'"
+      exit 1
+    fi
+  fi
+
+  "$SPEC_RUN" --repo "$REPO" "${PASSTHROUGH[@]:-}" "$description"; src=$?
+
+  # Learn where it landed, and what it cost, from the pipeline's own state.
+  newdir=$(jq -r '.feature_directory // empty' "$REPO/.specify/feature.json" 2>/dev/null)
+  newbranch=$(git -C "$REPO" rev-parse --abbrev-ref HEAD 2>/dev/null)
+  ecost=0
+  if [ -n "$newdir" ] && [ -f "$REPO/$newdir/.pipeline/state.json" ]; then
+    ecost=$(jq -r '[.phases[].cost_usd // 0] | add // 0' "$REPO/$newdir/.pipeline/state.json")
+  fi
+
+  case "$src" in
+    0) roadmap_entry_set "$ST" "$slug" "$(jq -n --arg d "$newdir" --arg b "$newbranch" \
+            --arg c "$ecost" '{status:"awaiting_merge", feature_dir:$d, branch:$b,
+                               cost_usd:($c|tonumber? // null)}')"
+       say ""
+       ok "$slug — pipeline complete"
+       say "  branch: $newbranch"
+       say "  specs:  $newdir"
+       say ""
+       say "  Open a pull request, review it, and merge. Then: spec-roadmap run $SLUG"
+       say "  The next entry is cut from $BASE, so it plans against your merged code."
+       say ""
+       exit 2;;
+    2) roadmap_entry_set "$ST" "$slug" "$(jq -n --arg d "$newdir" --arg b "$newbranch" \
+            --arg c "$ecost" '{status:"in_progress", feature_dir:$d, branch:$b,
+                               cost_usd:($c|tonumber? // null)}')"
+       say ""
+       warn "$slug — the pipeline stopped and needs you (see above)"
+       say "  continue that entry: spec-run --resume"
+       say "  then the roadmap:    spec-roadmap run $SLUG"
+       say ""
+       exit 2;;
+    *) roadmap_entry_set "$ST" "$slug" "$(jq -n --arg d "$newdir" --arg b "$newbranch" \
+            --arg c "$ecost" --arg n "spec-run exited $src" \
+            '{status:"blocked", feature_dir:$d, branch:$b, note:$n,
+              cost_usd:($c|tonumber? // null)}')"
+       err "$slug — the pipeline failed (exit $src); the roadmap stops here"
+       rc_final=1
+       break;;
+  esac
+done < <(jq -r '.entries[] | [.slug, .title // "", .description] | @tsv' "$RM")
+
+if [ "$rc_final" -eq 0 ]; then
+  total=$(jq -r '.entries|length' "$RM")
+  donen=$(jq -r '[.entries[] | select(.status=="done")] | length' "$ST")
+  say ""
+  if [ "$donen" -eq "$total" ]; then
+    ok "roadmap '$SLUG' complete — all $total entries landed on $BASE"
+  else
+    ok "$donen of $total entries landed"
+  fi
+  say ""
+fi
+exit "$rc_final"

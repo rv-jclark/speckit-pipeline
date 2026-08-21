@@ -70,10 +70,10 @@ if command -v shellcheck >/dev/null 2>&1; then
   # thing on a laptop as in CI.
   out=$(shellcheck --version | awk '/^version:/{print $2}')
   t_note "shellcheck $out"
-  files=("$SPEC_RUN" "$SPEC_BOOTSTRAP" "$PKG/bin/spec-status"
-         "$PKG/lib/common.sh" "$PKG/lib/verify.sh"
+  files=("$SPEC_RUN" "$SPEC_BOOTSTRAP" "$PKG/bin/spec-status" "$PKG/bin/spec-roadmap"
+         "$PKG/lib/common.sh" "$PKG/lib/verify.sh" "$PKG/lib/roadmap.sh"
          "$ROOT/bin/spec-run" "$ROOT/bin/spec-bootstrap" "$ROOT/bin/spec-status"
-         "$ROOT/tests/run.sh")
+         "$ROOT/bin/spec-roadmap" "$ROOT/tests/run.sh")
   if sc=$(shellcheck -x -S warning "${files[@]}" 2>&1); then
     t_pass "all scripts clean at -S warning"
   else
@@ -591,6 +591,150 @@ assert_contains "$out" "/speckit-clarify" "--with clarify includes it"
 out=$("$SPEC_RUN" --repo "$BS" --feature-dir "$BS/specs/001-t" --from tasks --dry-run 2>&1)
 assert_not_contains "$out" "/speckit-plan" "--from tasks skips the earlier phases"
 assert_contains "$out" "/speckit-tasks" "--from tasks starts where it says"
+
+# ==================================================================== roadmap =
+printf '\nroadmap: has this entry landed?\n'
+# shellcheck source=../plugins/speckit-pipeline/lib/roadmap.sh
+. "$PKG/lib/roadmap.sh"
+SPEC_ROADMAP="$PKG/bin/spec-roadmap"
+
+# A repo with a real base branch and a real feature, so the landed checks run
+# against git rather than a mock of it.
+RB="$WORK/roadmaprepo"; mkdir -p "$RB"
+git -C "$RB" init -q -b main
+git -C "$RB" config user.email t@t.invalid; git -C "$RB" config user.name t
+mkdir -p "$RB/specs/001-first"
+printf 'base\n' > "$RB/README.md"
+git -C "$RB" add -A >/dev/null 2>&1; git -C "$RB" commit -qm base
+
+git -C "$RB" checkout -q -b 001-first
+printf '# Tasks\n- [x] T001\n' > "$RB/specs/001-first/tasks.md"
+git -C "$RB" add -A >/dev/null 2>&1; git -C "$RB" commit -qm "entry one"
+git -C "$RB" checkout -q main
+
+IFS=$'\t' read -r landed how < <(entry_landed "$RB" main specs/001-first 001-first 0)
+assert_eq "$landed" "not_landed" "an unmerged entry is not landed"
+
+# --- a MERGE COMMIT: the branch becomes an ancestor
+git -C "$RB" merge --no-ff -q -m "merge entry one" 001-first
+IFS=$'\t' read -r landed how < <(entry_landed "$RB" main specs/001-first 001-first 0)
+assert_eq "$landed" "done" "after a merge commit the entry is landed"
+assert_contains "$how" "ancestor" "reported via ancestry"
+
+# --- a SQUASH MERGE: the branch is NOT an ancestor, and this is the case that
+# would wedge every roadmap in a squash-merging repo at its first entry.
+git -C "$RB" checkout -q -b 002-second
+mkdir -p "$RB/specs/002-second"
+printf '# Tasks\n- [x] T001\n' > "$RB/specs/002-second/tasks.md"
+git -C "$RB" add -A >/dev/null 2>&1; git -C "$RB" commit -qm "entry two"
+git -C "$RB" checkout -q main
+git -C "$RB" merge --squash -q 002-second >/dev/null 2>&1
+git -C "$RB" commit -qm "entry two (squashed) (#12)"
+
+git -C "$RB" merge-base --is-ancestor 002-second main 2>/dev/null \
+  && t_fail "the squash fixture really squashed" "the branch is still an ancestor" \
+  || t_pass "the squashed branch is NOT an ancestor of main (the trap)"
+IFS=$'\t' read -r landed how < <(entry_landed "$RB" main specs/002-second 002-second 0)
+assert_eq "$landed" "done" "a SQUASH-merged entry is still recognised as landed"
+assert_contains "$how" "squash-merged" "and the answer says which signal replied"
+# Measured on a real repository before this was written: a spec that shipped in a
+# merged pull request reported ancestor:NO while all of its artifacts were on
+# main. Mutation: delete the artifact-presence branch and this assertion returns
+# not_landed, which is a roadmap that can never advance past entry one.
+
+# --- unknown is not a synonym for no
+IFS=$'\t' read -r landed how < <(entry_landed "$RB" no-such-ref specs/001-first 001-first 0)
+assert_eq "$landed" "unknown" "a base ref that does not exist is unknown, not not_landed"
+assert_contains "$how" "does not exist" "naming what was missing"
+
+IFS=$'\t' read -r landed how < <(entry_landed "$RB" main specs/003-third 003-third 1)
+assert_eq "$landed" "unknown" "a STALE ref cannot say not_landed"
+assert_contains "$how" "stale ref" "and says why it will not guess"
+# The asymmetry is deliberate and worth keeping: a stale ref that says LANDED is
+# still trusted, because merging does not un-happen. Only the negative is unsafe.
+
+IFS=$'\t' read -r landed how < <(entry_landed "$RB" main specs/002-second 002-second 1)
+assert_eq "$landed" "done" "but a stale ref that says LANDED is still trusted"
+
+printf '\nroadmap: the file\n'
+RMD="$RB/.specify/roadmaps"; mkdir -p "$RMD"
+printf '{"goal":"g","base":"main","entries":[]}\n' > "$RMD/empty.json"
+out=$(roadmap_validate "$RMD/empty.json" 2>&1); rc=$?
+assert_eq "$rc" "1" "a roadmap with no entries is rejected"
+assert_contains "$out" "no entries" "and says so"
+
+printf '{"goal":"g","entries":[{"slug":"a","description":"d"},{"title":"t"}]}\n' > "$RMD/partial.json"
+out=$(roadmap_validate "$RMD/partial.json" 2>&1); rc=$?
+assert_eq "$rc" "1" "an entry missing slug or description is rejected"
+assert_contains "$out" "2" "naming which entry, 1-indexed"
+# Found three entries in is the expensive way to learn this.
+
+printf '{"goal":"g","entries":[{"slug":"a","description":"d"},{"slug":"a","description":"e"}]}\n' > "$RMD/dupe.json"
+out=$(roadmap_validate "$RMD/dupe.json" 2>&1); rc=$?
+assert_eq "$rc" "1" "duplicate slugs are rejected"
+assert_contains "$out" "duplicate" "because each entry becomes its own branch"
+
+cat > "$RMD/good.json" <<'RMEOF'
+{"goal":"ship the thing","base":"main","entries":[
+ {"slug":"first","title":"the first bit","description":"do the first bit"},
+ {"slug":"second","title":"the second bit","description":"do the second bit"}]}
+RMEOF
+roadmap_validate "$RMD/good.json" >/dev/null 2>&1 \
+  && t_pass "a well-formed roadmap validates" || t_fail "a well-formed roadmap validates"
+
+printf '\nroadmap: the CLI\n'
+out=$("$SPEC_ROADMAP" --help 2>&1); assert_eq "$?" "0" "--help exits 0"
+assert_contains "$out" "squash-merges" "the help states the merge-detection rule"
+out=$("$SPEC_ROADMAP" nonsense --repo "$RB" 2>&1); assert_eq "$?" "3" "an unknown command exits 3"
+
+"$SPEC_BOOTSTRAP" "$RB" >/dev/null 2>&1
+out=$("$SPEC_ROADMAP" list --repo "$RB" 2>&1)
+assert_contains "$out" "good" "list names the roadmaps present"
+
+out=$("$SPEC_ROADMAP" show --repo "$RB" --slug good 2>&1)
+assert_contains "$out" "first" "show lists every entry"
+assert_contains "$out" "0 of 2 landed" "with a count against the total, not a bare number"
+
+out=$("$SPEC_ROADMAP" show --repo "$RB" 2>&1); rc=$?
+assert_eq "$rc" "1" "show with several roadmaps and no --slug refuses"
+assert_contains "$out" "name one with --slug" "rather than picking one for you"
+
+# a dirty tree must stop a new entry, and never be stashed
+printf 'uncommitted work\n' > "$RB/scratch.txt"
+out=$("$SPEC_ROADMAP" run --repo "$RB" --slug good --base main 2>&1); rc=$?
+assert_eq "$rc" "1" "a dirty working tree stops the roadmap before it switches branch"
+assert_contains "$out" "uncommitted changes" "saying what is in the way"
+assert_contains "$out" "scratch.txt" "and naming it"
+[ -f "$RB/scratch.txt" ] && t_pass "the uncommitted file is left exactly where it was" \
+  || t_fail "the uncommitted file is left alone" "it was stashed or removed"
+rm -f "$RB/scratch.txt"
+# Stashing on someone's behalf is the one unrecoverable thing this runner could
+# do, so it refuses and names the files instead.
+
+out=$("$SPEC_ROADMAP" run --repo "$RB" --slug good --base main --dry-run 2>&1)
+assert_contains "$out" "would run: spec-run" "--dry-run shows the spec-run it would invoke"
+assert_not_contains "$out" "waiting on you" "and does not pretend to have run anything"
+
+# the status vocabulary must be exactly what the code writes
+printf '\nroadmap: status vocabulary\n'
+# Two syntaxes write a status: a JSON literal ("status":"done") and jq object
+# construction (status:"awaiting_merge"). The first version of this pattern
+# matched only the former, found 2 of 5, and reported no undeclared statuses —
+# a completeness check that had read less than half of what it claimed to cover.
+written=$(grep -oE '"?status"?:[[:space:]]*"[a-z_]+"' "$SPEC_ROADMAP" |
+          sed 's/.*"\([a-z_]*\)"$/\1/' | sort -u | tr '\n' ' ')
+for w in $written; do
+  case " $ROADMAP_STATUSES " in
+    *" $w "*) ;;
+    *) t_fail "every status the runner writes is in the vocabulary" "'$w' is not declared";;
+  esac
+done
+t_pass "every status the runner writes is declared in ROADMAP_STATUSES ($written)"
+n_written=$(printf '%s\n' "$written" | tr ' ' '\n' | grep -c . || true)
+[ "${n_written:-0}" -ge 4 ] && t_pass "and the extraction found $n_written of them" \
+  || t_fail "the extraction found statuses" "only $n_written — the pattern has drifted"
+# The second assertion keeps the first honest: a grep that matches nothing
+# reports no undeclared statuses, which reads exactly like success.
 
 # ================================================================== summary ===
 printf '\n%s passed, %s failed' "$pass" "$fail"

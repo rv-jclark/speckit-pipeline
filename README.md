@@ -202,6 +202,10 @@ spec-run --only plan --force
 # see the invocation without spending anything
 spec-run --dry-run --only implement
 
+# bigger than one spec? see Roadmaps below
+spec-roadmap plan "the larger goal"
+spec-roadmap run
+
 # what has run, on what, for how much
 spec-run --list                  # the configured phases
 spec-status                      # inside Claude Code: /spec-status
@@ -252,6 +256,83 @@ specs/NNN-my-feature/
 ```bash
 echo 'specs/*/.pipeline/' >> .gitignore
 ```
+
+## Roadmaps — a series of specs that ship in order
+
+When the work is bigger than one spec, a roadmap holds the ordered series and
+runs them one at a time.
+
+```bash
+spec-roadmap plan "replace the CSV pipeline with a streaming importer"
+spec-roadmap show                 # read the split before anything runs
+spec-roadmap run                  # run the next entry, then stop
+spec-roadmap list                 # roadmaps in this repo
+```
+
+`plan` writes one authored file — `.specify/roadmaps/<slug>.json` — with an entry
+per spec: a slug, a title, the description handed verbatim to the specify phase,
+and the rationale for its position. The prose lives *inside* the entries rather
+than in a companion markdown doc, because two stores for one fact always drift.
+
+**Read the split before you run it.** It is the expensive decision: a wrong entry
+1 poisons everything above it, and finding out four specs deep costs four
+pipelines and four review cycles. The file is plain JSON — edit it.
+
+### How a run proceeds
+
+```
+main ──┬── 001-first ──► PR ──► you merge
+       │                          │
+       └──────────────────────────┴── 002-second ──► PR ──► you merge
+                                                       │
+                                                       └── 003-third
+```
+
+Each entry is cut from the base (`origin/main` by default), taken through
+specify → plan → tasks → implement, and then **the roadmap stops** and hands you
+the branch. You review and merge; `spec-roadmap run` picks up the next entry from
+the updated base, so it plans against your merged code rather than a guess at it.
+
+Merging is yours. No phase is given the tools for it, and neither is the runner.
+
+### How it knows an entry has landed
+
+⚠️ **The obvious check is wrong, and wrong in a way that would wedge every
+roadmap permanently.** `git merge-base --is-ancestor` returns false for a
+squash-merged branch, because a squash replays the branch as one new commit and
+the branch's own commits never become ancestors of the base. Measured on a real
+squash-merging repository: a spec that shipped in a merged pull request reported
+`ancestor: NO` while every one of its artifacts was present on `main`. A roadmap
+relying on ancestry alone would stop at entry 1 and never advance.
+
+So an entry counts as landed when **either** its branch is an ancestor of the base
+**or** its `tasks.md` is present on the base — and the run reports which of the
+two answered, because they are not the same confidence.
+
+There is a third answer, and it is not a synonym for "no":
+
+| Answer | Meaning | What happens |
+|---|---|---|
+| landed | the work is on the base | continue to the next entry |
+| not landed | it is not, and the base ref is fresh enough to say so | stop; you merge |
+| **unknown** | the question could not be answered | **stop** — it does not guess |
+
+`unknown` covers a base ref that does not exist and a fetch that failed. Treating
+it as "not merged" would start the next entry against a base that may already
+contain this one, producing a spec built on a false premise. One asymmetry is
+deliberate: a *stale* ref that says **landed** is still trusted, because merging
+does not un-happen — only the negative is unsafe to read from a stale ref.
+
+### Safety
+
+- **A dirty working tree stops the run** before any branch switch, naming the
+  files. It will not stash on your behalf: that is the one unrecoverable thing
+  this runner could do.
+- **Entry state is separate from the roadmap file.** Progress lives in
+  `.specify/roadmaps/<slug>.state.json` — status, branch, feature directory and
+  cost per entry — because the roadmap is authored and the state is generated.
+- **`--budget` caps the whole roadmap,** checked before each entry starts rather
+  than discovered after.
 
 ## Phases
 
@@ -508,7 +589,7 @@ reports success over a directory the rest of the pipeline cannot find.
 ## Tests
 
 ```bash
-./tests/run.sh          # shellcheck + 104 fixture assertions
+./tests/run.sh          # shellcheck + 138 fixture assertions
 ```
 
 **The suite is hermetic.** A stub runner shadows the real `claude` for the whole
