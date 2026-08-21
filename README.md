@@ -58,22 +58,41 @@ names whichever one is missing rather than failing later and vaguely.
 
 ```bash
 git clone git@github.com:rv-jclark/speckit-pipeline.git ~/code/speckit-pipeline
-sudo ln -s ~/code/speckit-pipeline/bin/spec-run       /usr/local/bin/spec-run
-sudo ln -s ~/code/speckit-pipeline/bin/spec-bootstrap /usr/local/bin/spec-bootstrap
-spec-run --list      # should print the six phases
+for c in spec-run spec-roadmap spec-status spec-bootstrap spec-upgrade; do
+  sudo ln -sf ~/code/speckit-pipeline/bin/$c /usr/local/bin/$c
+done
+spec-run --version   # the plugin version and the spec-kit version it vendors
+spec-run --list      # the six phases and their models
 ```
 
-**Or** install it as a Claude Code plugin, which gives you `/spec-run` and
-`/spec-status` inside every project with no per-project setup:
+The symlinks are the five commands: `spec-run`, `spec-roadmap`, `spec-status`,
+`spec-bootstrap`, `spec-upgrade`.
 
-```
-/plugin marketplace add rv-jclark/speckit-pipeline
-/plugin install speckit-pipeline
+**Or** install it as a Claude Code plugin, for `/spec-run`, `/spec-roadmap`,
+`/spec-status` and `/spec-upgrade` in a session:
+
+```bash
+claude plugin marketplace add rv-jclark/speckit-pipeline
+claude plugin install speckit-pipeline@speckit-pipeline --scope user
+claude plugin list        # confirm the scope you got
 ```
 
-Both paths ship the same engine — the plugin bundles it — so this is a matter of
-whether you want a shell command, slash commands, or both. The clone also gives
-you a place to edit `lib/phases.json` that a plugin update will not overwrite.
+⚠️ **Mind the scope — the two install paths default differently.** Measured
+2026-08-21: `/plugin install` **inside a session** installed at `project` scope,
+bound to the directory that session started in, so the slash commands worked in
+that one repository and nowhere else. The CLI defaults to `user`. `--scope` takes
+`user`, `project` or `local`; switch with
+`claude plugin uninstall … --scope project` after installing at user scope.
+
+A project-scoped install also writes `enabledPlugins` into that repository's
+`.claude/settings.json` — a tracked file in most projects, so worth knowing before
+it appears in a diff. Uninstalling leaves `"enabledPlugins": {}` behind rather
+than removing the key.
+
+⚠️ **The plugin is a SEPARATE COPY**, cloned into `~/.claude/plugins/cache/…` at a
+pinned commit. Editing your clone changes nothing until `/plugin update`. If you
+want the tools to track your edits — including `lib/phases.json` — use the
+clone-and-symlink path; the plugin only adds the in-session slash commands.
 
 ⚠️ **This repository is private.** The marketplace install resolves over git, so
 it works for anyone with read access and fails for everyone else. To share it,
