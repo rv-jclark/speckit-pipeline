@@ -114,6 +114,19 @@ fi
 
 mkdir -p "$TARGET/specs"
 
+# Generated run state, not source. Added rather than merely suggested: the
+# roadmap runner writes into the repository and then has to decide whether the
+# tree is clean, and an untracked state file is one more thing for a reader to
+# wonder about. Idempotent, and it never rewrites an existing entry.
+GI="$TARGET/.gitignore"
+for pat in 'specs/*/.pipeline/' '.specify/roadmaps/*.state.json'; do
+  if [ ! -f "$GI" ] || ! grep -qxF "$pat" "$GI" 2>/dev/null; then
+    [ -f "$GI" ] && [ -s "$GI" ] && [ "$(tail -c1 "$GI" | wc -l)" -eq 0 ] && printf '\n' >> "$GI"
+    printf '%s\n' "$pat" >> "$GI"
+    installed=$((installed + 1))
+  fi
+done
+
 say ""
 ok "$installed installed, $skipped already current${drifted:+, $drifted differing}"
 if [ "${drifted:-0}" -gt 0 ]; then
@@ -134,6 +147,7 @@ else
   say "  $SPECKIT_PIPELINE_ROOT/bin/spec-run \"<what you want built>\""
 fi
 say ""
-say "run state and per-phase costs are written to specs/<feature>/.pipeline/."
-say "to keep them out of git:  echo 'specs/*/.pipeline/' >> $TARGET/.gitignore"
+say "run state and per-phase costs are written to specs/<feature>/.pipeline/,"
+say "and roadmap progress to .specify/roadmaps/<slug>.state.json. Both are"
+say "already in .gitignore."
 say ""

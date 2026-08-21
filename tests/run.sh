@@ -145,6 +145,25 @@ for c in $doc_cmds; do
   [ -x "$ROOT/bin/$c" ] || missing="$missing $c"
 done
 assert_eq "$missing" "" "every spec-* command the README names exists in bin/"
+
+# The plugin's slash commands shell out to ${CLAUDE_PLUGIN_ROOT}/bin/<x>. A
+# command markdown naming a script that does not exist fails only when a user
+# types it, in a session, with no useful error.
+cmd_missing=""
+for ref in $(grep -ohE 'CLAUDE_PLUGIN_ROOT\}/bin/[a-z-]+' "$PKG"/commands/*.md | sed 's|.*/bin/||' | sort -u); do
+  [ -x "$PKG/bin/$ref" ] || cmd_missing="$cmd_missing $ref"
+done
+assert_eq "$cmd_missing" "" "every script a slash command invokes exists in the plugin's bin/"
+n_refs=$(grep -ohE 'CLAUDE_PLUGIN_ROOT\}/bin/[a-z-]+' "$PKG"/commands/*.md | sed 's|.*/bin/||' | sort -u | grep -c . || true)
+[ "${n_refs:-0}" -ge 2 ] && t_pass "and there are $n_refs distinct scripts referenced" \
+  || t_fail "the slash-command extraction found scripts" "only $n_refs — the pattern has drifted"
+
+# Every command markdown must also be a real file with frontmatter, or the
+# plugin loads a command that does nothing.
+for f in "$PKG"/commands/*.md; do
+  head -1 "$f" | grep -q '^---$' || t_fail "$(basename "$f") starts with frontmatter" "no --- on line 1"
+done
+t_pass "every command markdown opens with frontmatter"
 n_cmds=$(printf '%s\n' "$doc_cmds" | grep -c . || true)
 [ "${n_cmds:-0}" -ge 3 ] && t_pass "and there are $n_cmds of them to check" \
   || t_fail "the extraction found commands" "only $n_cmds — the pattern has drifted"
@@ -331,6 +350,15 @@ assert_eq "$rc" "0" "bootstrap into an empty git repo succeeds"
   || t_fail ".specify scripts are executable"
 [ -f "$BS/.specify/memory/constitution.md" ] && t_pass "a constitution is seeded" || t_fail "a constitution is seeded"
 [ -d "$BS/specs" ] && t_pass "specs/ is created" || t_fail "specs/ is created"
+assert_contains "$(cat "$BS/.gitignore" 2>/dev/null)" "specs/*/.pipeline/" \
+  "generated pipeline state is gitignored, not left to be discovered"
+assert_contains "$(cat "$BS/.gitignore" 2>/dev/null)" ".specify/roadmaps/*.state.json" \
+  "and so is roadmap progress"
+printf 'my-own-entry\n' >> "$BS/.gitignore"
+"$SPEC_BOOTSTRAP" "$BS" >/dev/null 2>&1
+assert_eq "$(grep -c 'specs/\*/\.pipeline/' "$BS/.gitignore")" "1" \
+  "re-running does not duplicate the gitignore entries"
+assert_contains "$(cat "$BS/.gitignore")" "my-own-entry" "and never rewrites yours"
 assert_contains "$out" "TEMPLATE" "a freshly-seeded constitution is flagged as a template, not a default"
 
 printf 'MY OWN CONSTITUTION\n' > "$BS/.specify/memory/constitution.md"
@@ -688,6 +716,9 @@ assert_contains "$out" "squash-merges" "the help states the merge-detection rule
 out=$("$SPEC_ROADMAP" nonsense --repo "$RB" 2>&1); assert_eq "$?" "3" "an unknown command exits 3"
 
 "$SPEC_BOOTSTRAP" "$RB" >/dev/null 2>&1
+# Commit the scaffold: an unbootstrapped fixture reports 47 stray files and every
+# tree-safety assertion below would be measuring the fixture, not the code.
+git -C "$RB" add -A >/dev/null 2>&1; git -C "$RB" commit -qm "bootstrap" >/dev/null 2>&1
 out=$("$SPEC_ROADMAP" list --repo "$RB" 2>&1)
 assert_contains "$out" "good" "list names the roadmaps present"
 
@@ -699,17 +730,47 @@ out=$("$SPEC_ROADMAP" show --repo "$RB" 2>&1); rc=$?
 assert_eq "$rc" "1" "show with several roadmaps and no --slug refuses"
 assert_contains "$out" "name one with --slug" "rather than picking one for you"
 
-# a dirty tree must stop a new entry, and never be stashed
-printf 'uncommitted work\n' > "$RB/scratch.txt"
+# --- tree safety: the tool must not refuse over its OWN bookkeeping
+printf '\nroadmap: tree safety\n'
+mkdir -p "$RB/.specify/roadmaps" "$RB/specs/001-first/.pipeline"
+printf '{}\n' > "$RB/.specify/roadmaps/good.state.json"
+printf '{}\n' > "$RB/specs/001-first/.pipeline/state.json"
+assert_eq "$(tracked_changes "$RB")" "" "the tool's own state files are not 'uncommitted changes'"
+assert_eq "$(untracked_files "$RB")" "" "nor are they reported as stray untracked files"
+# This was a real wedge: `spec-roadmap plan` writes the roadmap file INTO the
+# repository, so the first `run` after it saw a dirty tree and refused. The tool
+# dirtied the tree and then blocked on it — every roadmap stopped at entry one.
+# Mutation: drop _is_tool_bookkeeping and both assertions fail.
+
+out=$("$SPEC_ROADMAP" run --repo "$RB" --slug good --base main --dry-run 2>&1); rc=$?
+assert_eq "$rc" "0" "and a run proceeds with only tool state present"
+
+# --- a TRACKED modification refuses, because that is what a checkout can block
+printf 'edited by a human\n' >> "$RB/README.md"
+assert_contains "$(tracked_changes "$RB")" "README.md" "a tracked modification IS reported"
 out=$("$SPEC_ROADMAP" run --repo "$RB" --slug good --base main 2>&1); rc=$?
-assert_eq "$rc" "1" "a dirty working tree stops the roadmap before it switches branch"
-assert_contains "$out" "uncommitted changes" "saying what is in the way"
-assert_contains "$out" "scratch.txt" "and naming it"
-[ -f "$RB/scratch.txt" ] && t_pass "the uncommitted file is left exactly where it was" \
-  || t_fail "the uncommitted file is left alone" "it was stashed or removed"
+assert_eq "$rc" "1" "and it stops the roadmap before any branch switch"
+assert_contains "$out" "uncommitted tracked changes" "saying what kind of problem it is"
+assert_contains "$out" "README.md" "and naming the file"
+assert_contains "$out" "will not stash on your behalf" "and promising not to touch it"
+[ -n "$(git -C "$RB" status --porcelain README.md)" ] && \
+  t_pass "the modification is left exactly as it was" || \
+  t_fail "the modification is left alone" "it was stashed or reverted"
+git -C "$RB" checkout -- README.md
+
+# --- an UNTRACKED file only warns: git carries those across a checkout
+printf 'scratch\n' > "$RB/scratch.txt"
+assert_eq "$(tracked_changes "$RB")" "" "an untracked file is not a tracked change"
+assert_contains "$(untracked_files "$RB")" "scratch.txt" "but it is reported as stray"
+out=$("$SPEC_ROADMAP" run --repo "$RB" --slug good --base main --dry-run 2>&1); rc=$?
+assert_eq "$rc" "0" "an untracked file does NOT block the run"
+assert_contains "$out" "will follow this checkout" "it warns instead, and says why it matters"
+[ -f "$RB/scratch.txt" ] && t_pass "and the untracked file is left where it was" \
+  || t_fail "the untracked file is left alone"
 rm -f "$RB/scratch.txt"
-# Stashing on someone's behalf is the one unrecoverable thing this runner could
-# do, so it refuses and names the files instead.
+# Refusing here would be the wedge again in another costume: the specify phase
+# creates untracked spec files, so an untracked-blocks rule stops the roadmap
+# immediately after its own first phase.
 
 out=$("$SPEC_ROADMAP" run --repo "$RB" --slug good --base main --dry-run 2>&1)
 assert_contains "$out" "would run: spec-run" "--dry-run shows the spec-run it would invoke"
@@ -735,6 +796,241 @@ n_written=$(printf '%s\n' "$written" | tr ' ' '\n' | grep -c . || true)
   || t_fail "the extraction found statuses" "only $n_written — the pattern has drifted"
 # The second assertion keeps the first honest: a grep that matches nothing
 # reports no undeclared statuses, which reads exactly like success.
+
+# ---------------------------------------------------- roadmap: base detection --
+printf '\nroadmap: which branch is the base?\n'
+# `origin/main` is a guess. It is wrong for a master repo, a repo with no remote,
+# and a repo whose remote is not called origin — and it does not fail cleanly:
+# the ref does not resolve, every entry reports unknown, and the roadmap refuses
+# to move while complaining about fetching.
+mkbare() { # mkbare <path> <branch>
+  mkdir -p "$1"; git -C "$1" init -q -b "$2"
+  git -C "$1" config user.email t@t.invalid; git -C "$1" config user.name t
+  printf 'x\n' > "$1/f"; git -C "$1" add -A >/dev/null 2>&1; git -C "$1" commit -qm i
+}
+mkbare "$WORK/b-main" main
+IFS=$'\t' read -r base how < <(detect_base "$WORK/b-main")
+assert_eq "$base" "main" "a local main is found"
+assert_contains "$how" "no matching remote" "and the answer says how it was reached"
+
+mkbare "$WORK/b-master" master
+IFS=$'\t' read -r base how < <(detect_base "$WORK/b-master")
+assert_eq "$base" "master" "a master repo is not forced to main"
+
+mkbare "$WORK/b-weird" some-other-name
+IFS=$'\t' read -r base how < <(detect_base "$WORK/b-weird")
+assert_eq "$base" "some-other-name" "a repo with neither falls back to the current branch"
+assert_contains "$how" "check this" "and says out loud that this one is a guess"
+# "You asked for this" and "I picked it" are different facts, and only the second
+# is worth double-checking — so the run prints which.
+
+# a remote that is not origin
+mkbare "$WORK/b-remote-src" main
+mkbare "$WORK/b-remote" main
+git -C "$WORK/b-remote" remote add upstream "$WORK/b-remote-src"
+git -C "$WORK/b-remote" fetch -q upstream 2>/dev/null
+IFS=$'\t' read -r base how < <(detect_base "$WORK/b-remote")
+assert_eq "$base" "upstream/main" "a remote that is not called origin is still found"
+
+# --------------------------------------------- roadmap: resume, not duplicate --
+printf '\nroadmap: an interrupted entry resumes\n'
+# A fake runner stands in for the whole pipeline: it writes the artifacts a real
+# specify+plan+tasks+implement would leave, so the roadmap loop, the state
+# transitions and the merge gate are all exercised without spending anything.
+cat > "$FAKE/claude-pipeline" <<'FAKEEOF'
+#!/usr/bin/env bash
+# A stand-in for the whole pipeline. It has to be PHASE-AWARE, exactly as
+# spec-kit is: only /speckit-specify creates a feature and a branch; every later
+# phase reuses the current one. The first version of this fake created a new
+# directory on every invocation, so specify wrote 001, plan wrote 002, and
+# verification chased a moving target — which is a fixture bug that looks
+# identical to a product bug in the output.
+[ "${1:-}" = "--help" ] && exit 0
+root=$(git rev-parse --show-toplevel 2>/dev/null)
+prompt=""
+for a in "$@"; do case "$a" in /speckit-*) prompt="$a";; esac; done
+
+cur=$(sed -n 's/.*"feature_directory": *"\([^"]*\)".*/\1/p' "$root/.specify/feature.json" 2>/dev/null)
+case "$prompt" in
+  /speckit-specify*)
+    n=$(ls -1d "$root"/specs/[0-9][0-9][0-9]-* 2>/dev/null | wc -l | tr -d ' ')
+    num=$(printf '%03d' $((n + 1)))
+    rel="specs/$num-fake"
+    mkdir -p "$root/$rel"
+    git -C "$root" checkout -q -b "$num-fake" 2>/dev/null
+    printf '{\n  "feature_directory": "%s"\n}\n' "$rel" > "$root/.specify/feature.json"
+    ;;
+  *)
+    rel="$cur"
+    [ -n "$rel" ] || { echo "fake: no current feature" >&2; exit 1; }
+    ;;
+esac
+dir="$root/$rel"
+mkdir -p "$dir"
+pad() { for i in $(seq 1 40); do printf 'padding line %s\n' "$i"; done; }
+case "$prompt" in
+  /speckit-specify*) { printf '# Spec\n'; pad; } > "$dir/spec.md";;
+  /speckit-plan*)    { printf '# Plan\n'; pad; } > "$dir/plan.md";;
+  /speckit-tasks*)   { printf '# Tasks\n'; pad; printf -- '- [ ] T001 do it\n'; } > "$dir/tasks.md";;
+  /speckit-implement*) { printf '# Tasks\n'; pad; printf -- '- [x] T001 do it\n'; } > "$dir/tasks.md";;
+esac
+echo '{"total_cost_usd":0.05,"num_turns":3,"duration_ms":100,"result":"STATUS: ok"}'
+FAKEEOF
+chmod +x "$FAKE/claude-pipeline"
+
+IR="$WORK/interrupted"; mkbare "$IR" main
+"$SPEC_BOOTSTRAP" "$IR" >/dev/null 2>&1
+git -C "$IR" add -A >/dev/null 2>&1; git -C "$IR" commit -qm bootstrap
+mkdir -p "$IR/.specify/roadmaps"
+cat > "$IR/.specify/roadmaps/rm.json" <<'RMEOF'
+{"goal":"g","base":"main","entries":[
+ {"slug":"one","title":"first","description":"do one"},
+ {"slug":"two","title":"second","description":"do two"}]}
+RMEOF
+
+# entry one runs and stops for the merge
+out=$(SPEC_RUN_CLAUDE_BIN=claude-pipeline "$SPEC_ROADMAP" run --repo "$IR" --slug rm --base main 2>&1); rc=$?
+assert_eq "$rc" "2" "the roadmap stops after the first entry, waiting for a merge"
+assert_contains "$out" "pipeline complete" "saying the entry itself finished"
+assert_contains "$out" "Open a pull request" "and what it needs from a human"
+IRST="$IR/.specify/roadmaps/rm.state.json"
+assert_eq "$(jq -r '.entries.one.status' "$IRST")" "awaiting_merge" "and records it as awaiting_merge"
+first_dir=$(jq -r '.entries.one.feature_dir' "$IRST")
+assert_contains "$first_dir" "specs/001" "with the feature directory it created"
+n_specs=$(ls -1d "$IR"/specs/[0-9][0-9][0-9]-* 2>/dev/null | wc -l | tr -d ' ')
+assert_eq "$n_specs" "1" "exactly one feature exists"
+
+# now simulate the interruption: the entry is mid-flight again
+roadmap_entry_set "$IRST" one '{"status":"in_progress"}'
+out=$(SPEC_RUN_CLAUDE_BIN=claude-pipeline "$SPEC_ROADMAP" run --repo "$IR" --slug rm --base main 2>&1)
+assert_contains "$out" "resuming its existing feature" "an in_progress entry resumes rather than restarting"
+n_specs=$(ls -1d "$IR"/specs/[0-9][0-9][0-9]-* 2>/dev/null | wc -l | tr -d ' ')
+assert_eq "$n_specs" "1" "and does NOT create a second feature for the same entry"
+# Without this, an interrupted entry produces two specs, two branches and one
+# state slot that can only point at one of them. Reached by a Ctrl-C, a rolling
+# restart, a deleted state file, or a laptop lid.
+# Mutation: remove the resume_dir branch and n_specs becomes 2.
+
+# ------------------------------------------------ roadmap: the gate releases ---
+printf '\nroadmap: the merge gate\n'
+# Before merging: the entry's branch exists but nothing is committed on it, which
+# is the NORMAL state — spec-kit's auto-commit hook is optional and routinely
+# declined. The gate must stay shut.
+IFS=$'\t' read -r landed how < <(entry_landed "$IR" main "$first_dir" 001-fake 0)
+assert_eq "$landed" "not_landed" "an entry whose work is uncommitted has NOT landed"
+git -C "$IR" merge-base --is-ancestor 001-fake main 2>/dev/null \
+  && t_pass "even though its branch IS trivially an ancestor of main" \
+  || t_fail "the fixture reproduces the trivial-ancestor case" "the branch has diverged"
+# That pair is the whole point. A branch with no commits of its own sits at the
+# base commit, so --is-ancestor is TRUE and the naive check reports "landed" for
+# an entry nobody merged. It does not stall the roadmap, it marches it through
+# every remaining entry unmerged — which is why ancestry now requires the branch
+# to carry commits of its own.
+# Mutation: drop the rev-list guard and the first assertion returns done.
+
+# Now do what a human does: commit on the branch, then squash-merge it.
+git -C "$IR" checkout -q 001-fake
+git -C "$IR" add -A >/dev/null 2>&1; git -C "$IR" commit -qm "entry one work" >/dev/null 2>&1
+git -C "$IR" checkout -q main
+git -C "$IR" merge --squash -q 001-fake >/dev/null 2>&1
+git -C "$IR" commit -qm "entry one (squashed) (#1)" >/dev/null 2>&1
+git -C "$IR" merge-base --is-ancestor 001-fake main 2>/dev/null \
+  && t_fail "the squash fixture really squashed" "the branch is still an ancestor" \
+  || t_pass "after the squash the branch is NOT an ancestor of main"
+
+IFS=$'\t' read -r landed how < <(entry_landed "$IR" main "$first_dir" 001-fake 0)
+assert_eq "$landed" "done" "and the squash-merged entry now reads as landed"
+assert_contains "$how" "squash-merged" "via the artifact check, naming which signal replied"
+
+out=$(SPEC_RUN_CLAUDE_BIN=claude-pipeline "$SPEC_ROADMAP" run --repo "$IR" --slug rm --base main 2>&1); rc=$?
+assert_contains "$out" "landed on main" "the runner agrees entry one has landed"
+assert_contains "$out" "second" "and moves on to entry two"
+assert_eq "$(jq -r '.entries.one.status' "$IRST")" "done" "entry one is recorded done"
+assert_eq "$(jq -r '.entries.two.status' "$IRST")" "awaiting_merge" "and entry two now waits its turn"
+assert_eq "$rc" "2" "the roadmap stops again for the second merge"
+n_specs=$(ls -1d "$IR"/specs/[0-9][0-9][0-9]-* 2>/dev/null | wc -l | tr -d ' ')
+assert_eq "$n_specs" "2" "two entries, two features — entry two did not inherit entry one's"
+two_dir=$(jq -r '.entries.two.feature_dir' "$IRST")
+[ "$two_dir" != "$first_dir" ] && t_pass "and they are different features ($two_dir)" \
+  || t_fail "entry two got its own feature" "it reused $first_dir"
+# That last pair caught a bug outside roadmaps entirely: spec-run discovered the
+# stale .specify/feature.json pointer BEFORE the specify phase, adopted the
+# previous feature, found its specify already ok, skipped it, and ran nothing new
+# — so `spec-run "a second feature"` in any repository silently continued the
+# first one under a new description.
+
+out=$(SPEC_ROADMAP_QUIET=1 "$SPEC_ROADMAP" show --repo "$IR" --slug rm 2>&1)
+assert_contains "$out" "1 of 2 landed" "show agrees with the state after a real loop"
+
+# ------------------------------------------------- roadmap: budget and failure -
+printf '\nroadmap: ceilings and failures\n'
+# The roadmap budget is checked BEFORE an entry starts, not discovered after.
+BR="$WORK/budget"; mkbare "$BR" main
+"$SPEC_BOOTSTRAP" "$BR" >/dev/null 2>&1
+git -C "$BR" add -A >/dev/null 2>&1; git -C "$BR" commit -qm bootstrap
+mkdir -p "$BR/.specify/roadmaps"
+cat > "$BR/.specify/roadmaps/rm.json" <<'RMEOF'
+{"goal":"g","base":"main","entries":[
+ {"slug":"one","title":"first","description":"do one"},
+ {"slug":"two","title":"second","description":"do two"}]}
+RMEOF
+BRST="$BR/.specify/roadmaps/rm.state.json"
+roadmap_state_init "$BRST" ".specify/roadmaps/rm.json" rm main
+roadmap_entry_set "$BRST" one '{"status":"done","cost_usd":9.5}'
+out=$(SPEC_RUN_CLAUDE_BIN=claude-pipeline "$SPEC_ROADMAP" run --repo "$BR" --slug rm \
+        --base main --budget 5 2>&1); rc=$?
+assert_eq "$rc" "1" "the roadmap budget stops the next entry before it starts"
+assert_contains "$out" "budget of \$5 reached" "naming the ceiling and what has been spent"
+n=$(ls -1d "$BR"/specs/[0-9][0-9][0-9]-* 2>/dev/null | wc -l | tr -d ' ')
+assert_eq "$n" "0" "and no feature was created — checked before the spend, not after"
+
+# A failing pipeline blocks the entry and stops the roadmap; it does not carry on.
+cat > "$FAKE/claude-broken" <<'FAKEEOF'
+#!/usr/bin/env bash
+[ "${1:-}" = "--help" ] && exit 0
+exit 1
+FAKEEOF
+chmod +x "$FAKE/claude-broken"
+FR="$WORK/failing"; mkbare "$FR" main
+"$SPEC_BOOTSTRAP" "$FR" >/dev/null 2>&1
+git -C "$FR" add -A >/dev/null 2>&1; git -C "$FR" commit -qm bootstrap
+mkdir -p "$FR/.specify/roadmaps"
+cp "$BR/.specify/roadmaps/rm.json" "$FR/.specify/roadmaps/rm.json"
+out=$(SPEC_RUN_CLAUDE_BIN=claude-broken "$SPEC_ROADMAP" run --repo "$FR" --slug rm --base main 2>&1); rc=$?
+assert_eq "$rc" "1" "a failing entry fails the roadmap"
+assert_contains "$out" "the roadmap stops here" "and says it is stopping rather than continuing"
+assert_eq "$(jq -r '.entries.one.status' "$FR/.specify/roadmaps/rm.state.json")" "blocked" \
+  "recording the entry as blocked"
+assert_not_contains "$out" "second" "and never reaches the next entry"
+# Carrying on past a failed entry would build entry two against a base that does
+# not contain entry one's work — a spec written on a false premise, which is the
+# expensive failure this whole gate exists to prevent.
+
+# A plan phase that writes nothing usable leaves the file for inspection.
+PR2="$WORK/planfail"; mkbare "$PR2" main
+"$SPEC_BOOTSTRAP" "$PR2" >/dev/null 2>&1
+cat > "$FAKE/claude-badplan" <<'FAKEEOF'
+#!/usr/bin/env bash
+[ "${1:-}" = "--help" ] && exit 0
+for a in "$@"; do case "$a" in *".specify/roadmaps/"*) t=$(printf '%s' "$a" | grep -oE '/[^ ]*\.specify/roadmaps/[a-z-]+\.json');; esac; done
+[ -n "${t:-}" ] && printf 'not json at all\n' > "$t"
+echo '{"total_cost_usd":0.02,"num_turns":1,"duration_ms":10,"result":"wrote it"}'
+FAKEEOF
+chmod +x "$FAKE/claude-badplan"
+out=$(SPEC_RUN_CLAUDE_BIN=claude-badplan "$SPEC_ROADMAP" plan --repo "$PR2" --slug bad \
+        --base main "some larger goal" 2>&1); rc=$?
+assert_eq "$rc" "1" "a plan phase that writes unusable JSON fails"
+assert_contains "$out" "not usable" "saying the roadmap it wrote cannot be used"
+assert_contains "$out" "left in place" "and that the file is kept for inspection"
+[ -f "$PR2/.specify/roadmaps/bad.json" ] && t_pass "the unusable file really is still there" \
+  || t_fail "the unusable file is kept" "it was deleted, so there is nothing to fix"
+# Deleting it would leave the user with a failure and no artifact to look at; the
+# next `plan` overwrites it anyway once they remove it.
+
+out=$(SPEC_RUN_CLAUDE_BIN=claude-badplan "$SPEC_ROADMAP" plan --repo "$PR2" --slug bad \
+        --base main "some larger goal" 2>&1); rc=$?
+assert_eq "$rc" "1" "planning over an existing roadmap refuses"
+assert_contains "$out" "already exists" "rather than overwriting authored content"
 
 # ================================================================== summary ===
 printf '\n%s passed, %s failed' "$pass" "$fail"

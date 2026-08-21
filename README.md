@@ -306,8 +306,17 @@ squash-merging repository: a spec that shipped in a merged pull request reported
 relying on ancestry alone would stop at entry 1 and never advance.
 
 So an entry counts as landed when **either** its branch is an ancestor of the base
-**or** its `tasks.md` is present on the base — and the run reports which of the
-two answered, because they are not the same confidence.
+*and carries commits of its own*, **or** its `tasks.md` is present on the base —
+and the run reports which of the two answered, because they are not the same
+confidence.
+
+🛑 **That "commits of its own" clause is not a detail.** spec-kit's auto-commit
+hook is optional and routinely declined, so a feature branch normally sits at
+*exactly* the base commit with all its work uncommitted — and
+`--is-ancestor` is then trivially **true**. Measured: an entry that had never
+been merged reported `landed`, the gate opened, and the roadmap would have
+marched through every remaining entry without a single merge. That is worse than
+the squash problem: the squash version stalls, this version *lies*.
 
 There is a third answer, and it is not a synonym for "no":
 
@@ -333,6 +342,17 @@ does not un-happen — only the negative is unsafe to read from a stale ref.
   cost per entry — because the roadmap is authored and the state is generated.
 - **`--budget` caps the whole roadmap,** checked before each entry starts rather
   than discovered after.
+- **An interrupted entry resumes; it does not restart.** An entry recorded
+  `in_progress` already has a feature, and handing the description to `spec-run`
+  again would make spec-kit cut a *second* branch for the same entry — two specs,
+  one state slot that can only point at one of them. Reached by a Ctrl-C, a
+  rolling restart, a deleted state file, or a laptop lid.
+- **A failing entry stops the roadmap.** Continuing would build the next entry
+  against a base that does not contain this one's work — a spec written on a
+  false premise, which is the whole failure this gate exists to prevent.
+- **The base branch is detected, not assumed.** `origin/HEAD`, then the remotes,
+  then local `main`/`master`/`trunk`. The run prints *why* it chose one, so a
+  wrong guess is visible rather than surfacing later as "every entry is unknown".
 
 ## Phases
 
@@ -526,6 +546,11 @@ guarantee is bigger than it is.
 - **No `--json-schema` on the phase result.** The artifact is the authority, so a
   second, unverified report channel would add risk without adding information.
   The phase's prose is kept only to show you when something goes wrong.
+- **A description always means a NEW feature.** `spec-run "…"` no longer adopts
+  whatever `.specify/feature.json` points at; use `--resume` or `--feature-dir`
+  to continue one. Before this, a second feature in the same repository silently
+  continued the first: the stale pointer was adopted, its specify phase read
+  `ok`, and nothing ran.
 - **A no-op is indistinguishable from an idempotent success** when the phase
   *does* return a parseable result. The non-run check only fires when both
   signals agree, which is deliberate: firing on an unchanged artifact alone would
@@ -589,7 +614,7 @@ reports success over a directory the rest of the pipeline cannot find.
 ## Tests
 
 ```bash
-./tests/run.sh          # shellcheck + 138 fixture assertions
+./tests/run.sh          # shellcheck + 195 fixture assertions
 ```
 
 **The suite is hermetic.** A stub runner shadows the real `claude` for the whole

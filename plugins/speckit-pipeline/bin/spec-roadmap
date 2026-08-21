@@ -36,8 +36,9 @@ USAGE
 
 OPTIONS
   --repo <path>       repository root (default: git toplevel of cwd)
-  --base <ref>        branch entries are cut from and merged into
-                      (default: origin/main)
+  --base <ref>        branch entries are cut from and merged into. Detected from
+                      origin/HEAD, then the remotes, then local main/master/trunk
+                      — the run prints which, so a wrong guess is visible
   --slug <name>       roadmap name; with `plan`, names the new file
   --budget <usd>      ceiling across the whole roadmap
   --dry-run           print what would happen, run nothing
@@ -65,7 +66,7 @@ case "$CMD" in
   *) err "unknown command: $CMD"; usage >&2; exit 3;;
 esac
 
-REPO=""; BASE="origin/main"; SLUG=""; GOAL=""; BUDGET=""; DRY_RUN=0
+REPO=""; BASE=""; BASE_HOW=""; SLUG=""; GOAL=""; BUDGET=""; DRY_RUN=0
 declare -a PASSTHROUGH=()
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -88,6 +89,13 @@ if [ -z "$REPO" ]; then
 fi
 REPO=$(cd -- "$REPO" && pwd)
 preflight "$REPO" || exit 1
+
+# An explicit --base wins; otherwise detect, and say how.
+if [ -z "$BASE" ]; then
+  IFS=$'\t' read -r BASE BASE_HOW < <(detect_base "$REPO")
+  [ -n "$BASE" ] || die "could not work out which branch to use as the base" \
+    "pass --base <ref>"
+fi
 
 RMDIR=$(roadmap_dir "$REPO")
 
@@ -244,6 +252,7 @@ roadmap_state_init "$ST" "${RM#"$REPO"/}" "$SLUG" "$BASE"
 if [ "$CMD" = show ]; then
   say ""
   say "roadmap  $(dim_s "$SLUG")   base $(dim_s "$BASE")"
+  [ -n "$BASE_HOW" ] && dim "         base chosen because: $BASE_HOW"
   say "goal     $(jq -r '.goal // "(none stated)"' "$RM")"
   say ""
   roadmap_fetch_base "$REPO" "$BASE"; fresh=$?
@@ -279,10 +288,28 @@ fi
 # ------------------------------------------------------------------- run ------
 say ""
 say "roadmap  $(dim_s "$SLUG")   base $(dim_s "$BASE")"
+[ -n "$BASE_HOW" ] && dim "         base chosen because: $BASE_HOW"
 say ""
 
 roadmap_fetch_base "$REPO" "$BASE"; fresh=$?
 [ "$fresh" -ne 0 ] && warn "could not fetch $BASE; working from the ref as last fetched"
+
+# Two roadmaps in one repository share one working tree and one current-feature
+# pointer. Nothing here breaks — each entry gets its own feature — but an entry
+# left mid-flight by ANOTHER roadmap is worth saying out loud, because its
+# uncommitted work will follow this checkout and land in this entry's diff.
+for other in "$RMDIR"/*.state.json; do
+  [ -f "$other" ] || continue
+  case "$other" in *"/$SLUG.state.json") continue;; esac
+  inflight=$(jq -r '[.entries | to_entries[]
+                     | select(.value.status=="in_progress" or .value.status=="awaiting_merge")
+                     | .key] | join(", ")' "$other" 2>/dev/null)
+  if [ -n "$inflight" ]; then
+    warn "another roadmap ($(basename "${other%.state.json}")) has entries in flight: $inflight"
+    say  "  They share this working tree. Finish or merge those first if their work"
+    say  "  should not appear in this entry's diff."
+  fi
+done
 
 rc_final=0
 while IFS=$'\t' read -r slug title description; do
@@ -332,31 +359,84 @@ while IFS=$'\t' read -r slug title description; do
 
   # ---- run this entry
   info "$slug — $title"
-  if [ "$DRY_RUN" -eq 1 ]; then
-    printf '    would run: spec-run %s\n' "$(printf '%q ' "${PASSTHROUGH[@]:-}" "$description")"
-    continue
+
+  # An entry recorded in_progress already HAS a feature. Handing spec-run the
+  # description again makes spec-kit cut a second feature branch for the same
+  # roadmap entry — two specs, two branches, one entry, and a state file that can
+  # only point at one of them. So resume the feature that exists.
+  #
+  # Reached by anything that interrupts a run: Ctrl-C, a rolling restart, a
+  # deleted state file, a laptop closing.
+  resume_dir=""
+  if [ "$status" = in_progress ]; then
+    if [ -n "$fdir" ] && [ -d "$REPO/$fdir" ]; then
+      resume_dir="$fdir"
+    else
+      probe=$(jq -r '.feature_directory // empty' "$REPO/.specify/feature.json" 2>/dev/null)
+      [ -n "$probe" ] && [ -d "$REPO/$probe" ] && resume_dir="$probe"
+    fi
+    if [ -n "$resume_dir" ]; then
+      dim "    resuming its existing feature: $resume_dir"
+    else
+      warn "    recorded as in progress, but no feature directory was found —"
+      warn "    starting this entry from the beginning"
+    fi
   fi
 
   # Switching branches over somebody's uncommitted work is not this tool's call
-  # to make, and stashing on their behalf is worse.
-  if ! dirty=$(tree_is_clean "$REPO"); then
-    err "the working tree has uncommitted changes; not starting a new entry over them"
-    printf '%s\n' "$dirty" | sed 's/^/    /'
+  # to make, and stashing on their behalf is worse. Tracked modifications refuse;
+  # untracked files only warn, because git carries those across a checkout and
+  # refuses outright rather than losing one.
+  changes=$(tracked_changes "$REPO")
+  if [ -n "$changes" ]; then
+    err "there are uncommitted tracked changes; not switching branch over them"
+    printf '%s\n' "$changes" | head -20 | sed 's/^/    /'
     say ""
-    say "  Commit, or stash them yourself, then: spec-roadmap run $SLUG"
+    say "  If this is the previous entry's work, commit it and merge it — the"
+    say "  roadmap is waiting on exactly that. Otherwise commit or stash it"
+    say "  yourself; this will not stash on your behalf."
+    say "  Then: spec-roadmap run $SLUG"
     exit 1
   fi
-
-  # Each entry is cut from the base, which by now contains everything the
-  # previous entries landed. That is the whole point of the merge gate.
-  base_local=${BASE##*/}
-  if [ "$(git -C "$REPO" rev-parse --abbrev-ref HEAD)" != "$base_local" ]; then
-    git -C "$REPO" checkout --quiet "$base_local" 2>/dev/null || \
-      die "could not check out $base_local to cut this entry from" \
-          "switch to it yourself, then re-run"
+  stray=$(untracked_files "$REPO")
+  if [ -n "$stray" ]; then
+    warn "untracked files will follow this checkout into the new entry's branch:"
+    printf '%s\n' "$stray" | head -10 | sed 's/^/    /'
+    n_stray=$(printf '%s\n' "$stray" | grep -c . || true)
+    [ "${n_stray:-0}" -gt 10 ] && dim "    … and $((n_stray - 10)) more"
+    say "  Not a blocker — git preserves them — but if any belong to the previous"
+    say "  entry, commit them there first or they will appear in this entry's diff."
   fi
-  git -C "$REPO" merge --ff-only --quiet "$BASE" 2>/dev/null || \
-    warn "could not fast-forward $base_local to $BASE — this entry starts from $base_local as it is"
+
+  # The dry run comes AFTER the tree checks on purpose. A dry run that reports
+  # "would run: …" where the real run refuses is worse than no dry run at all:
+  # the whole point of asking is to find out what will happen.
+  if [ "$DRY_RUN" -eq 1 ]; then
+    if [ "${#PASSTHROUGH[@]}" -gt 0 ]; then
+      printf '    would run: spec-run %s\n' "$(printf '%q ' "${PASSTHROUGH[@]}" "$description")"
+    else
+      printf '    would run: spec-run %s\n' "$(printf '%q' "$description")"
+    fi
+    continue
+  fi
+
+  # A NEW entry is cut from the base, which by now contains everything the
+  # previous entries landed — that is the whole point of the merge gate. A
+  # RESUMED entry must stay on its own branch: switching to the base would leave
+  # the half-finished work behind and resume against the wrong tree.
+  if [ -z "$resume_dir" ]; then
+    base_local=${BASE##*/}
+    if [ "$(git -C "$REPO" rev-parse --abbrev-ref HEAD)" != "$base_local" ]; then
+      if ! git -C "$REPO" checkout --quiet "$base_local" 2>/dev/null; then
+        # A fresh clone has the remote ref but no local branch of that name.
+        git -C "$REPO" checkout --quiet -b "$base_local" --track "$BASE" 2>/dev/null || \
+          die "could not check out $base_local to cut this entry from" \
+              "create or switch to it yourself, then re-run"
+      fi
+    fi
+    git -C "$REPO" merge --ff-only --quiet "$BASE" 2>/dev/null || \
+      warn "could not fast-forward $base_local to $BASE — this entry starts from $base_local as it is"
+  fi
 
   roadmap_entry_set "$ST" "$slug" '{"status":"in_progress"}'
 
@@ -368,7 +448,23 @@ while IFS=$'\t' read -r slug title description; do
     fi
   fi
 
-  "$SPEC_RUN" --repo "$REPO" "${PASSTHROUGH[@]:-}" "$description"; src=$?
+  # NOT "${PASSTHROUGH[@]:-}": on bash 3.2 an empty array expands that way to a
+  # single EMPTY argument, which spec-run then reads as part of the feature
+  # description. It survives by luck today (an empty first positional collapses
+  # into the description that follows) and would not survive a reordering.
+  if [ -n "$resume_dir" ]; then
+    # No description: phases already recorded ok are skipped, so this picks up
+    # exactly where the interrupted run stopped.
+    if [ "${#PASSTHROUGH[@]}" -gt 0 ]; then
+      "$SPEC_RUN" --repo "$REPO" --feature-dir "$REPO/$resume_dir" "${PASSTHROUGH[@]}"; src=$?
+    else
+      "$SPEC_RUN" --repo "$REPO" --feature-dir "$REPO/$resume_dir"; src=$?
+    fi
+  elif [ "${#PASSTHROUGH[@]}" -gt 0 ]; then
+    "$SPEC_RUN" --repo "$REPO" "${PASSTHROUGH[@]}" "$description"; src=$?
+  else
+    "$SPEC_RUN" --repo "$REPO" "$description"; src=$?
+  fi
 
   # Learn where it landed, and what it cost, from the pipeline's own state.
   newdir=$(jq -r '.feature_directory // empty' "$REPO/.specify/feature.json" 2>/dev/null)

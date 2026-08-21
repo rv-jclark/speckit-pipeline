@@ -3,28 +3,19 @@ description: Show the current feature's pipeline state — which phases ran, on 
 allowed-tools: Bash, Read
 ---
 
-Report the state of the current spec-kit feature.
+```bash
+"${CLAUDE_PLUGIN_ROOT}/bin/spec-status"
+```
 
-1. Resolve the feature directory:
-   ```bash
-   jq -r '.feature_directory' .specify/feature.json 2>/dev/null \
-     || ./.specify/scripts/bash/check-prerequisites.sh --json | jq -r .FEATURE_DIR
-   ```
+Report what it prints: the per-phase table, the total, and what the next action
+is. Add anything useful from the artifacts themselves if the user asks — but the
+table above is the authority on what ran, and this command must not re-derive it
+from which files happen to exist.
 
-2. Show which artifacts exist and which phases the pipeline has recorded:
-   ```bash
-   FD=<feature dir>
-   ls -la "$FD"
-   [ -f "$FD/.pipeline/state.json" ] && jq . "$FD/.pipeline/state.json"
-   [ -f "$FD/.pipeline/cost.log" ] && column -t -s$'\t' "$FD/.pipeline/cost.log"
-   ```
+That distinction is the whole reason the state file exists. A present `plan.md`
+cannot tell you whether planning finished or was killed halfway through writing
+it, so if `spec-status` reports no recorded state, say exactly that rather than
+inferring progress from a directory listing.
 
-3. Report as a short table: phase, status, model, effort, cost, turns — plus the
-   total. Then say what the next action is (`/spec-run --resume`, or which gate
-   is waiting on the user).
-
-If there is no `.pipeline/state.json`, say so plainly rather than inferring
-progress from which files exist. A present `plan.md` does not distinguish
-"planning finished" from "planning was killed halfway through writing it" — that
-distinction is exactly what the state file records, and guessing it is how a
-half-written plan becomes a task list.
+Exit `1` means there is no state to show — either no feature is current, or none
+has been run through the pipeline yet.

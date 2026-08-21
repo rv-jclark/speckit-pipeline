@@ -203,7 +203,17 @@ discover_feature_dir() {
   case "$rel" in /*) printf '%s\n' "$rel";; *) printf '%s\n' "$REPO/$rel";; esac
 }
 
-if [ -z "$FEATURE_DIR" ]; then FEATURE_DIR=$(discover_feature_dir || true); fi
+# Adopting an existing feature is RESUME behaviour, and a description means the
+# opposite: a new feature, which /speckit-specify is what creates. Discovering
+# first regardless made `spec-run "a second feature"` adopt whatever
+# .specify/feature.json still pointed at, find its specify phase already `ok`,
+# skip it, and run nothing new — silently continuing the previous feature under a
+# new description. Found through the roadmap runner, where entry two inherited
+# entry one's spec, but it was never roadmap-specific: it is what a second
+# feature in any repository would have done.
+if [ -z "$FEATURE_DIR" ] && [ -z "$DESCRIPTION" ]; then
+  FEATURE_DIR=$(discover_feature_dir || true)
+fi
 
 STATE=""
 init_state_if_possible() {

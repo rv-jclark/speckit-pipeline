@@ -15,6 +15,39 @@ fi
 ROADMAP_STATUSES="pending in_progress awaiting_merge done blocked"
 export ROADMAP_STATUSES
 
+# ------------------------------------------------------- the base branch ------
+# `origin/main` is a guess, and it is wrong for a repository whose default is
+# master, one with no remote at all, and one whose remote is not called origin.
+# Guessing wrong here does not fail cleanly: the base ref does not resolve, every
+# entry reports `unknown`, and the roadmap refuses to move with a message about
+# fetching. So the base is DETECTED, and the answer says how it was reached —
+# "you asked for this" and "I picked it" are different facts, and only the second
+# is worth double-checking.
+detect_base() { # detect_base <repo>  -> prints "<ref>\t<how>"
+  local repo="$1" head remote ref
+  head=$(git -C "$repo" symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null)
+  if [ -n "$head" ]; then
+    printf '%s\torigin/HEAD points at it\n' "${head#refs/remotes/}"; return 0
+  fi
+  for remote in $(git -C "$repo" remote 2>/dev/null); do
+    for ref in main master trunk; do
+      if git -C "$repo" rev-parse --verify --quiet "$remote/$ref" >/dev/null 2>&1; then
+        printf '%s/%s\tthe only matching branch on remote %s\n' "$remote" "$ref" "$remote"; return 0
+      fi
+    done
+  done
+  for ref in main master trunk; do
+    if git -C "$repo" rev-parse --verify --quiet "$ref" >/dev/null 2>&1; then
+      printf '%s\ta local branch (this repository has no matching remote)\n' "$ref"; return 0
+    fi
+  done
+  ref=$(git -C "$repo" rev-parse --abbrev-ref HEAD 2>/dev/null)
+  if [ -n "$ref" ] && [ "$ref" != HEAD ]; then
+    printf '%s\tthe current branch, for want of anything better — check this\n' "$ref"; return 0
+  fi
+  printf '\tno branch could be identified\n'; return 1
+}
+
 roadmap_dir()  { printf '%s/.specify/roadmaps\n' "$1"; }
 roadmap_file() { printf '%s/.specify/roadmaps/%s.json\n' "$1" "$2"; }
 roadmap_state(){ printf '%s/.specify/roadmaps/%s.state.json\n' "$1" "$2"; }
@@ -117,9 +150,19 @@ entry_landed() {
     printf 'unknown\tthe base ref %s does not exist in this repository\n' "$base"; return 0
   fi
 
+  # Ancestry is only evidence if the branch HAS commits of its own. spec-kit's
+  # auto-commit hook is optional and routinely declined, so a feature branch
+  # often sits at exactly the base commit with all its work uncommitted — and
+  # `merge-base --is-ancestor` is then trivially TRUE. Measured: an entry that
+  # had never been merged reported "landed", the gate opened, and the roadmap
+  # would have marched through every remaining entry without a single merge.
+  # That is worse than the squash problem: it does not stall, it lies.
   if [ -n "$branch" ] && git -C "$repo" rev-parse --verify --quiet "$branch" >/dev/null 2>&1; then
-    if git -C "$repo" merge-base --is-ancestor "$branch" "$base" 2>/dev/null; then
-      printf 'done\t%s is an ancestor of %s\n' "$branch" "$base"; return 0
+    local own
+    own=$(git -C "$repo" rev-list --count "$base..$branch" 2>/dev/null || echo 0)
+    if [ "${own:-0}" -gt 0 ] && git -C "$repo" merge-base --is-ancestor "$branch" "$base" 2>/dev/null; then
+      printf 'done\t%s is an ancestor of %s, with %s commit(s) of its own\n' "$branch" "$base" "$own"
+      return 0
     fi
   fi
 
@@ -148,13 +191,52 @@ entry_landed() {
 }
 
 # ----------------------------------------------------------- tree safety ------
-# The runner switches branches between entries, so it must never do that over
-# somebody's uncommitted work. Refuse and say what is dirty; never stash.
+# The runner switches branches between entries, so it must not do that over
+# somebody's uncommitted work — and it must not refuse over its own.
+#
+# Two corrections are baked in here. First, `git status --porcelain` non-empty is
+# the WRONG test: `spec-roadmap plan` writes the roadmap file into the repository,
+# so the first `run` after it saw a dirty tree and refused. The tool dirtied the
+# tree and then blocked on it, which would have stopped every roadmap at entry
+# one. Second, and more generally: UNTRACKED files are safe to switch branches
+# over. Git carries them across a checkout and refuses outright if one would be
+# clobbered. What actually blocks or loses work is a TRACKED modification.
+#
+# So tracked changes refuse, untracked ones warn, and the tool's own bookkeeping
+# is silent.
 
-tree_is_clean() { # tree_is_clean <repo>  -> 0 clean, else prints the dirty paths
-  local dirty
-  dirty=$(git -C "$1" status --porcelain 2>/dev/null | head -20)
-  [ -z "$dirty" ] && return 0
-  printf '%s\n' "$dirty"
-  return 1
+# Paths that are this tool's own generated state, not anybody's work.
+_is_tool_bookkeeping() {
+  case "$1" in
+    .specify/roadmaps/*|specs/*/.pipeline/*|.specify/feature.json) return 0;;
+    *) return 1;;
+  esac
+}
+
+# tracked_changes <repo>  -> prints "XY path" lines for tracked modifications
+tracked_changes() {
+  local line path
+  git -C "$1" status --porcelain 2>/dev/null | while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$line" in '??'*) continue;; esac      # untracked handled separately
+    path=${line:3}
+    case "$path" in *" -> "*) path=${path##* -> };; esac
+    path=${path%\"}; path=${path#\"}
+    _is_tool_bookkeeping "$path" && continue
+    printf '%s\n' "$line"
+  done
+  return 0
+}
+
+# untracked_files <repo>  -> prints untracked paths that are not our bookkeeping
+untracked_files() {
+  local line path
+  git -C "$1" status --porcelain -uall 2>/dev/null | while IFS= read -r line; do
+    case "$line" in '??'*) ;; *) continue;; esac
+    path=${line:3}
+    path=${path%\"}; path=${path#\"}
+    _is_tool_bookkeeping "$path" && continue
+    printf '%s\n' "$path"
+  done
+  return 0
 }
