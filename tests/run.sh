@@ -60,6 +60,19 @@ mkbare() { # mkbare <path> <branch>
   printf 'x\n' > "$1/f"; git -C "$1" add -A >/dev/null 2>&1; git -C "$1" commit -qm i
 }
 
+# The libraries are sourced HERE, before any assertion, because a helper defined
+# partway down the file is unbound for everything above it and `set -u` turns that
+# into a block of failures that read like product bugs. This is the third time
+# file order has done that — mkbare, then SPEC_ROADMAP, then jqd — so the rule is
+# now: every path and every library at the top.
+#
+# verify.sh depends on common.sh and refuses to load without it, so the order
+# matters; it is the order the engine uses.
+# shellcheck source=../plugins/speckit-pipeline/lib/common.sh
+. "$PKG/lib/common.sh"
+# shellcheck source=../plugins/speckit-pipeline/lib/verify.sh
+. "$PKG/lib/verify.sh"
+
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/speckit-pipeline-tests.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
 
@@ -144,6 +157,23 @@ assert_eq "$(jq -r '.phases[]|select(.id=="implement").model' "$CONFIG")" "sonne
 # unbounded spend that looks identical to a bounded one until it runs away.
 uncapped=$(jq -r '[.phases[] | select((.max_budget_usd|not) and (.max_turns|not)) | .id] | join(",")' "$CONFIG")
 assert_eq "$uncapped" "" "every phase has a budget or turn ceiling"
+
+# The permission mode is not a free choice. Measured: under acceptEdits and
+# dontAsk, a Bash command with a LEADING ENVIRONMENT ASSIGNMENT is denied —
+# `PROBE=1 echo hi` refused where `echo hi` is allowed — and that is the shape
+# spec-kit's own branch script needs (`GIT_BRANCH_NAME=... create-new-feature-
+# branch.sh`). A real specify phase was refused four times, created no feature
+# branch, and still reported success. Only bypassPermissions and auto allow it.
+pmode=$(jqd "$CONFIG" '.defaults.permission_mode' "")
+case "$pmode" in
+  bypassPermissions|auto) t_pass "the permission mode ($pmode) allows env-prefixed commands";;
+  *) t_fail "the permission mode allows env-prefixed commands" \
+       "$pmode denies them, so spec-kit's branch script cannot run";;
+esac
+# What that trades away is smaller than it looks, and also measured:
+# --disallowed-tools still applies under bypassPermissions, so pushing, merging
+# and deploying stay withheld. The invocation assertions below check the deny list
+# is still passed; this one checks the mode does not make the phases useless.
 
 # ------------------------------------------------------- documented commands ---
 # Every `spec-*` command the README tells someone to type must exist and be
@@ -253,12 +283,6 @@ DOC_ASSERTION_COUNT="${doc_count:-0}"    # checked against the real tally at the
 
 # ================================================================== verify ====
 printf '\nartifact verification\n'
-# verify.sh depends on common.sh; sourcing it alone is now a hard error rather
-# than a silent miscomparison, so source both in the order the engine does.
-# shellcheck source=../plugins/speckit-pipeline/lib/common.sh
-. "$PKG/lib/common.sh"
-# shellcheck source=../plugins/speckit-pipeline/lib/verify.sh
-. "$PKG/lib/verify.sh"
 FD="$WORK/feature"; mkdir -p "$FD"
 
 status=$(verify_phase specify "$FD" spec.md | cut -f1)
@@ -1430,6 +1454,48 @@ assert_not_contains "$out" "uncommitted tracked changes" "and does not refuse ov
 git -C "$IR" checkout -- f 2>/dev/null || true
 # Mutation: hoist the tree checks back above the resume decision and the first
 # two assertions fail — the run refuses instead of resuming.
+
+# --------------------------------- roadmap: an entry with no branch of its own --
+printf '\nroadmap: an entry that never got a branch\n'
+# The merge gate exists because each entry becomes its own branch and its own pull
+# request. If spec-kit cannot create the branch — which happened for real, its
+# script denied four times in a worktree — the phase still reports success, and
+# continuing would march the roadmap on with its central promise quietly broken.
+cat > "$FAKE/claude-nobranch" <<'FAKEEOF'
+#!/usr/bin/env bash
+[ "${1:-}" = "--help" ] && exit 0
+root=$(git rev-parse --show-toplevel 2>/dev/null)
+prompt=""; for a in "$@"; do case "$a" in /speckit-*) prompt="$a";; esac; done
+rel="specs/001-nobranch"; mkdir -p "$root/$rel"
+# writes the artifacts but deliberately creates NO branch
+printf '{\n  "feature_directory": "%s"\n}\n' "$rel" > "$root/.specify/feature.json"
+pad() { for i in $(seq 1 40); do printf 'padding %s\n' "$i"; done; }
+case "$prompt" in
+  /speckit-specify*)   { printf '# Spec\n'; pad; } > "$root/$rel/spec.md";;
+  /speckit-plan*)      { printf '# Plan\n'; pad; } > "$root/$rel/plan.md";;
+  /speckit-tasks*)     { printf '# Tasks\n'; pad; printf -- '- [ ] T1 x\n'; } > "$root/$rel/tasks.md";;
+  /speckit-implement*) { printf '# Tasks\n'; pad; printf -- '- [x] T1 x\n'; } > "$root/$rel/tasks.md";;
+esac
+echo '{"total_cost_usd":0.02,"num_turns":2,"duration_ms":30,"result":"STATUS: ok"}'
+FAKEEOF
+chmod +x "$FAKE/claude-nobranch"
+NB="$WORK/nobranch"; mkbare "$NB" main
+"$SPEC_BOOTSTRAP" "$NB" >/dev/null 2>&1
+git -C "$NB" add -A >/dev/null 2>&1; git -C "$NB" commit -qm bootstrap
+mkdir -p "$NB/.specify/roadmaps"
+printf '{"goal":"g","base":"main","entries":[{"slug":"one","title":"first","description":"do one"},{"slug":"two","title":"second","description":"do two"}]}\n' \
+  > "$NB/.specify/roadmaps/rm.json"
+git -C "$NB" add -A >/dev/null 2>&1; git -C "$NB" commit -qm roadmap
+
+out=$(SPEC_RUN_CLAUDE_BIN=claude-nobranch "$SPEC_ROADMAP" run --repo "$NB" --slug rm --base main 2>&1); rc=$?
+assert_eq "$rc" "1" "the roadmap FAILS when an entry has no branch of its own"
+assert_contains "$out" "no branch of its own" "saying exactly that"
+assert_contains "$out" "permission_denials" "and pointing at the likely cause"
+assert_not_contains "$out" "second" "and it does not continue to the next entry"
+assert_eq "$(jq -r '.entries.one.status' "$NB/.specify/roadmaps/rm.state.json")" "blocked" \
+  "recording the entry as blocked, not awaiting_merge"
+# Mutation: drop the entry_has_own_branch check and this reports awaiting_merge,
+# which is the tidy lie — a gate with nothing to gate.
 
 # ------------------------------------------- roadmap: inside a git worktree ----
 printf '\nroadmap: a base checked out in another worktree\n'

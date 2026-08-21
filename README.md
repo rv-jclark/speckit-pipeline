@@ -558,13 +558,33 @@ keeps its MCP servers.
 
 ## Permissions
 
-Each phase runs `--permission-mode acceptEdits` (configurable as
+Each phase runs `--permission-mode bypassPermissions` (configurable as
 `defaults.permission_mode` in `phases.json`). In print mode there is **no
 interactive prompt**: a tool call the harness will not allow is *denied and
 reported to the model*, which then works around it or gives up — it does not hang
-waiting for a human. Measured on the smoke runs, spec-kit's own
-`create-new-feature.sh` and `update-agent-context.sh` both ran fine under
-`acceptEdits`.
+waiting for a human.
+
+🛑 **The mode is not a free choice, and the default was wrong.** Measured: under
+`acceptEdits` — and `dontAsk` — a Bash command with a **leading environment
+assignment** is denied. `PROBE=1 echo hi` is refused where `echo hi` is allowed.
+
+That is exactly the shape spec-kit's own branch script needs:
+
+```
+GIT_BRANCH_NAME=… .specify/extensions/git/scripts/bash/create-new-feature-branch.sh …
+```
+
+So a real `specify` phase was refused **four times**, created no feature branch,
+and **still reported success** — leaving the roadmap's merge gate with nothing to
+gate. Only `bypassPermissions` and `auto` allow that form.
+
+⚠️ **What this trades away is smaller than it looks, and that was measured too:
+`--disallowed-tools` still applies under `bypassPermissions`.** A `git push` was
+blocked, with the phase reporting *"a permission denial, it did not execute"*. So
+pushing, merging and deploying remain withheld; what the mode restores is the
+ordinary shell the phases need to do their job. The scope check still runs
+afterwards. If your organisation's policy blocks `bypassPermissions`, `auto` also
+allows the env-prefixed form — it just substitutes a classifier for a rule.
 
 Denied tool calls are **counted and named**, not inferred. The CLI reports its own
 refusals in the result (`permission_denials`), so a phase's note reads
@@ -832,7 +852,7 @@ reports success over a directory the rest of the pipeline cannot find.
 ## Tests
 
 ```bash
-./tests/run.sh          # shellcheck + 324 fixture assertions
+./tests/run.sh          # shellcheck + 330 fixture assertions
 ```
 
 **The suite is hermetic.** A stub runner shadows the real `claude` for the whole
@@ -926,7 +946,7 @@ not be measured are recorded `unmeasured`, never as `$0`.
 ## Tests, and what they cost to run
 
 ```bash
-./tests/run.sh          # shellcheck + 324 assertions, ~2 minutes
+./tests/run.sh          # shellcheck + 330 assertions, ~2 minutes
 ```
 
 Hermetic: a stub runner shadows the real `claude` for the whole run, so nothing

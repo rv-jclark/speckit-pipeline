@@ -581,6 +581,7 @@ while [ "$ei" -lt "$n_entries" ]; do
     fi
   fi
 
+  head_before=$(git -C "$REPO" rev-parse --abbrev-ref HEAD 2>/dev/null)
   roadmap_entry_set "$ST" "$slug" '{"status":"in_progress"}'
 
   if [ -n "$BUDGET" ]; then
@@ -617,8 +618,48 @@ while [ "$ei" -lt "$n_entries" ]; do
     ecost=$(jq -r '[.phases[].cost_usd // 0] | add // 0' "$REPO/$newdir/.pipeline/state.json")
   fi
 
+  # An entry that never got a branch of its own cannot be reviewed or merged
+  # separately, so the merge gate has nothing to gate and the roadmap would march
+  # on with its central promise quietly broken. Measured: spec-kit's branch script
+  # was denied four times in a worktree, the phase reported success, and the entry
+  # stayed on the roadmap branch.
+  #
+  # Detected by comparing where we ended up against where we started: the branch
+  # is the entry's own only if it differs from both.
+  entry_has_own_branch=1
+  if [ "$src" -eq 0 ]; then
+    if [ -z "$newbranch" ] || [ "$newbranch" = "$head_before" ] || \
+       [ "$newbranch" = "${BASE##*/}" ]; then
+      entry_has_own_branch=0
+    fi
+  fi
+
   case "$src" in
-    0) roadmap_entry_set "$ST" "$slug" "$(jq -n --arg d "$newdir" --arg b "$newbranch" \
+    0) if [ "$entry_has_own_branch" -eq 0 ]; then
+         roadmap_entry_set "$ST" "$slug" "$(jq -n --arg d "$newdir" --arg b "$newbranch" \
+              --arg c "$ecost" --arg n "the pipeline finished but the entry has no branch of its own" \
+              '{status:"blocked", feature_dir:$d, branch:$b, note:$n,
+                cost_usd:($c|tonumber? // null)}')"
+         say ""
+         err "$slug — the pipeline finished, but this entry has no branch of its own"
+         say "  still on: ${newbranch:-<unknown>}"
+         say "  specs:    ${newdir:-<none>}"
+         say ""
+         say "  Each entry is meant to become its own branch and its own pull request;"
+         say "  that is what the merge gate gates. Without one there is nothing to"
+         say "  review separately and nothing for the next entry to wait on, so the"
+         say "  roadmap stops here rather than continuing with its central promise"
+         say "  quietly broken."
+         say ""
+         say "  Usually this means spec-kit could not create the branch. Check the"
+         say "  phase's denied tool calls:"
+         say "    jq -r '.parsed.permission_denials[]?.tool_input.command' \\"
+         say "      ${newdir:-<feature>}/.pipeline/specify.result.json"
+         say ""
+         rc_final=1
+         break
+       fi
+       roadmap_entry_set "$ST" "$slug" "$(jq -n --arg d "$newdir" --arg b "$newbranch" \
             --arg c "$ecost" '{status:"awaiting_merge", feature_dir:$d, branch:$b,
                                cost_usd:($c|tonumber? // null)}')"
        say ""
