@@ -131,7 +131,7 @@ roadmap_entry_get() { # <state_file> <slug> <field> <default>
 }
 
 roadmap_entry_set() { # <state_file> <slug> <json_object_of_fields>
-  local f="$1" tmp; tmp=$(mktemp)
+  local f="$1" tmp; tmp=$(mktmp)
   jq --arg s "$2" --argjson patch "$3" --arg t "$(now_iso)" \
     '.entries[$s] = ((.entries[$s] // {}) + $patch + {updated_at:$t})' "$f" > "$tmp" && mv "$tmp" "$f"
 }

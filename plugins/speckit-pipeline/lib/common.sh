@@ -36,6 +36,22 @@ new_uuid() {
 
 now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
+# A temp file, always rooted in TMPDIR. Never call `mktemp` with no template.
+#
+# macOS mktemp with no template ignores TMPDIR entirely and writes to the Darwin
+# per-user temp dir (confstr _CS_DARWIN_USER_TEMP_DIR, /var/folders/...). Under a
+# sandbox that grants writes to TMPDIR and nothing else — which is what Claude
+# Code's own Bash sandbox does — every bare mktemp therefore fails, and it fails
+# in the worst available way: the command substitution yields an empty string, so
+# the failure surfaces later as `line 211: : No such file or directory` against
+# whatever line used the path. Measured on macOS 25.5: `spec-upgrade --check`
+# printed 60 such lines plus an integer-comparison error, naming neither mktemp
+# nor the sandbox anywhere in the output.
+#
+# Exporting TMPDIR does not fix it. Only passing a template does.
+mktmp()  { mktemp    "${TMPDIR:-/tmp}/speckit-pipeline.XXXXXXXX"; }
+mktmpd() { mktemp -d "${TMPDIR:-/tmp}/speckit-pipeline.XXXXXXXX"; }
+
 file_sha() {
   [ -f "$1" ] || { printf 'absent\n'; return 0; }
   if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | cut -d' ' -f1
@@ -219,7 +235,7 @@ state_phase_get() { # state_phase_get <state_file> <phase> <field> <default>
 
 state_phase_start() { # state_phase_start <state_file> <phase> <session_id> <model> <effort>
   local f="$1" tmp
-  tmp=$(mktemp)
+  tmp=$(mktmp)
   # `runner_pid` is what makes "running" falsifiable. Without it, a phase killed
   # by a Ctrl-C, a reboot or an OOM stays `running` forever, and "in flight",
   # "killed" and "crashed" become one state with no cost and no outcome — the
@@ -258,7 +274,7 @@ state_reconcile_running() { # <state_file> — a `running` phase whose runner is
   while IFS="$(printf '\t')" read -r p pid; do
     [ -n "$p" ] || continue
     _runner_alive "$pid" && continue
-    tmp=$(mktemp)
+    tmp=$(mktmp)
     jq --arg p "$p" --arg t "$(now_iso)" \
       '.phases[$p] += {status:"interrupted", ended_at:$t,
                        note:"the runner exited without recording an outcome; cost and turns are unmeasured"}' \
@@ -270,7 +286,7 @@ EOF
 
 state_phase_finish() { # ... <state_file> <phase> <status> <cost> <turns> <duration_ms> <artifact_sha> <note>
   local f="$1" tmp
-  tmp=$(mktemp)
+  tmp=$(mktmp)
   jq --arg p "$2" --arg s "$3" --arg c "$4" --arg n "$5" --arg d "$6" \
      --arg sha "$7" --arg note "$8" --arg t "$(now_iso)" \
     '.phases[$p] += {
@@ -295,7 +311,7 @@ fmt_cost() { [ -n "${1:-}" ] && printf '$%s' "$1" || printf 'cost unmeasured'; }
 # artifact its previous attempt had left behind. Resuming is `--resume`; starting
 # is a fresh id. The history is kept so an earlier thread stays reachable.
 state_phase_push_session() { # <state_file> <phase> <session_id>
-  local f="$1" tmp; tmp=$(mktemp)
+  local f="$1" tmp; tmp=$(mktmp)
   jq --arg p "$2" --arg sid "$3" \
     '.phases[$p] = ((.phases[$p] // {}) + {
         session_id:$sid,

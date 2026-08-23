@@ -320,7 +320,7 @@ EOF
   if [ "${#ADD_DIRS[@]}" -gt 0 ]; then
     for _ad in "${ADD_DIRS[@]}"; do [ -n "$_ad" ] && plan_extra+=(--add-dir "$_ad"); done
   fi
-  errf=$(mktemp)
+  errf=$(mktmp)
   out=$( cd "$REPO" && "$bin" -p "$prompt" --model "$model" --effort "$effort" \
            --output-format json --permission-mode acceptEdits \
            --session-id "$(new_uuid)" "${plan_extra[@]+"${plan_extra[@]}"}" \

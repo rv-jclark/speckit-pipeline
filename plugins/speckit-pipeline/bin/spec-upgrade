@@ -202,7 +202,7 @@ say ""
 # Classify every vendored file against the project, and every scaffold file the
 # project has that the new version no longer ships. Report before acting: an
 # upgrade that cannot be previewed is a leap.
-PLAN=$(mktemp); trap 'rm -f "$PLAN"' EXIT
+PLAN=$(mktmp); trap 'rm -f "$PLAN"' EXIT
 
 classify() { # classify <src_abs> <rel_in_project>
   local src="$1" rel="$2"
@@ -440,7 +440,7 @@ ok "the upgraded scaffold passes the pipeline's own skill check"
 # reader believes the upgrade did not happen.
 IJ="$REPO/.specify/integration.json"
 if [ -f "$IJ" ]; then
-  tmpj=$(mktemp)
+  tmpj=$(mktmp)
   if jq --arg v "$TARGET_VERSION" '.version = $v' "$IJ" > "$tmpj" 2>/dev/null; then
     mv "$tmpj" "$IJ"; ok "recorded spec-kit $TARGET_VERSION in .specify/integration.json"
   else

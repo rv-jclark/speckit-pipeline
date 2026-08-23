@@ -507,7 +507,7 @@ run_phase() { # run_phase <phase_json>
 
   local snap=""
   if [ "${#prefixes[@]}" -gt 0 ]; then
-    snap=$(mktemp)
+    snap=$(mktmp)
     scope_snapshot "$REPO" "$snap" "${prefixes[@]}"
   fi
 
@@ -517,7 +517,7 @@ run_phase() { # run_phase <phase_json>
   # and turns as zero. A zero that means "not measured" is the most expensive
   # kind of tidy number.
   local out rc errf
-  errf=$(mktemp)
+  errf=$(mktmp)
   # </dev/null so the phase cannot consume anything the caller is reading. The
   # index-based loop above already removes the dependency; this makes it
   # impossible to reintroduce by restructuring the loop later.
