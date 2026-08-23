@@ -368,6 +368,15 @@ if [ "$CMD" = show ]; then
   say "roadmap  $(dim_s "$SLUG")   base $(dim_s "$BASE")"
   [ -n "$BASE_HOW" ] && dim "         base chosen because: $BASE_HOW"
   say "goal     $(jq -r '.goal // "(none stated)"' "$RM")"
+  _doc=$(roadmap_source_doc "$RM")
+  if [ -n "$_doc" ]; then
+    if [ -f "$REPO/$_doc" ]; then
+      say "doc      $(dim_s "$_doc")"
+    else
+      say "doc      $_doc"
+      warn "that document is missing; each entry's description tells its phase to read it"
+    fi
+  fi
   say ""
   roadmap_fetch_base "$REPO" "$BASE"; fresh=$?
   [ "$fresh" -ne 0 ] && warn "could not fetch $BASE — landed/not-landed below may be stale"
@@ -403,6 +412,17 @@ fi
 say ""
 say "roadmap  $(dim_s "$SLUG")   base $(dim_s "$BASE")"
 [ -n "$BASE_HOW" ] && dim "         base chosen because: $BASE_HOW"
+
+# Checked here, before any phase is billed, for the reason in roadmap_source_doc:
+# the descriptions are what point a phase at this file, so a stale path is a
+# defect in every remaining entry at once rather than in one of them.
+SOURCE_DOC=$(roadmap_source_doc "$RM")
+if [ -n "$SOURCE_DOC" ] && [ ! -f "$REPO/$SOURCE_DOC" ]; then
+  warn "source_doc does not resolve: $SOURCE_DOC"
+  say  "  The entries' descriptions tell each phase to read it before specifying,"
+  say  "  so every phase from here on is pointed at a file that is not there."
+  say  "  Fix the path in ${RM#"$REPO"/}, or drop the key if the document is gone."
+fi
 say ""
 
 roadmap_fetch_base "$REPO" "$BASE"; fresh=$?

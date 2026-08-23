@@ -114,6 +114,27 @@ roadmap_validate() { # roadmap_validate <file>  -> prints reason and returns 1 o
   return 0
 }
 
+# ----------------------------------------------------------- source doc -------
+# The design document the entries were transcribed from, when `plan --from-doc`
+# wrote one (or an author added it by hand).
+#
+# This is a pointer, but a LOAD-BEARING one, and it is deliberately not part of
+# roadmap_validate. Every description that --from-doc produces instructs its
+# phase to read this file before specifying — that instruction is the only reason
+# any phase sees the document at all, because nothing here passes it. So a path
+# that no longer resolves silently strips the grounding from every entry while
+# each phase still reports success, which is the worst shape a broken link can
+# take. Surfaced by `show`, and warned about before a `run`.
+#
+# A warning and not a refusal: the transcription contract requires each
+# description to stand on its own ("inline the substance and point at the
+# document for the rest"), so a missing document degrades an entry rather than
+# breaking it — and refusing would wedge a roadmap over a document someone
+# deliberately retired after its entries were written.
+roadmap_source_doc() { # <roadmap_file>  -> repo-relative path, or nothing
+  jq -r '.source_doc // empty' "$1" 2>/dev/null
+}
+
 # ------------------------------------------------------------- run state ------
 # Definition and progress are separate files on purpose: the roadmap is authored,
 # the state is generated. The same split as spec.md versus .pipeline/state.json.

@@ -415,6 +415,24 @@ to read it.
 Measured on a real 345-line roadmap: 6 entries transcribed in the author's order
 with their numbering preserved, $1.48 on opus/high.
 
+**The transcription records the document in `source_doc`, and that pointer is
+checked.** `spec-roadmap show` prints it, and a `run` warns before any phase is
+billed if it no longer resolves. That check earns its place because those
+`description` instructions are the *only* thing that puts the document in front of
+a phase — nothing in the engine passes it. So a document that is renamed or moved
+does not fail loudly; it quietly removes the grounding from every remaining entry
+while each phase still reports success. It is a warning rather than a refusal,
+because the transcription contract requires each description to stand on its own,
+and refusing would wedge a roadmap over a document deliberately retired after its
+entries were written.
+
+**Keep the document and the entries from becoming two stores for one fact.** Once
+transcribed, the entries are what runs — so the document is best left as the
+*design* record (the reasoning, the constraints, the rejected alternatives) with
+the per-entry briefs living only in the JSON. A document that keeps its own
+parallel copy of the entry list, its order and its scope boundaries will drift
+from the roadmap that actually executes, and nothing here detects that.
+
 ### Watching a phase work
 
 By default each phase prints one line when it finishes, which for a long phase
@@ -886,7 +904,7 @@ reports success over a directory the rest of the pipeline cannot find.
 ## Tests
 
 ```bash
-./tests/run.sh          # shellcheck + 373 fixture assertions
+./tests/run.sh          # shellcheck + 380 fixture assertions
 ```
 
 **The suite is hermetic.** A stub runner shadows the real `claude` for the whole
@@ -980,7 +998,7 @@ not be measured are recorded `unmeasured`, never as `$0`.
 ## Tests, and what they cost to run
 
 ```bash
-./tests/run.sh          # shellcheck + 373 assertions, ~2 minutes
+./tests/run.sh          # shellcheck + 380 assertions, ~2 minutes
 ```
 
 Hermetic: a stub runner shadows the real `claude` for the whole run, so nothing

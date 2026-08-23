@@ -1497,6 +1497,34 @@ assert_contains "$out" "FIRST LINE" "a multi-line description keeps its first li
 assert_contains "$out" "SECOND PARAGRAPH" "and the paragraph after the first newline"
 assert_contains "$out" "DO NOT take on" "and the scope boundary in its last paragraph"
 
+# `source_doc` used to be written by `plan --from-doc` and read by nothing — dead
+# metadata in the shape of a link. It matters because the descriptions are the
+# ONLY thing that points a phase at that document; nothing here passes it. So a
+# path that stops resolving strips the grounding from every entry at once, while
+# each phase still reports success.
+printf '\nroadmap: source_doc\n'
+mkdir -p "$RB/docs"
+printf 'the design\n' > "$RB/docs/design.md"
+printf '%s\n' '{"goal":"g","base":"main","source_doc":"docs/design.md","entries":[{"slug":"sd","title":"t","description":"d"}]}' \
+  > "$RB/.specify/roadmaps/withdoc.json"
+out=$("$SPEC_ROADMAP" show --repo "$RB" --slug withdoc --base main 2>&1)
+assert_contains "$out" "docs/design.md" "show names the source document"
+assert_not_contains "$out" "that document is missing" "and does not cry wolf when it resolves"
+out=$("$SPEC_ROADMAP" run --repo "$RB" --slug withdoc --base main --dry-run 2>&1)
+assert_not_contains "$out" "does not resolve" "a run over a resolving source_doc is quiet"
+
+# The mutation that matters: the path stops resolving.
+rm -f "$RB/docs/design.md"
+out=$("$SPEC_ROADMAP" show --repo "$RB" --slug withdoc --base main 2>&1)
+assert_contains "$out" "that document is missing" "show flags a source_doc that is gone"
+out=$("$SPEC_ROADMAP" run --repo "$RB" --slug withdoc --base main --dry-run 2>&1); rc=$?
+assert_contains "$out" "does not resolve" "and a run warns before any phase is billed"
+assert_eq "$rc" "0" "but does not refuse — a description must stand on its own"
+
+# A roadmap with no source_doc at all must stay silent, not report a missing one.
+out=$("$SPEC_ROADMAP" run --repo "$RB" --slug good --base main --dry-run 2>&1)
+assert_not_contains "$out" "does not resolve" "no source_doc means no complaint"
+
 # the status vocabulary must be exactly what the code writes
 printf '\nroadmap: status vocabulary\n'
 # Two syntaxes write a status: a JSON literal ("status":"done") and jq object
