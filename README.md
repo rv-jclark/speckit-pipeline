@@ -25,9 +25,9 @@ per-process boundary fixes:
   run from the specify phase is still in the window during implementation. Here
   each phase's transcript dies with its process. The handoff is the files on
   disk, which is what spec-kit already writes.
-- **No ceiling.** `--max-budget-usd` and `--max-turns` bound a phase by
-  arithmetic. Inside a session, a phase that goes wrong is bounded by you
-  noticing.
+- **No ceiling.** `--max-turns` bounds a phase by arithmetic — set on every
+  phase, always. (`--max-budget-usd` is available and ships unset; see Phases.)
+  Inside a session, a phase that goes wrong is bounded by you noticing.
 - **"Please stop before implementing" is not a control.** Told exactly that in
   prose, an orchestrator agent once ran the full pipeline, merged two pull
   requests and deployed them. `--disallowed-tools` is enforced by the harness:
@@ -556,12 +556,26 @@ done its part and the next move is a human's.
 
 | Phase | Model | Effort | Ceiling | MCP | Optional |
 |---|---|---|---|---|---|
-| specify | opus | high | $5 / 60 turns | dropped | |
-| clarify | opus | high | $3 / 40 turns | dropped | `--with clarify` |
-| plan | opus | high | $12 / 80 turns | dropped | |
-| tasks | sonnet | medium | $5 / 60 turns | dropped | |
-| analyze | opus | high | $3 / 30 turns | dropped | `--with analyze` |
-| implement | sonnet | medium | $40 / 400 turns | kept | |
+| specify | opus | high | — / 60 turns | dropped | |
+| clarify | opus | high | — / 40 turns | dropped | `--with clarify` |
+| plan | opus | high | — / 80 turns | kept | |
+| tasks | sonnet | medium | — / 60 turns | dropped | |
+| analyze | opus | high | — / 30 turns | dropped | `--with analyze` |
+| implement | sonnet | medium | — / 400 turns | kept | |
+
+**No phase ships a dollar ceiling**, and the `—` is deliberate. A ceiling that
+halts a phase mid-artifact costs more than it saves: a truncated `plan.md` still
+verifies as present, so the tasks phase plans against it and the damage compounds
+downstream. `--max-turns` is the backstop — it bounds a runaway loop, which is the
+failure a ceiling should actually catch, and unlike spend it means the same thing
+on subscription auth as on API auth. Add `max_budget_usd` back per phase (in your
+own `--config` / `SPEC_RUN_CONFIG` copy, or here) if you want one.
+
+**`plan` keeps its MCP servers.** It is the phase that decides which frameworks,
+ORMs and APIs the implementation will use, and a project whose conventions live
+behind an MCP documentation server — a `dream-psychic-rag`, a private design
+system — will otherwise have that decision made from memory. Every other
+non-implementing phase still drops them.
 
 All of that is data, in
 [`plugins/speckit-pipeline/lib/phases.json`](plugins/speckit-pipeline/lib/phases.json).
@@ -872,7 +886,7 @@ reports success over a directory the rest of the pipeline cannot find.
 ## Tests
 
 ```bash
-./tests/run.sh          # shellcheck + 369 fixture assertions
+./tests/run.sh          # shellcheck + 370 fixture assertions
 ```
 
 **The suite is hermetic.** A stub runner shadows the real `claude` for the whole
@@ -966,7 +980,7 @@ not be measured are recorded `unmeasured`, never as `$0`.
 ## Tests, and what they cost to run
 
 ```bash
-./tests/run.sh          # shellcheck + 369 assertions, ~2 minutes
+./tests/run.sh          # shellcheck + 370 assertions, ~2 minutes
 ```
 
 Hermetic: a stub runner shadows the real `claude` for the whole run, so nothing

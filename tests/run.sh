@@ -232,11 +232,17 @@ assert_eq "${post_tally:-none}" "none" \
 # A comment cannot be told apart from a comment-about-the-comment by shape, so
 # the scan is scoped to one file that states the figure once, and this file
 # refers to phases.json instead of quoting a number.
+#
+# No phase ships a dollar ceiling any more, so there is no sum to quote and the
+# prose must not quote one. Both halves are asserted together: re-adding a cap
+# without updating the comment puts a stale figure back in front of a reader,
+# which is the exact failure the $58/$68 history above records.
+capped=$(jq -r '[.phases[] | select(has("max_budget_usd")) | .id] | join(" ")' \
+         "$PKG/lib/phases.json")
 declared=$(grep -ohE 'that is \$[0-9]+' "$PKG/bin/spec-roadmap" 2>/dev/null \
            | grep -oE '[0-9]+' | sort -u | tr '\n' ' ')
-actual=$(jq -r '[.phases[].max_budget_usd] | add' "$PKG/lib/phases.json")
-assert_eq "$(printf '%s' "$declared" | tr -d ' ')" "$actual" \
-  "the per-entry ceiling quoted in prose equals the sum in phases.json"
+assert_eq "$(printf '%s|%s' "$capped" "$(printf '%s' "$declared" | tr -d ' ')")" "|" \
+  "no phase ships a dollar ceiling, and no stale per-entry figure is quoted"
 
 # ------------------------------------------------------- documented commands ---
 # Every `spec-*` command the README tells someone to type must exist and be
@@ -313,7 +319,7 @@ doc_table=$(sed -n '/^| Phase | Model | Effort/,/^$/p' "$README" |
       gsub(/\$/,"",$5); gsub(/ turns/,"",$5); gsub(/ \/ /,"\t",$5)
       print $2"\t"$3"\t"$4"\t"$5"\t"$6 }')
 cfg_table=$(jq -r '.phases[] | [.id, .model, .effort,
-                    (.max_budget_usd|tostring), (.max_turns|tostring),
+                    (.max_budget_usd // "—" | tostring), (.max_turns|tostring),
                     (if .mcp == "none" then "dropped" else "kept" end)] | @tsv' "$CONFIG")
 if [ "$doc_table" = "$cfg_table" ]; then
   t_pass "the README phase table matches phases.json exactly"
@@ -901,7 +907,17 @@ assert_contains "$argv" "--effort high"  "specify is invoked at high effort"
 assert_contains "$argv" "/speckit-specify" "the phase invokes the skill as a slash command"
 assert_contains "$argv" "--session-id"   "a session id is pinned so the phase can be resumed"
 assert_contains "$argv" "--output-format json" "output is json so cost and turns are recorded"
-assert_contains "$argv" "--max-budget-usd" "a spend ceiling is passed"
+assert_not_contains "$argv" "--max-budget-usd" "no spend ceiling is passed when none is configured"
+# The absence above is only half the claim. On its own it also passes if the flag
+# were dropped entirely, so assert the plumbing still works when a ceiling IS
+# configured — that is the half a bare absence check cannot see.
+capcfg="$WORK/phases-capped.json"
+jq '(.phases[] | select(.id == "specify")) |= (. + {max_budget_usd: 7})' \
+   "$CONFIG" > "$capcfg"
+argv_capped=$("$SPEC_RUN" --repo "$BS" --feature-dir "$BS/specs/001-t" --only specify \
+              --config "$capcfg" --dry-run 2>&1)
+assert_contains "$argv_capped" "--max-budget-usd 7" \
+  "a configured ceiling is still passed through"
 deny=$(unquote "$argv")
 assert_contains "$deny" "Bash(gh pr merge:*)" "merging is denied to the specify phase"
 assert_contains "$deny" "Bash(git push:*)" "pushing is denied to the specify phase"

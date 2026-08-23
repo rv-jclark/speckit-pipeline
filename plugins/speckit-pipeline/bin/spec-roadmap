@@ -637,9 +637,10 @@ while [ "$ei" -lt "$n_entries" ]; do
 
   if [ -n "$BUDGET" ]; then
     # ⚠️ This bounds how many ENTRIES start, not what one entry spends: it runs
-    # before each entry, and the per-phase max_budget_usd values are the only
-    # thing that stops a phase mid-flight. With the shipped phases that is $68
-    # for a single entry, which can exceed a smaller roadmap budget.
+    # before each entry, and only a phase's own max_budget_usd can stop it
+    # mid-flight. The shipped phases set none, so a single entry is bounded by
+    # max_turns alone and can overshoot a smaller roadmap budget by any amount.
+    # Read this as "stop starting work", never as "do not exceed".
     spent=$(roadmap_spent "$REPO" "$ST")
     if awk -v s="$spent" -v b="$BUDGET" 'BEGIN{exit !(s >= b)}'; then
       err "roadmap budget of \$$BUDGET reached (\$$spent spent) before '$slug'"

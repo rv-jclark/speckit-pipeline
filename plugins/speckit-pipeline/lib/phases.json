@@ -12,8 +12,16 @@
     "  artifact       file (relative to the feature dir) whose state is the ONLY",
     "                 authority on whether the phase succeeded. null = no artifact,",
     "                 verification is skipped and recorded as unevaluated.",
-    "  max_budget_usd hard ceiling passed to --max-budget-usd",
-    "  max_turns      hard ceiling passed to --max-turns",
+    "  max_budget_usd hard ceiling passed to --max-budget-usd. OMITTED here, on",
+    "                 purpose: no phase ships with a dollar ceiling, because a",
+    "                 ceiling that halts a phase mid-artifact costs more than it",
+    "                 saves. A truncated plan.md still verifies as present, and the",
+    "                 tasks phase then plans against it. max_turns is the backstop,",
+    "                 and it is always set. Add the key back per phase (or via",
+    "                 --config / SPEC_RUN_CONFIG) if you want a spend ceiling.",
+    "  max_turns      hard ceiling passed to --max-turns. The real safety rail: it",
+    "                 bounds a runaway loop, which is the failure a ceiling should",
+    "                 catch, and it does not depend on how spend is metered.",
     "  gate           always | on_needs_input | never",
     "  optional       true = only runs when named in --with",
     "  deny_tools     added to defaults.deny_tools for this phase",
@@ -73,7 +81,6 @@
       "effort": "high",
       "mcp": "none",
       "artifact": "spec.md",
-      "max_budget_usd": 5,
       "max_turns": 60,
       "gate": "on_needs_input"
     },
@@ -85,7 +92,6 @@
       "effort": "high",
       "mcp": "none",
       "artifact": "spec.md",
-      "max_budget_usd": 3,
       "max_turns": 40,
       "gate": "always"
     },
@@ -94,9 +100,8 @@
       "skill": "speckit-plan",
       "model": "opus",
       "effort": "high",
-      "mcp": "none",
+      "mcp": "inherit",
       "artifact": "plan.md",
-      "max_budget_usd": 12,
       "max_turns": 80,
       "gate": "on_needs_input"
     },
@@ -107,7 +112,6 @@
       "effort": "medium",
       "mcp": "none",
       "artifact": "tasks.md",
-      "max_budget_usd": 5,
       "max_turns": 60,
       "gate": "on_needs_input"
     },
@@ -119,7 +123,6 @@
       "effort": "high",
       "mcp": "none",
       "artifact": null,
-      "max_budget_usd": 3,
       "max_turns": 30,
       "gate": "on_needs_input"
     },
@@ -131,7 +134,6 @@
       "mcp": "inherit",
       "artifact": "tasks.md",
       "write_scope": null,
-      "max_budget_usd": 40,
       "max_turns": 400,
       "gate": "on_needs_input"
     }
