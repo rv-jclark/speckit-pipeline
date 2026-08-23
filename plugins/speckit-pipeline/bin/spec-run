@@ -532,13 +532,27 @@ run_phase_chunked() { # run_phase_chunked <phase_json>
     after=$(tasks_unchecked "${FEATURE_DIR:-}")
     if [ "${after:-0}" -ge "${before:-0}" ]; then
       FORCE="$saved_force"
-      err "$id — pass $pass ticked nothing ($before → $after unchecked); not looping again"
-      say  "  A pass that made no progress will not make progress on the next one,"
-      say  "  and looping would spend indefinitely. Read the phase's account above"
-      say  "  or ${FEATURE_DIR:-<feature>}/.pipeline/$id.result.json."
+      # A stalled loop is WAITING ON YOU, not broken — exit 2, not 1. The two are
+      # different facts and the roadmap treats them differently: 1 fails the entry
+      # and stops the roadmap, 2 hands it to a human with the work intact.
+      #
+      # Measured on the entry that prompted this: 50 of 51 tasks were done and the
+      # only one left was "follow the browser check in quickstart.md §5", which a
+      # headless phase structurally CANNOT do. Reporting that as a failed entry
+      # describes it wrongly — nothing failed, the remainder simply is not the
+      # phase's to do. The guard still stops the loop, which is its whole point;
+      # it just stops calling this a failure.
+      warn "$id — pass $pass ticked nothing ($before → $after unchecked); stopping the loop"
+      say  "  Looping again would spend without progressing. Either the remaining"
+      say  "  task(s) need a human — a browser check, a judgement call, a decision"
+      say  "  — or the phase is stuck. They are distinguishable only by reading"
+      say  "  them, so read them:"
+      grep -n '^[[:space:]]*-[[:space:]]*\[[[:space:]]\]' "${FEATURE_DIR:-}/tasks.md" 2>/dev/null |
+        head -5 | cut -c1-160 | sed 's/^/    /'
+      say  "  and the phase's own account: ${FEATURE_DIR:-<feature>}/.pipeline/$id.result.json"
       [ -n "$STATE" ] && [ "$DRY_RUN" -eq 0 ] && \
         state_phase_set_totals "$STATE" "$id" "$tot_cost" "$tot_turns" "$pass"
-      return 1
+      return 2
     fi
     [ "$DRY_RUN" -eq 1 ] && { FORCE="$saved_force"; return 0; }
   done

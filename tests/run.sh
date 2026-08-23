@@ -1061,8 +1061,14 @@ chmod +x "$FAKE/claude-ticks-none"
 rm -rf "$CH/specs/001-c/.pipeline"
 out=$(SPEC_RUN_CLAUDE_BIN=claude-ticks-none "$SPEC_RUN" --repo "$CH" \
         --feature-dir "$CH/specs/001-c" --only implement 2>&1); rc=$?
-assert_eq "$rc" "1" "a pass that ticks nothing fails the run"
+# Exit 2, not 1: a stalled loop is "waiting on you", and the roadmap treats those
+# differently — 1 fails the entry and stops the roadmap, 2 hands it over with the
+# work intact. Measured on the entry that prompted this: 50 of 51 tasks done, the
+# remaining one a browser check a headless phase structurally cannot do. Nothing
+# had failed.
+assert_eq "$rc" "2" "a pass that ticks nothing stops the loop as needs-a-human, not failed"
 assert_contains "$out" "ticked nothing" "naming the reason"
+assert_contains "$out" "need a human" "and saying what to look for"
 assert_not_contains "$out" "pass 2/" "and does NOT try a second pass"
 
 # An ABSENT task list is not a finished one — chunking has nothing to measure, so
