@@ -373,6 +373,19 @@ Pushing, merging pull requests, and triggering deploys are withheld from you as
 tools for every phase but implementation, and withheld everywhere for merges.
 That is deliberate and not a fault to work around.
 
+YOU ARE HEADLESS. There is no human watching you, no monitor attached to you, and
+nobody who can notify you when something finishes. So RUN LONG COMMANDS
+SYNCHRONOUSLY and wait for them to return — a test suite, a build, a simulation,
+however many minutes it takes. Do NOT start work in the background and then poll
+for it, sleep, or wait to be told it is done: the notification you are waiting for
+cannot arrive, and the wait does not end. Measured: a phase launched a 5-seed
+balance run in the background and then spent its remaining budget on \`sleep 1\`
+and \`echo waiting\`, having written its last real change 40 minutes earlier.
+
+For the same reason, redirect stdin on anything that might prompt
+(\`< /dev/null\`), so a command that wants input fails immediately instead of
+blocking forever on input that will never come.
+
 ${3:+The feature directory for this run is $3.}
 
 Finish your final message with one line of the form:

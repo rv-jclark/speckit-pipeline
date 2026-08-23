@@ -972,6 +972,22 @@ assert_contains "$deny" "Bash(gh pr merge:*)" "merging is denied to the specify 
 assert_contains "$deny" "Bash(git push:*)" "pushing is denied to the specify phase"
 assert_contains "$argv" "--strict-mcp-config" "specify drops MCP servers it cannot use"
 
+# The handoff contract is a load-bearing prompt, and nothing asserted its content
+# until a phase proved why it matters. A phase launched a 5-seed balance run in the
+# BACKGROUND, then spent its remaining budget on `sleep 1` and `echo waiting`,
+# waiting for a "monitor notification" that cannot arrive in a headless process —
+# its last real edit was 40 minutes earlier. Same trap as delegating to a subagent
+# and waiting; background Bash is the second door into it.
+contract=$(unquote "$argv")
+assert_contains "$contract" "YOU ARE HEADLESS" \
+  "the phase is told it is headless"
+assert_contains "$contract" "SYNCHRONOUSLY" \
+  "and to run long commands synchronously rather than polling for them"
+assert_contains "$contract" "/dev/null" \
+  "and to redirect stdin so a prompting command fails instead of blocking"
+assert_contains "$contract" "Do this phase and stop" \
+  "and not to run the next phase"
+
 argv=$("$SPEC_RUN" --repo "$BS" --feature-dir "$BS/specs/001-t" --only tasks --dry-run 2>&1)
 assert_contains "$argv" "--model sonnet" "tasks is invoked on sonnet"
 
