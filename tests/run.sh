@@ -1481,6 +1481,22 @@ out=$("$SPEC_ROADMAP" run --repo "$RB" --slug good --base main --dry-run 2>&1)
 assert_contains "$out" "would run: spec-run" "--dry-run shows the spec-run it would invoke"
 assert_not_contains "$out" "waiting on you" "and does not pretend to have run anything"
 
+# A description is handed VERBATIM to the specify phase, and `plan --from-doc`
+# tells the planner to write several paragraphs into it: the entry's substance,
+# the document sections that constrain it, and what it must NOT take on because a
+# later entry owns it. The reader was `IFS=$'\037' read -r slug title description`
+# — and `read` reads a LINE, so everything after the first newline was dropped.
+# Measured on a real 7-entry roadmap: descriptions of 3,000–5,000 characters over
+# 13–22 lines each arrived as their first line only, losing every scope boundary.
+# Nothing warned, and --dry-run printed the truncated string looking plausible.
+# The third assertion is the one that matters: a boundary in the LAST paragraph.
+printf '%s\n' '{"goal":"g","base":"main","entries":[{"slug":"ml","title":"t","description":"FIRST LINE.\n\nSECOND PARAGRAPH.\n\nDO NOT take on the other thing."}]}' \
+  > "$RB/.specify/roadmaps/multiline.json"
+out=$("$SPEC_ROADMAP" run --repo "$RB" --slug multiline --base main --dry-run 2>&1)
+assert_contains "$out" "FIRST LINE" "a multi-line description keeps its first line"
+assert_contains "$out" "SECOND PARAGRAPH" "and the paragraph after the first newline"
+assert_contains "$out" "DO NOT take on" "and the scope boundary in its last paragraph"
+
 # the status vocabulary must be exactly what the code writes
 printf '\nroadmap: status vocabulary\n'
 # Two syntaxes write a status: a JSON literal ("status":"done") and jq object

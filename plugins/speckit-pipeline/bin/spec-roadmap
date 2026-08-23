@@ -432,12 +432,29 @@ rc_final=0
 n_entries=$(jq -r '.entries | length' "$RM")
 ei=0
 while [ "$ei" -lt "$n_entries" ]; do
-  # Same collapse hazard as roadmap_spent, and here it is worse: `title` is the
-  # MIDDLE field, so a roadmap entry authored without one shifts the DESCRIPTION
-  # into the title slot and leaves the description empty — i.e. the phase would
-  # be handed no description at all. The roadmap file is documented as "a plain
-  # authored file", so an omitted title is a thing a user can do.
-  IFS=$'\037' read -r slug title description < <(jq -r ".entries[$ei] | [.slug, .title // \"\", .description] | join(\"\\u001f\")" "$RM")
+  # One jq call per field, deliberately, and NOT one `read` over a separated
+  # line. Two hazards, and a single read cannot avoid both:
+  #
+  #   * FIELD COLLAPSE. `title` is the MIDDLE field, so an entry authored without
+  #     one shifts the DESCRIPTION into the title slot and leaves the description
+  #     empty — the phase would be handed no description at all. The roadmap file
+  #     is documented as "a plain authored file", so an omitted title is a thing a
+  #     user can do. A \037 separator fixes this one.
+  #   * TRUNCATION AT THE FIRST NEWLINE. `read` reads a LINE. A description is
+  #     documented as handed VERBATIM to the specify phase, and `plan --from-doc`
+  #     explicitly tells the planner to inline the entry's substance, name the
+  #     document sections that constrain it, and say what it must not take on —
+  #     which is several paragraphs, not one line. Measured on a real 7-entry
+  #     roadmap: descriptions of 3,000–5,000 characters over 13–22 lines each
+  #     arrived at spec-run as their FIRST LINE, losing every scope boundary and
+  #     every "do not take this on, entry N owns it". Nothing warned; --dry-run
+  #     printed the truncated string and looked plausible.
+  #
+  # Command substitution strips only TRAILING newlines, so internal structure
+  # survives. Three parses of a small file is not a cost worth a subtle read.
+  slug=$(jq -r ".entries[$ei].slug" "$RM")
+  title=$(jq -r ".entries[$ei].title // \"\"" "$RM")
+  description=$(jq -r ".entries[$ei].description" "$RM")
   ei=$((ei + 1))
   status=$(roadmap_entry_get "$ST" "$slug" status pending)
   fdir=$(roadmap_entry_get "$ST" "$slug" feature_dir "")
