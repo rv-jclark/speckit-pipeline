@@ -21,6 +21,18 @@ SPEC_STATUS="$PKG/bin/spec-status"
 SPEC_ROADMAP="$PKG/bin/spec-roadmap"
 SPEC_UPGRADE="$PKG/bin/spec-upgrade"
 
+# The suite must not inherit the developer's runner. SPEC_RUN_CLAUDE_BIN is meant
+# to be exported from a shell profile — that is the documented way to use a
+# wrapper for every run — so on a machine that does, every assertion about
+# default-runner behaviour was silently testing the wrapper instead. Caught by
+# the no-TTY warning below: the "default runner does not trip it" case failed on
+# a laptop whose ~/.zshrc exported claude-edits, and would have passed in CI.
+# Individual tests opt back in with --claude-bin.
+unset SPEC_RUN_CLAUDE_BIN
+# Same reasoning for the config override: a stray SPEC_RUN_CONFIG would point
+# every phase-table assertion at a file the suite does not control.
+unset SPEC_RUN_CONFIG
+
 pass=0; fail=0; skipped=0
 
 # Prefixed on purpose. lib/common.sh — which this suite sources in order to test
@@ -627,6 +639,38 @@ out=$("$SPEC_RUN" --repo "$BS" --feature-dir "$BS/specs/001-t" \
 assert_contains "$out" "exited non-zero on --help" "a runner that will not answer --help is reported"
 assert_contains "$out" "result.json" "and the reader is told where its stderr will be kept"
 assert_not_contains "$out" "rejects --" "no per-flag claim is made — that probe was removed, not softened"
+
+# A runner that needs a terminal, in a run that has none. Unlike flag support,
+# this is a fact about the ENVIRONMENT — `[ -t 0 ]` — and the failure it predicts
+# is total: a pexpect wrapper calls child.interact(), tcgetattr fails, and every
+# phase dies at once before writing anything. Measured on a real specify phase,
+# whose entire account was a Python traceback ending in `termios.error: (19,
+# 'Operation not supported by device')` — naming neither this tool, nor the
+# runner, nor SPEC_RUN_CLAUDE_BIN. The suite runs without a TTY, so the condition
+# is live here.
+printf '\nrunner: needs a terminal\n'
+out=$("$SPEC_RUN" --repo "$BS" --feature-dir "$BS/specs/001-t" \
+        --only plan --claude-bin claude-wrapper-fixture --dry-run 2>&1)
+assert_contains "$out" "no controlling terminal" "a non-default runner with no TTY is warned about up front"
+assert_contains "$out" "--claude-bin claude" "and the remedy names the default runner"
+# The warning must NOT fire for the default runner, or it is noise on every
+# ordinary headless run and will be tuned out exactly when it matters.
+out=$("$SPEC_RUN" --repo "$BS" --feature-dir "$BS/specs/001-t" \
+        --only plan --dry-run 2>&1)
+assert_not_contains "$out" "no controlling terminal" "the default runner does not trip it"
+
+# And the same failure recognised after the fact, from the runner's own output —
+# matched on the signature, not the runner's name, so an unknown wrapper is
+# caught too.
+looks_like_tty_failure "termios.error: (19, 'Operation not supported by device')" \
+  && t_pass "a termios failure is recognised as a runner problem" \
+  || t_fail "a termios failure is recognised as a runner problem"
+looks_like_tty_failure "mode = tty.tcgetattr(self.STDIN_FILENO)" \
+  && t_pass "so is a raw tcgetattr traceback line" \
+  || t_fail "so is a raw tcgetattr traceback line"
+looks_like_tty_failure "STATUS: needs_input — which model should own the cache?" \
+  && t_fail "an ordinary phase question is NOT a tty failure" \
+  || t_pass "an ordinary phase question is NOT a tty failure"
 # It was removed because it was vacuously permissive: passing a flag alongside
 # --help short-circuits before option validation, so a flag that cannot exist
 # came back accepted, and a second probe form disagreed with the first about the

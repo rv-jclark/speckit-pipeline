@@ -436,3 +436,36 @@ probe_claude_bin() { # probe_claude_bin <bin>  -> 0 ok, 1 not on PATH, 2 unreada
   "$1" --help >/dev/null 2>&1 || return 2
   return 0
 }
+
+# Whether a NON-DEFAULT runner is being asked to work with no controlling
+# terminal. That combination — and not the runner alone — is what kills a run.
+#
+# This is not the flag probe above in another costume. Flag support cannot be
+# guessed; the presence of a TTY is a fact about the environment, readable with
+# `[ -t 0 ]`, and the failure it predicts is fully deterministic: a pexpect-based
+# wrapper calls child.interact(), which does tcgetattr on stdin, so with no
+# terminal EVERY phase dies at once with the same Python traceback. Measured: a
+# specify phase died before writing anything, and reported
+#   termios.error: (19, 'Operation not supported by device')
+# which names neither spec-run, nor the runner, nor the setting responsible.
+# README documents the hazard in prose; nothing checked it.
+#
+# A warning rather than a refusal, because a wrapper that works headless is
+# perfectly possible and this cannot tell the two apart — only that the
+# combination is the known cause of the traceback that follows.
+runner_needs_tty_risk() { # runner_needs_tty_risk <bin> <default_bin> -> 0 if at risk
+  [ -t 0 ] && return 1                 # a terminal exists; the hazard cannot bite
+  [ "$1" = "$2" ] && return 1          # the plain CLI does not need one
+  return 0
+}
+
+# Does this text carry the signature of a runner that demanded a terminal?
+# Matched on the failure rather than on the runner's name, so it also catches a
+# wrapper nobody here has heard of.
+looks_like_tty_failure() { # looks_like_tty_failure <text>
+  case "$1" in
+    *termios.error*|*tcgetattr*|*"Operation not supported by device"*|\
+    *pexpect*|*"child.interact"*) return 0;;
+    *) return 1;;
+  esac
+}

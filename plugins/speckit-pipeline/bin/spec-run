@@ -176,6 +176,17 @@ case "$probe_rc" in
      warn "  .pipeline/<phase>.result.json";;
 esac
 
+# Said BEFORE the first phase is billed, because if it applies, every phase dies
+# identically and immediately — and says so in a traceback that names neither this
+# tool nor the setting responsible.
+_default_bin=$(jqd "$CONFIG" '.defaults.claude_bin' claude)
+if runner_needs_tty_risk "$CLAUDE_BIN" "$_default_bin"; then
+  warn "no controlling terminal, and the runner is '$CLAUDE_BIN' rather than '$_default_bin'"
+  say  "  A wrapper that drives Claude through pexpect calls child.interact(),"
+  say  "  which needs a terminal. With none, every phase dies at once."
+  say  "  If that happens: --claude-bin $_default_bin  (or unset SPEC_RUN_CLAUDE_BIN)"
+fi
+
 # Optional phases only run when asked for; --only replaces the selection entirely.
 _in_list() { case ",$1," in *",$2,"*) return 0;; *) return 1;; esac; }
 
@@ -657,6 +668,19 @@ run_phase() { # run_phase <phase_json>
   if [ "$status" = failed ] || [ "$status" = needs_input ]; then
     printf '\n'
     [ -n "$result" ] && { dim "  the phase's own account:"; printf '  %s\n\n' "$result"; }
+    # Name the cause when the account is a terminal complaint rather than
+    # anything about the work. Without this the reader gets a Python traceback
+    # ending in `termios.error: (19, ...)` and no indication that the runner, and
+    # not the phase, is what failed — nor that one flag fixes it. Diagnosis
+    # belongs next to the evidence; the reader is looking here already.
+    if looks_like_tty_failure "$result"; then
+      warn "that is the RUNNER demanding a terminal, not the phase failing at its work"
+      say  "  '$CLAUDE_BIN' drives Claude through pexpect, which needs a TTY. This run"
+      say  "  has none, so no phase can start and nothing was written."
+      say  "  Re-run with: --claude-bin $(jqd "$CONFIG" '.defaults.claude_bin' claude)"
+      say  "  (or unset SPEC_RUN_CLAUDE_BIN for non-interactive runs)"
+      printf '\n'
+    fi
     say "  pick this phase up in conversation:"
     say "    claude --resume $sid"
     say "  then continue the pipeline:"
