@@ -5,9 +5,9 @@ Run the [spec-kit](https://github.com/github/spec-kit) phases as **separate
 ceiling per phase — instead of one long conversation that does all four.
 
 ```
-specify  →  [clarify]  →  plan  →  tasks  →  [analyze]  →  implement
- opus         opus         opus    sonnet      opus         sonnet
- high         high         high    medium      high         medium
+specify  →  [clarify]  →  plan  →  tasks  →  [analyze]  →  [converge]  →  implement
+ opus         opus         opus    sonnet      opus          opus          sonnet
+ high         high         high    medium      high          high          medium
 ```
 Bracketed phases are opt-in (`--with clarify`). Every value there is data, not
 code — see [Phases](#phases).
@@ -579,6 +579,7 @@ done its part and the next move is a human's.
 | plan | opus | high | — / 80 turns | kept | |
 | tasks | sonnet | medium | — / 60 turns | dropped | |
 | analyze | opus | high | — / 30 turns | dropped | `--with analyze` |
+| converge | opus | high | — / 80 turns | kept | `--with converge` |
 | implement | sonnet | medium | — / 400 turns | kept | |
 
 **No phase ships a dollar ceiling**, and the `—` is deliberate. A ceiling that
@@ -588,6 +589,24 @@ downstream. `--max-turns` is the backstop — it bounds a runaway loop, which is
 failure a ceiling should actually catch, and unlike spend it means the same thing
 on subscription auth as on API auth. Add `max_budget_usd` back per phase (in your
 own `--config` / `SPEC_RUN_CONFIG` copy, or here) if you want one.
+
+**`converge` is the recovery phase, and it is why a dead implement is not a lost
+entry.** It reads `spec.md`, `plan.md` and `tasks.md`, assesses what the codebase
+actually implements against them, and **appends** a `## Phase N: Convergence`
+section listing only the work still missing — append-only, never a rewrite, and it
+may not write code. Reach for it when an implement phase was killed, ran out of
+turns, or stopped short:
+
+```bash
+spec-run --resume --with converge     # assess what landed, append the gap, finish it
+```
+
+It sits before `implement` in the order so that is one command rather than two.
+The case it was built for looks like this, measured: a 40-minute implement phase
+killed mid-flight left 34 modified files that type-checked apart from three
+unpopulated producers — and **0 of 57 tasks ticked**, so nothing in `tasks.md`
+pointed at the gap. Re-running implement over that state means re-deriving what is
+already done from the code; converge writes it down first.
 
 **`plan` keeps its MCP servers.** It is the phase that decides which frameworks,
 ORMs and APIs the implementation will use, and a project whose conventions live

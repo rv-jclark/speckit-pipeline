@@ -159,8 +159,8 @@ assert_eq "$missing" "" "every phase declares id, skill, model, effort, gate, ar
 # is a phase nobody decided the model for. A completeness check with no
 # exhaustiveness assertion is decoration.
 ids=$(jq -r '[.phases[].id] | join(",")' "$CONFIG")
-assert_eq "$ids" "specify,clarify,plan,tasks,analyze,implement" \
-  "the phase list is exactly the six phases this suite covers"
+assert_eq "$ids" "specify,clarify,plan,tasks,analyze,converge,implement" \
+  "the phase list is exactly the seven phases this suite covers"
 
 assert_eq "$(jq -r '.phases[]|select(.id=="specify").model' "$CONFIG")" "opus" "specify runs on opus"
 assert_eq "$(jq -r '.phases[]|select(.id=="plan").model' "$CONFIG")" "opus" "plan runs on opus"
@@ -351,8 +351,8 @@ assert_eq "$diag_models_list" "$cfg_models" "the README diagram names the same m
 diag_efforts=$(grep -A3 '^specify  →' "$README" | sed -n '3p' | tr -s ' ' ' ' | sed 's/^ //;s/ $//')
 cfg_efforts=$(jq -r '[.phases[].effort] | join(" ")' "$CONFIG")
 assert_eq "$diag_efforts" "$cfg_efforts" "and the same effort levels, in order"
-[ "$diag_models" -eq 6 ] && t_pass "the diagram covers all six phases" \
-  || t_fail "the diagram covers all six phases" "found $diag_models model labels"
+[ "$diag_models" -eq 7 ] && t_pass "the diagram covers all seven phases" \
+  || t_fail "the diagram covers all seven phases" "found $diag_models model labels"
 # Position matters, not just membership: the diagram is the first thing a reader
 # sees, and a correct set in the wrong order is the more misleading failure.
 
@@ -837,7 +837,7 @@ printf '\nrequired skills are derived, not assumed\n'
 # a 0.11.3-shaped project: phase skills, no git-* skills, no hooks needing them
 V11="$WORK/v11"; mkbare "$V11" main
 mkdir -p "$V11/.specify/scripts/bash" "$V11/.specify/templates" "$V11/specs"
-for sk in specify plan tasks implement analyze clarify; do mkdir -p "$V11/.claude/skills/speckit-$sk"; done
+for sk in specify plan tasks implement analyze clarify converge; do mkdir -p "$V11/.claude/skills/speckit-$sk"; done
 printf 'installed:\n- agent-context\nhooks:\n  after_specify:\n  - extension: agent-context\n    command: speckit.agent-context.update\n' \
   > "$V11/.specify/extensions.yml"
 mkdir -p "$V11/.claude/skills/speckit-agent-context-update"
