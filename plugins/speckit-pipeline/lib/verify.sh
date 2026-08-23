@@ -52,8 +52,9 @@ _task_counts() { # prints "<unchecked> <total>"
   echo "${unchecked:-0} ${total:-0}"
 }
 
-verify_phase() { # verify_phase <phase_id> <feature_dir> <artifact_rel|"">
-  local phase="$1" fdir="$2" rel="$3" path="" markers bytes counts unchecked total
+verify_phase() { # verify_phase <phase_id> <feature_dir> <artifact_rel|""> [chunked]
+  local phase="$1" fdir="$2" rel="$3" chunked="${4:-false}"
+  local path="" markers bytes counts unchecked total
 
   if [ -z "$rel" ] || [ "$rel" = "null" ]; then
     printf 'unevaluated\tphase declares no artifact; nothing was checked\n'
@@ -100,6 +101,18 @@ verify_phase() { # verify_phase <phase_id> <feature_dir> <artifact_rel|"">
         return 0
       fi
       if [ "$unchecked" -gt 0 ]; then
+        # A CHUNKED pass is supposed to leave work behind — it does one group and
+        # stops, and the loop in spec-run decides when the list is clear. Gating
+        # here would end that loop on its first pass, which is exactly what
+        # happened before this branch existed: pass 1 ticked a task, verification
+        # called the leftovers `needs_input`, and the run stopped at a gate having
+        # done a third of the work. Progress is the loop's business; this only
+        # reports what remains.
+        if [ "$chunked" = true ]; then
+          printf 'ok\tpass done — %s of %s task(s) left for the next pass\n' \
+            "$unchecked" "$total"
+          return 0
+        fi
         printf 'needs_input\t%s of %s task(s) still unchecked in %s\n' \
           "$unchecked" "$total" "$rel"
         return 0

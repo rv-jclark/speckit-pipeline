@@ -387,7 +387,7 @@ For the same reason, redirect stdin on anything that might prompt
 blocking forever on input that will never come.
 
 ${3:+The feature directory for this run is $3.}
-$(handoff_extra "$1")
+$(handoff_extra "$1" "${4:-}")
 Finish your final message with one line of the form:
 STATUS: ok | needs_input | failed — <one sentence>
 and, if needs_input, the specific questions a human must answer.
@@ -396,8 +396,25 @@ EOF
 
 # Phase-specific additions. Kept here rather than in the vendored skill so an
 # upgrade cannot silently drop them.
-handoff_extra() {
+handoff_extra() { # handoff_extra <phase_id> <chunked>
   [ "$1" = implement ] || return 0
+  if [ "${2:-}" = true ]; then
+    cat <<'EOF'
+
+YOU ARE ONE PASS OF A CHUNKED PHASE. Complete AT MOST ONE `## Phase` group of
+tasks from tasks.md — the next group with unchecked boxes — and then stop and
+report. Another process picks up the following group, reading the tasks.md you
+leave behind. Do not attempt the whole list.
+
+Stop at a `## Phase` boundary rather than after some count of tasks: the groups
+are semantic, so tasks inside one are coupled and tasks across them are not.
+Splitting mid-group would hand the next pass a spec whose implementation is
+half-written, with no record of why the first half looks as it does.
+
+If the next group is very large, doing part of it is acceptable — but tick
+exactly what you finished, and leave nothing half-applied.
+EOF
+  fi
   cat <<'EOF'
 
 TICK EACH TASK IN tasks.md THE MOMENT YOU FINISH IT, before starting the next one.
@@ -415,6 +432,102 @@ read 16/76, so a human reviewing it could not tell the work was nearly finished.
 Ticking as you go also means an interruption costs only the task in flight, and it
 lets your own work be resumed in a fresh process rather than restarted.
 EOF
+}
+
+# How many tasks are still unchecked. This is the ONLY authority on whether a
+# chunked phase is finished — not the recorded status, which describes one pass.
+tasks_unchecked() { # tasks_unchecked <feature_dir>
+  local f="${1:-}/tasks.md" c
+  [ -f "$f" ] || { printf '0\n'; return 0; }
+  # `grep -c` PRINTS 0 and EXITS 1 when nothing matches, so a `|| printf 0`
+  # fallback emits "0\n0" — which then fails every numeric test that reads it.
+  c=$(grep -c '^[[:space:]]*-[[:space:]]*\[[[:space:]]\]' "$f" 2>/dev/null) || c=0
+  printf '%s\n' "${c:-0}"
+}
+
+# Run a phase repeatedly, each pass a FRESH process, until its task list is clear.
+#
+# Why: cost is ~linear in cache_read, which is ~98% of a phase's input and grows
+# with turn count, so a phase of T turns costs roughly 90k*T + 0.7k*T^2 tokens.
+# Splitting it into k passes leaves the linear term alone and divides the
+# quadratic one by k. Measured on one entry: an implement phase estimated at ~600
+# turns costs ~306M tokens in one pass and ~96M in six — about 3x.
+#
+# Two things make it safe rather than merely cheaper:
+#
+#   * COMPLETION IS THE ARTIFACT, NOT THE STATUS. run_phase skips anything already
+#     recorded `ok`, which would end the loop after one pass. For a chunked phase
+#     that check is simply wrong: unchecked boxes mean unfinished work whatever
+#     state says. So FORCE is raised for the duration and restored after.
+#   * A PASS THAT TICKS NOTHING ENDS THE LOOP. Without that, a phase that cannot
+#     make progress becomes an unbounded spend loop — a worse failure than the
+#     truncation this replaces, because it is silent and costs money per turn.
+run_phase_chunked() { # run_phase_chunked <phase_json>
+  local pj="$1" id max_passes pass=0 before after rc
+  local tot_cost=0 tot_turns=0 c n saved_force="$FORCE"
+  id=$(jq -r '.id' <<<"$pj")
+  max_passes=$(jq -r '.max_passes // 12' <<<"$pj")
+
+  # An ABSENT task list is not a finished one. Chunking needs an artifact to
+  # measure progress against; with none there is nothing to loop on, and treating
+  # that as "no work to do" would skip the phase entirely — a silent no-op
+  # indistinguishable from success. Run once, normally, and say why.
+  if [ ! -f "${FEATURE_DIR:-}/tasks.md" ]; then
+    warn "$id — no tasks.md to chunk on; running once as a single pass"
+    run_phase "$pj"; return $?
+  fi
+
+  FORCE=1
+  while :; do
+    before=$(tasks_unchecked "${FEATURE_DIR:-}")
+    if [ "${before:-0}" -eq 0 ]; then
+      FORCE="$saved_force"
+      if [ "$pass" -eq 0 ]; then
+        dim "  · $id — no unchecked tasks; nothing to do"
+      else
+        ok "$id — task list clear after $pass pass(es)"
+        [ -n "$STATE" ] && [ "$DRY_RUN" -eq 0 ] && \
+          state_phase_set_totals "$STATE" "$id" "$tot_cost" "$tot_turns" "$pass"
+      fi
+      return 0
+    fi
+
+    pass=$((pass + 1))
+    if [ "$pass" -gt "$max_passes" ]; then
+      FORCE="$saved_force"
+      err "$id — $max_passes passes used with $before task(s) still unchecked"
+      say  "  Raise max_passes only if each pass was making real progress; if it"
+      say  "  was not, the task list is asking for something it cannot finish."
+      return 1
+    fi
+
+    # Deliberately NOT info(): its `→` marker means "a phase is starting", and a
+    # pass is not a phase. Emitting it here made implement announce itself twice
+    # and broke the count that proves no phase was silently skipped.
+    say "  pass $pass/$max_passes — $before task(s) unchecked"
+    run_phase "$pj"; rc=$?
+    if [ "$rc" -ne 0 ]; then FORCE="$saved_force"; return "$rc"; fi
+
+    if [ -n "$STATE" ] && [ "$DRY_RUN" -eq 0 ]; then
+      c=$(state_phase_get "$STATE" "$id" cost_usd 0)
+      n=$(state_phase_get "$STATE" "$id" num_turns 0)
+      tot_cost=$(awk -v a="$tot_cost" -v b="$c" 'BEGIN{printf "%.10g", a + b}')
+      tot_turns=$((tot_turns + ${n:-0}))
+    fi
+
+    after=$(tasks_unchecked "${FEATURE_DIR:-}")
+    if [ "${after:-0}" -ge "${before:-0}" ]; then
+      FORCE="$saved_force"
+      err "$id — pass $pass ticked nothing ($before → $after unchecked); not looping again"
+      say  "  A pass that made no progress will not make progress on the next one,"
+      say  "  and looping would spend indefinitely. Read the phase's account above"
+      say  "  or ${FEATURE_DIR:-<feature>}/.pipeline/$id.result.json."
+      [ -n "$STATE" ] && [ "$DRY_RUN" -eq 0 ] && \
+        state_phase_set_totals "$STATE" "$id" "$tot_cost" "$tot_turns" "$pass"
+      return 1
+    fi
+    [ "$DRY_RUN" -eq 1 ] && { FORCE="$saved_force"; return 0; }
+  done
 }
 
 run_phase() { # run_phase <phase_json>
@@ -496,7 +609,7 @@ run_phase() { # run_phase <phase_json>
     --output-format "$out_format"
     --permission-mode "$(jqd "$CONFIG" '.defaults.permission_mode' acceptEdits)"
     --session-id "$sid"
-    --append-system-prompt "$(handoff_contract "$id" "$skill_ref" "${FEATURE_DIR:-}")"
+    --append-system-prompt "$(handoff_contract "$id" "$skill_ref" "${FEATURE_DIR:-}" "$(jq -r '.chunked // false' <<<"$pj")")"
   )
   [ "$STREAM" -eq 1 ] && argv+=(--verbose)
   [ -n "$maxt" ] && argv+=(--max-turns "$maxt")
@@ -628,7 +741,8 @@ run_phase() { # run_phase <phase_json>
   # The artifact decides. But a process that died before writing anything should
   # say so in its own words, so keep the output when things go wrong.
   local status note
-  IFS=$'\t' read -r status note < <(verify_phase "$id" "${FEATURE_DIR:-/nonexistent}" "$artifact")
+  IFS=$'\t' read -r status note < <(verify_phase "$id" "${FEATURE_DIR:-/nonexistent}" "$artifact" \
+                                      "$(jq -r '.chunked // false' <<<"$pj")")
 
   # No parseable result AND a non-zero exit: the phase did not COMPLETE, and what
   # its artifact looks like is beside the point. With --output-format json a normal
@@ -821,7 +935,11 @@ while [ "$i" -lt "$n_phases" ]; do
   phase_selected "$id" "$optional" || { dim "  · $id — not selected"; continue; }
 
   phases_run=$((phases_run + 1))
-  run_phase "$pj"; rc=$?
+  if [ "$(jq -r '.chunked // false' <<<"$pj")" = true ] && [ -n "${FEATURE_DIR:-}" ]; then
+    run_phase_chunked "$pj"; rc=$?
+  else
+    run_phase "$pj"; rc=$?
+  fi
   if [ "$rc" -ne 0 ]; then rc_final=$rc; break; fi
 done
 

@@ -350,6 +350,22 @@ extract_json() { # extract_json <text>
 
 state_total_cost() { jq '[.phases[].cost_usd // 0] | add // 0' "$1"; }
 
+# Overwrite a phase's cost/turns with a total, and record how many passes made it.
+# A chunked phase runs as SEVERAL processes, and state_phase_finish is called by
+# each one — so without this the recorded figure is the last pass alone and the
+# run looks far cheaper than it was. cost.log keeps every pass individually; this
+# is the roll-up the summary and any --budget check read.
+state_phase_set_totals() { # <state_file> <phase> <cost> <turns> <passes>
+  local f="$1" tmp
+  tmp=$(mktmp)
+  jq --arg p "$2" --arg c "$3" --arg n "$4" --arg k "$5" \
+    '.phases[$p] += {
+        cost_usd:(if $c == "" then null else ($c|tonumber? // null) end),
+        num_turns:(if $n == "" then null else ($n|tonumber? // null) end),
+        passes:($k|tonumber? // null)
+     }' "$f" > "$tmp" && mv "$tmp" "$f"
+}
+
 # ----------------------------------------------- spec-kit's own write targets --
 # The plan phase legitimately writes the AGENT CONTEXT file at the repo root —
 # spec-kit's `update-agent-context.sh` maintains it, complete with the

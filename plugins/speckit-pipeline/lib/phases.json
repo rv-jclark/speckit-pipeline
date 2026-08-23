@@ -44,6 +44,17 @@
     "                 Enforced AFTER the phase by comparing git status, because a",
     "                 detected escape is verifiable where a path-scoped tool deny is not.",
     "  takes_description  true = the feature description is passed as the skill argument",
+    "  chunked        true = run this phase REPEATEDLY, a fresh process each pass,",
+    "                 until tasks.md has no unchecked boxes. Only implement sets it.",
+    "                 Cost is ~linear in cache_read, which is ~98% of a phase's",
+    "                 input and grows with turn count, so a phase of T turns costs",
+    "                 roughly 90k*T + 0.7k*T^2 tokens. Splitting into k passes",
+    "                 leaves the linear term and divides the quadratic one by k —",
+    "                 measured ~3x on a ~600-turn implement. Requires that the",
+    "                 phase tick tasks AS IT GOES (see handoff_extra), because a",
+    "                 pass resumes from tasks.md and nothing else.",
+    "  max_passes     ceiling on chunked passes. A pass that ticks NOTHING already",
+    "                 ends the loop, so this only bounds slow-but-real progress.",
     "",
     "`converge` sits BEFORE implement, which is not where its own skill doc puts it",
     "(that says after). The position is chosen for the case it actually gets used in:",
@@ -173,6 +184,8 @@
       "artifact": "tasks.md",
       "write_scope": null,
       "max_turns": 1200,
+      "chunked": true,
+      "max_passes": 12,
       "gate": "on_needs_input"
     }
   ]

@@ -1002,6 +1002,76 @@ assert_contains "$contract_impl" "HANDOFF" \
   "and told why: tasks.md is the handoff, not a closing report"
 assert_contains "$contract_impl" "YOU ARE HEADLESS" \
   "and still gets the shared contract"
+assert_contains "$contract_impl" "ONE PASS OF A CHUNKED PHASE" \
+  "and, being chunked, is told to do one ## Phase group and stop"
+
+# ------------------------------------------------------ chunked implement ------
+# Cost is ~linear in cache_read, which grows with turn count, so one long phase
+# costs ~90k*T + 0.7k*T^2 tokens and k shorter passes divide the quadratic term by
+# k. The loop only pays off if it also cannot run away, so both guards matter more
+# than the saving.
+printf '\nimplement: chunked passes\n'
+CH="$WORK/chunked"; mkbare "$CH" main
+"$SPEC_BOOTSTRAP" "$CH" >/dev/null 2>&1
+git -C "$CH" add -A >/dev/null 2>&1; git -C "$CH" commit -qm bootstrap
+mkdir -p "$CH/specs/001-c"
+# Generous: the artifact check enforces a 400-byte minimum, and a fixture that
+# trips it fails the phase for reasons that have nothing to do with chunking.
+pad_c() { for i in $(seq 1 60); do printf 'padding line %s with enough text to clear the size floor\n' "$i"; done; }
+{ printf '# Spec\n'; pad_c; } > "$CH/specs/001-c/spec.md"
+{ printf '# Plan\n'; pad_c; } > "$CH/specs/001-c/plan.md"
+
+# A runner that ticks exactly ONE box per pass: three passes to clear three tasks.
+cat > "$FAKE/claude-ticks-one" <<'FAKEEOF'
+#!/usr/bin/env bash
+for a in "$@"; do [ "$a" = "--help" ] && exit 0; done
+root=$(pwd); f="$root/specs/001-c/tasks.md"
+# tick the first unchecked box, if any
+if grep -q '^- \[ \]' "$f" 2>/dev/null; then
+  awk 'BEGIN{done=0} /^- \[ \]/ && !done {sub(/\[ \]/,"[x]"); done=1} {print}' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+fi
+echo '{"total_cost_usd":0.02,"num_turns":3,"duration_ms":5,"result":"STATUS: ok"}'
+FAKEEOF
+chmod +x "$FAKE/claude-ticks-one"
+
+{ printf '# Tasks\n'; pad_c; printf -- '- [ ] T001 a\n- [ ] T002 b\n- [ ] T003 c\n'; } > "$CH/specs/001-c/tasks.md"
+out=$(SPEC_RUN_CLAUDE_BIN=claude-ticks-one "$SPEC_RUN" --repo "$CH" \
+        --feature-dir "$CH/specs/001-c" --only implement 2>&1); rc=$?
+assert_eq "$rc" "0" "a chunked implement clears a multi-task list"
+assert_eq "$(grep -c '^- \[ \]' "$CH/specs/001-c/tasks.md")" "0" "every box is ticked"
+assert_contains "$out" "pass 3/" "and it took a pass per task"
+assert_contains "$out" "task list clear after 3 pass" "reporting how many passes it took"
+# The roll-up matters: state_phase_finish runs per PASS, so without accumulation
+# the recorded cost is the last pass alone and the run looks 3x cheaper than it was.
+assert_eq "$(jq -r '.phases.implement.cost_usd' "$CH/specs/001-c/.pipeline/state.json")" "0.06" \
+  "cost is the sum of all passes, not the last one"
+assert_eq "$(jq -r '.phases.implement.passes' "$CH/specs/001-c/.pipeline/state.json")" "3" \
+  "and the pass count is recorded"
+
+# 🛑 The guard that keeps this from being worse than truncation: a pass that ticks
+# nothing must END the loop. Otherwise a phase that cannot progress spends
+# indefinitely, silently, at cost per turn.
+cat > "$FAKE/claude-ticks-none" <<'FAKEEOF'
+#!/usr/bin/env bash
+for a in "$@"; do [ "$a" = "--help" ] && exit 0; done
+echo '{"total_cost_usd":0.02,"num_turns":3,"duration_ms":5,"result":"STATUS: ok"}'
+FAKEEOF
+chmod +x "$FAKE/claude-ticks-none"
+{ printf '# Tasks\n'; pad_c; printf -- '- [ ] T001 a\n- [ ] T002 b\n'; } > "$CH/specs/001-c/tasks.md"
+rm -rf "$CH/specs/001-c/.pipeline"
+out=$(SPEC_RUN_CLAUDE_BIN=claude-ticks-none "$SPEC_RUN" --repo "$CH" \
+        --feature-dir "$CH/specs/001-c" --only implement 2>&1); rc=$?
+assert_eq "$rc" "1" "a pass that ticks nothing fails the run"
+assert_contains "$out" "ticked nothing" "naming the reason"
+assert_not_contains "$out" "pass 2/" "and does NOT try a second pass"
+
+# An ABSENT task list is not a finished one — chunking has nothing to measure, so
+# it must run once rather than skip, which would be a silent no-op.
+rm -f "$CH/specs/001-c/tasks.md"; rm -rf "$CH/specs/001-c/.pipeline"
+out=$(SPEC_RUN_CLAUDE_BIN=claude-ticks-none "$SPEC_RUN" --repo "$CH" \
+        --feature-dir "$CH/specs/001-c" --only implement 2>&1); rc=$?
+assert_contains "$out" "no tasks.md to chunk on" "an absent task list is reported, not treated as done"
+assert_contains "$out" "→ implement" "and the phase still runs once"
 
 argv=$("$SPEC_RUN" --repo "$BS" --feature-dir "$BS/specs/001-t" --only tasks --dry-run 2>&1)
 assert_contains "$argv" "--model sonnet" "tasks is invoked on sonnet"

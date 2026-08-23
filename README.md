@@ -582,6 +582,34 @@ done its part and the next move is a human's.
 | converge | opus | high | — / 80 turns | kept | `--with converge` |
 | implement | sonnet | medium | — / 1200 turns | kept | |
 
+**`implement` runs in CHUNKS** — one `## Phase` group of `tasks.md` per pass, each
+pass a fresh process, looping until no unchecked boxes remain. This is the biggest
+lever on token spend here, and the reason is arithmetic: cost is ~linear in
+`cache_read`, which is ~98% of a phase's input and grows with turn count, so a
+phase of T turns costs roughly `90k·T + 0.7k·T²` tokens. Splitting into k passes
+leaves the linear term alone and divides the quadratic one by k. Measured on one
+entry: an implement phase estimated at ~600 turns costs ~306M tokens in one pass
+and ~96M in six.
+
+Two guards matter more than the saving:
+
+- **A pass that ticks nothing ends the loop.** Otherwise a phase that cannot make
+  progress becomes an unbounded spend loop — worse than the truncation it
+  replaces, because it is silent and bills per turn. `max_passes` (12) only bounds
+  slow-but-real progress.
+- **An absent `tasks.md` runs once; it does not skip.** Chunking needs an artifact
+  to measure against, and treating "no task list" as "no work to do" would
+  silently skip implementation altogether.
+
+It depends on implement ticking tasks **as it goes**: a pass resumes from
+`tasks.md` and nothing else, so a batched update makes each pass rediscover the
+last one's work. Two existing rules had to bend to allow the loop — `run_phase`'s
+"already ok, skipping" is bypassed for a chunked phase (unchecked boxes mean
+unfinished work whatever the status says), and artifact verification no longer
+treats leftover tasks as a gate, because a chunked pass is *supposed* to leave
+some. Before that second change, pass 1 ticked a task, verification called the
+remainder `needs_input`, and the run stopped at a gate a third of the way through.
+
 **No phase ships a dollar ceiling**, and the `—` is deliberate. A ceiling that
 halts a phase mid-artifact costs more than it saves: a truncated `plan.md` still
 verifies as present, so the tasks phase plans against it and the damage compounds
@@ -923,7 +951,7 @@ reports success over a directory the rest of the pipeline cannot find.
 ## Tests
 
 ```bash
-./tests/run.sh          # shellcheck + 395 fixture assertions
+./tests/run.sh          # shellcheck + 407 fixture assertions
 ```
 
 **The suite is hermetic.** A stub runner shadows the real `claude` for the whole
@@ -1017,7 +1045,7 @@ not be measured are recorded `unmeasured`, never as `$0`.
 ## Tests, and what they cost to run
 
 ```bash
-./tests/run.sh          # shellcheck + 395 assertions, ~2 minutes
+./tests/run.sh          # shellcheck + 407 assertions, ~2 minutes
 ```
 
 Hermetic: a stub runner shadows the real `claude` for the whole run, so nothing
