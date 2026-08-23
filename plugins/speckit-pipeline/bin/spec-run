@@ -387,10 +387,33 @@ For the same reason, redirect stdin on anything that might prompt
 blocking forever on input that will never come.
 
 ${3:+The feature directory for this run is $3.}
-
+$(handoff_extra "$1")
 Finish your final message with one line of the form:
 STATUS: ok | needs_input | failed — <one sentence>
 and, if needs_input, the specific questions a human must answer.
+EOF
+}
+
+# Phase-specific additions. Kept here rather than in the vendored skill so an
+# upgrade cannot silently drop them.
+handoff_extra() {
+  [ "$1" = implement ] || return 0
+  cat <<'EOF'
+
+TICK EACH TASK IN tasks.md THE MOMENT YOU FINISH IT, before starting the next one.
+Do not batch the updates and do not leave them to the end. tasks.md is not a
+report you file on the way out — it is the HANDOFF, the one record of what landed,
+and everything you have not ticked is invisible to whatever runs next.
+
+What batching costs, measured: a phase was interrupted having modified 34 files
+with 0 of 57 tasks ticked, so nothing on disk said which of them were done. The
+recovery was a separate `converge` phase — 61 turns and $8.06 — spent entirely on
+re-deriving from the source code what an accurate tasks.md would simply have
+stated. A later run of the same feature reached ~90% complete while the file still
+read 16/76, so a human reviewing it could not tell the work was nearly finished.
+
+Ticking as you go also means an interruption costs only the task in flight, and it
+lets your own work be resumed in a fresh process rather than restarted.
 EOF
 }
 

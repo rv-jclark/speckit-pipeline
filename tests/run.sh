@@ -987,6 +987,21 @@ assert_contains "$contract" "/dev/null" \
   "and to redirect stdin so a prompting command fails instead of blocking"
 assert_contains "$contract" "Do this phase and stop" \
   "and not to run the next phase"
+# Phase-specific additions must reach the phase they are for, and NOT the others.
+assert_not_contains "$contract" "TICK EACH TASK" \
+  "specify is not told to tick tasks — it has none"
+
+# implement is, because a batched tasks.md is a lost handoff: one interrupted phase
+# had modified 34 files with 0 of 57 ticked, costing a $8.06 converge pass to
+# re-derive from source what the file should have stated.
+argv_impl=$("$SPEC_RUN" --repo "$BS" --feature-dir "$BS/specs/001-t" --only implement --dry-run 2>&1)
+contract_impl=$(unquote "$argv_impl")
+assert_contains "$contract_impl" "TICK EACH TASK" \
+  "implement is told to tick each task as it finishes"
+assert_contains "$contract_impl" "HANDOFF" \
+  "and told why: tasks.md is the handoff, not a closing report"
+assert_contains "$contract_impl" "YOU ARE HEADLESS" \
+  "and still gets the shared contract"
 
 argv=$("$SPEC_RUN" --repo "$BS" --feature-dir "$BS/specs/001-t" --only tasks --dry-run 2>&1)
 assert_contains "$argv" "--model sonnet" "tasks is invoked on sonnet"
