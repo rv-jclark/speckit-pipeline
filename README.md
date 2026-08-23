@@ -580,7 +580,7 @@ done its part and the next move is a human's.
 | tasks | sonnet | medium | — / 60 turns | dropped | |
 | analyze | opus | high | — / 30 turns | dropped | `--with analyze` |
 | converge | opus | high | — / 80 turns | kept | `--with converge` |
-| implement | sonnet | medium | — / 400 turns | kept | |
+| implement | sonnet | medium | — / 1200 turns | kept | |
 
 **No phase ships a dollar ceiling**, and the `—` is deliberate. A ceiling that
 halts a phase mid-artifact costs more than it saves: a truncated `plan.md` still

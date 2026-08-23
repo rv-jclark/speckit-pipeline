@@ -22,6 +22,16 @@
     "  max_turns      hard ceiling passed to --max-turns. The real safety rail: it",
     "                 bounds a runaway loop, which is the failure a ceiling should",
     "                 catch, and it does not depend on how spend is metered.",
+    "                 SIZE IT FOR THE REPO, not for comfort. implement was 400 and",
+    "                 that was measured to be too small on a large monorepo: a phase",
+    "                 spent 293 turns in 23 minutes of productive, non-looping work",
+    "                 (spec-first edits, targeted single-file spec runs, type-checks",
+    "                 between steps) and was a third of the way through its task",
+    "                 list. A cap hit by honest work is not a safety rail, it is a",
+    "                 truncation — and it lands mid-task, which is the expensive",
+    "                 place to stop. 1200 is ~3x that observed need. If a phase ever",
+    "                 reaches it, suspect a loop and read the transcript rather than",
+    "                 raising it again.",
     "  gate           always | on_needs_input | never",
     "  optional       true = only runs when named in --with",
     "  deny_tools     added to defaults.deny_tools for this phase",
@@ -157,7 +167,7 @@
       "mcp": "inherit",
       "artifact": "tasks.md",
       "write_scope": null,
-      "max_turns": 400,
+      "max_turns": 1200,
       "gate": "on_needs_input"
     }
   ]
