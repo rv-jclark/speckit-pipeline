@@ -36,6 +36,29 @@ new_uuid() {
 
 now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
+# Kill every descendant of a pid, depth-first.
+#
+# A phase runs inside a command substitution, so its pid is never ours to hold —
+# and signalling the runner therefore leaves the `claude -p` child ORPHANED AND
+# STILL RUNNING, with every tool it had. Measured, and it is worse than it sounds:
+# an implement phase whose parent was killed carried on for ~2 HOURS, ticked its
+# remaining tasks, and COMMITTED to the repository — while a human was separately
+# verifying and merging that same work. Nothing in the run reported it; the commit
+# simply appeared on the branch afterwards, authored by the repo's git identity
+# and indistinguishable from a person's.
+#
+# Depth-first so a grandchild dies before the parent that would otherwise be
+# reaped and lose the link to it.
+kill_descendants() { # kill_descendants <pid>
+  local parent="$1" child
+  [ -n "$parent" ] || return 0
+  for child in $(ps -eo pid=,ppid= 2>/dev/null | awk -v p="$parent" '$2==p {print $1}'); do
+    kill_descendants "$child"
+    kill -TERM "$child" 2>/dev/null || true
+  done
+  return 0
+}
+
 # A temp file, always rooted in TMPDIR. Never call `mktemp` with no template.
 #
 # macOS mktemp with no template ignores TMPDIR entirely and writes to the Darwin

@@ -28,6 +28,20 @@ export SPECKIT_PIPELINE_ROOT
 # shellcheck source=../lib/verify.sh
 . "$SPECKIT_PIPELINE_ROOT/lib/verify.sh"
 
+# Take the phase down with us. Without this, signalling the runner leaves the
+# `claude -p` child running — with its full tool allowance, in the repository,
+# indefinitely. See kill_descendants in lib/common.sh for what that cost once.
+# 130 is the conventional "terminated by SIGINT" exit, and it is deliberately NOT
+# 0: a run that was interrupted did not succeed.
+_on_signal() {
+  trap - INT TERM
+  say ""
+  warn "interrupted — stopping this run and any phase it started"
+  kill_descendants $$
+  exit 130
+}
+trap _on_signal INT TERM
+
 # The bundled config is the default. SPEC_RUN_CONFIG lets you keep your own
 # outside the package, which matters in plugin mode: the plugin lives under
 # ~/.claude/plugins/cache/... and a plugin UPDATE replaces that directory, so an

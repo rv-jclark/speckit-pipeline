@@ -1073,6 +1073,38 @@ out=$(SPEC_RUN_CLAUDE_BIN=claude-ticks-none "$SPEC_RUN" --repo "$CH" \
 assert_contains "$out" "no tasks.md to chunk on" "an absent task list is reported, not treated as done"
 assert_contains "$out" "→ implement" "and the phase still runs once"
 
+# ------------------------------------------------- orphaned phase children -----
+# 🛑 A phase runs inside a command substitution, so its pid is never the runner's
+# to hold, and signalling the runner used to leave the `claude -p` child running
+# with every tool it had. Measured: an implement phase whose parent was killed
+# carried on for ~2 hours, ticked its remaining tasks, and COMMITTED to the
+# repository while a human was separately verifying and merging that same work.
+# The commit simply appeared, authored by the repo's git identity.
+printf '\nsignals: the phase dies with the runner\n'
+_orph_marker="$WORK/orphan-alive"
+rm -f "$_orph_marker"
+( sleep 45 & echo $! > "$WORK/orphan.pid"; wait ) >/dev/null 2>&1 &
+_orph_parent=$!
+sleep 1
+_orph_child=$(cat "$WORK/orphan.pid" 2>/dev/null)
+if [ -n "$_orph_child" ] && kill -0 "$_orph_child" 2>/dev/null; then
+  kill_descendants "$_orph_parent"
+  kill -TERM "$_orph_parent" 2>/dev/null
+  # Reap it, or bash prints an async "Terminated" job notice into the results.
+  wait "$_orph_parent" 2>/dev/null || true
+  sleep 1
+  kill -0 "$_orph_child" 2>/dev/null \
+    && t_fail "kill_descendants reaps a grandchild, not just the child" \
+    || t_pass "kill_descendants reaps a grandchild, not just the child"
+else
+  t_skip "kill_descendants reaps a grandchild" "could not stage the process tree"
+fi
+# And the runner installs it, so an interrupted run cannot leave a phase behind.
+assert_contains "$(cat "$SPEC_RUN")" "trap _on_signal INT TERM" \
+  "spec-run traps INT and TERM"
+assert_contains "$(cat "$SPEC_RUN")" "kill_descendants \$\$" \
+  "and takes its phase down with it"
+
 argv=$("$SPEC_RUN" --repo "$BS" --feature-dir "$BS/specs/001-t" --only tasks --dry-run 2>&1)
 assert_contains "$argv" "--model sonnet" "tasks is invoked on sonnet"
 
