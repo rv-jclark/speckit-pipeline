@@ -119,8 +119,15 @@ mkdir -p "$TARGET/specs"
 # roadmap runner writes into the repository and then has to decide whether the
 # tree is clean, and an untracked state file is one more thing for a reader to
 # wonder about. Idempotent, and it never rewrites an existing entry.
+#
+# `.specify/feature.json` is the third for a sharper reason than tidiness: it is
+# spec-kit's pointer to the feature currently being worked, rewritten by every
+# `create-new-feature` and read by the phases after it. On a roadmap, where each
+# entry is its own branch, tracking it means every branch carries a different
+# value for the same line and every merge conflicts on it — over a file that
+# only ever describes the checkout it sits in.
 GI="$TARGET/.gitignore"
-for pat in 'specs/*/.pipeline/' '.specify/roadmaps/*.state.json'; do
+for pat in 'specs/*/.pipeline/' '.specify/roadmaps/*.state.json' '.specify/feature.json'; do
   if [ ! -f "$GI" ] || ! grep -qxF "$pat" "$GI" 2>/dev/null; then
     [ -f "$GI" ] && [ -s "$GI" ] && [ "$(tail -c1 "$GI" | wc -l)" -eq 0 ] && printf '\n' >> "$GI"
     printf '%s\n' "$pat" >> "$GI"

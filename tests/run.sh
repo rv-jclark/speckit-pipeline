@@ -501,6 +501,11 @@ assert_contains "$(cat "$BS/.gitignore" 2>/dev/null)" "specs/*/.pipeline/" \
   "generated pipeline state is gitignored, not left to be discovered"
 assert_contains "$(cat "$BS/.gitignore" 2>/dev/null)" ".specify/roadmaps/*.state.json" \
   "and so is roadmap progress"
+# The pointer to the feature being worked. Tracked, it would differ on every
+# roadmap branch and conflict on every merge, over a file that only describes
+# the checkout it sits in.
+assert_contains "$(cat "$BS/.gitignore" 2>/dev/null)" ".specify/feature.json" \
+  "and so is the current-feature pointer"
 printf 'my-own-entry\n' >> "$BS/.gitignore"
 "$SPEC_BOOTSTRAP" "$BS" >/dev/null 2>&1
 assert_eq "$(grep -c 'specs/\*/\.pipeline/' "$BS/.gitignore")" "1" \
