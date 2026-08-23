@@ -1,7 +1,7 @@
 {
   "name": "speckit-pipeline",
-  "description": "Run the spec-kit phases as isolated claude processes — one model, effort level, tool allowance and spend ceiling per phase — and drive roadmaps of specs that ship in order.",
-  "version": "0.3.0",
+  "description": "Run the spec-kit phases as isolated claude processes — one model, effort level, tool allowance and turn ceiling per phase — and drive roadmaps of specs that ship in order.",
+  "version": "0.4.0",
   "author": {
     "name": "Jamie Clark"
   },

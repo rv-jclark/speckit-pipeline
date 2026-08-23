@@ -1,8 +1,8 @@
 # speckit-pipeline
 
 Run the [spec-kit](https://github.com/github/spec-kit) phases as **separate
-`claude -p` processes** — one model, effort level, tool allowance and spend
-ceiling per phase — instead of one long conversation that does all four.
+`claude -p` processes** — one model, effort level, tool allowance and turn
+ceiling per phase — instead of one long conversation that does all of them.
 
 ```
 specify  →  [clarify]  →  plan  →  tasks  →  [analyze]  →  [converge]  →  implement
