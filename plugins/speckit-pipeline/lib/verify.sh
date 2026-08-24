@@ -44,6 +44,18 @@ _clarification_markers() { # count unresolved template markers
   printf '%s\n' "${n:-0}"
 }
 
+_tasks_blocked() { # count unchecked tasks the SPEC marks as not-ours-to-do
+  local f="${1:-}/tasks.md" c
+  [ -f "$f" ] || { printf '0\n'; return 0; }
+  # Only an UNCHECKED box whose text opens with the 🛑 BLOCKED marker counts. The
+  # marker has to be explicit and at the front — a task that merely mentions the
+  # word, or a ticked one, must not qualify, or the count becomes a place to hide
+  # unfinished work.
+  c=$(grep -cE '^[[:space:]]*-[[:space:]]*\[[[:space:]]\][[:space:]]*(T[0-9]+[[:space:]]+)?(\[[A-Z0-9]+\][[:space:]]*)*🛑[[:space:]]*BLOCKED' \
+      "$f" 2>/dev/null) || c=0
+  printf '%s\n' "${c:-0}"
+}
+
 _template_placeholders() { # count UNFILLED template placeholders
   local n
   [ -f "$1" ] || { echo 0; return; }
@@ -141,6 +153,28 @@ verify_phase() { # verify_phase <phase_id> <feature_dir> <artifact_rel|""> [chun
         if [ "$chunked" = true ]; then
           printf 'ok\tpass done — %s of %s task(s) left for the next pass\n' \
             "$unchecked" "$total"
+          return 0
+        fi
+        # 🛑 A task the spec itself marks BLOCKED is not unfinished work — it is
+        # work that cannot be done here: a post-deploy read, a browser pass, a
+        # measurement against a real dashboard. Every entry of one roadmap ended
+        # at needs_input for this reason (T064, T057, T068–T071), each time
+        # requiring a human to open tasks.md and confirm the remainder was all
+        # post-deploy. That is a gate with nothing to decide.
+        #
+        # So: if EVERY remaining task is explicitly marked, the phase is ok and
+        # says what is owed. If any unmarked task remains, it still gates — the
+        # marked ones are reported alongside so the reader is not left counting.
+        local blocked
+        blocked=$(_tasks_blocked "$fdir")
+        if [ "${blocked:-0}" -gt 0 ] && [ "${blocked:-0}" -eq "$unchecked" ]; then
+          printf 'ok\t%s of %s task(s) remain, ALL marked BLOCKED — post-deploy or human-only work, owed not missing\n' \
+            "$blocked" "$total"
+          return 0
+        fi
+        if [ "${blocked:-0}" -gt 0 ]; then
+          printf 'needs_input\t%s of %s task(s) still unchecked in %s (%s of them marked BLOCKED)\n' \
+            "$unchecked" "$total" "$rel" "$blocked"
           return 0
         fi
         printf 'needs_input\t%s of %s task(s) still unchecked in %s\n' \

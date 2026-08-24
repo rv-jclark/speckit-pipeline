@@ -402,6 +402,50 @@ assert_eq "$status" "unevaluated" "a phase with no artifact reports unevaluated,
 status=$(verify_phase tasks "$FD" tasks.md | cut -f1)
 assert_eq "$status" "failed" "a tasks.md with no checkboxes fails"
 
+# --- a task the SPEC marks BLOCKED is owed, not missing
+# 🛑 Every entry of one roadmap ended at needs_input over post-deploy tasks —
+# T064, T057, T068–T071 — each time needing a human to open tasks.md and confirm
+# the remainder was all work that cannot be done from a phase: a deployed-surface
+# read, a browser pass, a measurement against a real dashboard. A gate with
+# nothing to decide is a gate that trains you to click through it.
+BLK="$WORK/blocked-tasks"; mkdir -p "$BLK"
+# Over MIN_ARTIFACT_BYTES on purpose: the size floor is checked BEFORE the task
+# count, so a tiny fixture fails as an unfinished write and never reaches the
+# branch under test. My first version of this was 90 bytes and reported
+# "tasks.md is only 0 bytes", which says nothing about BLOCKED handling.
+_blk_pad() { printf '%s\n' "$1"; printf '  %s\n' "context line for size, this file must clear the artifact floor before the task count is even looked at"; }
+{
+  echo '# Tasks: blocked-marker fixture'
+  echo
+  echo '## Phase 1'
+  _blk_pad '- [X] T001 real work that is done'
+  _blk_pad '- [ ] T002 🛑 BLOCKED — the post-merge deployed-surface read'
+  _blk_pad '- [ ] T003 [P] 🛑 BLOCKED — the 24-step browser pass'
+} > "$BLK/tasks.md"
+IFS=$'\t' read -r v m < <(verify_phase implement "$BLK" tasks.md)
+assert_eq "$v" "ok" "a phase whose only leftovers are BLOCKED does not gate"
+assert_contains "$m" "owed not missing" "and says they are owed rather than absent"
+
+# But one unmarked leftover still gates — otherwise the marker becomes a place to
+# hide unfinished work, and the count stops meaning anything.
+printf -- '- [ ] T004 genuinely unfinished\n' >> "$BLK/tasks.md"
+IFS=$'\t' read -r v m < <(verify_phase implement "$BLK" tasks.md)
+assert_eq "$v" "needs_input" "one unmarked leftover still gates"
+assert_contains "$m" "marked BLOCKED" "while still reporting how many were marked"
+
+# A TICKED task carrying the marker must not count — nor one that merely mentions
+# the word in passing. Precision here is the difference between a disclosure and
+# a loophole.
+{
+  echo '# Tasks: marker-precision fixture'
+  echo
+  echo '## Phase 1'
+  _blk_pad '- [X] T001 🛑 BLOCKED — carries the marker but is TICKED, so it is done'
+  _blk_pad '- [ ] T002 mentions BLOCKED in its text but carries no marker at the front'
+} > "$BLK/tasks.md"
+IFS=$'\t' read -r v m < <(verify_phase implement "$BLK" tasks.md)
+assert_eq "$v" "needs_input" "a ticked marker and a passing mention both fail to qualify"
+
 printf -- '- [ ] T001 first\n- [ ] T002 second\n- [x] T003 done\n' >> "$FD/tasks.md"
 res=$(verify_phase tasks "$FD" tasks.md)
 assert_eq "$(cut -f1 <<<"$res")" "ok" "a tasks.md with checkboxes passes"
