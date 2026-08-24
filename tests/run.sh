@@ -1577,6 +1577,19 @@ assert_contains "$prog" 'done: 2 turns, $0.42' "the measured cost is reported on
 # Blocking the TOOL is the structural fix. Pattern-matching production hostnames is
 # the fragile shape-based alternative: there are too many ways to write a URL, and
 # the guard would be defeated by the first one nobody thought of.
+# ⚠️ NOT 'Bash(. *.env*)'. That pattern was added here and removed after one pass
+# in production: it matched
+#     cd <repo> PYTHONPATH=. .venv/bin/alembic upgrade head
+# because `PYTHONPATH=.` ends in a dot, the next word is `.venv/...`, and `.venv`
+# glob-matches `*.env*`. In a Python repo that is most commands, so the guard
+# blocked migrations the phase legitimately needed — a guard that stops real work
+# gets removed or worked around, and either way stops guarding. A one-character
+# command name is a terrible pattern anchor; `source` is a whole word and cannot
+# collide the same way.
+assert_eq "$(jq -r '[.defaults.deny_tools[] | select(. == "Bash(. *.env*)")] | length' \
+            "$PKG/lib/phases.json")" "0" \
+  "the dot-source pattern is NOT present — it blocked .venv commands"
+
 for t in 'Bash(curl:*)' 'Bash(wget:*)' 'Bash(http:*)' 'Bash(source *.env*)' 'WebFetch'; do
   n=$(jq -r --arg t "$t" '[.defaults.deny_tools[] | select(. == $t)] | length' \
       "$PKG/lib/phases.json")

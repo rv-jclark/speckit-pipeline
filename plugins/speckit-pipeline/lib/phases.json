@@ -113,7 +113,6 @@
       "Bash(http:*)",
       "Bash(httpie:*)",
       "Bash(source *.env*)",
-      "Bash(. *.env*)",
       "WebFetch"
     ],
     "_deny_tools_note": [
@@ -129,7 +128,16 @@
       "agent was the SANDBOX (TLS refused, curl exit 60), not this list. Read these",
       "entries as: they make an honest attempt fail fast and legibly. They do not",
       "make egress impossible, and a phase that wants out will get out unless the",
-      "sandbox says otherwise."
+      "sandbox says otherwise.",
+      "",
+      "\u26a0\ufe0f 'Bash(. *.env*)' was REMOVED after one pass in production. It was meant to",
+      "catch dot-sourcing a credentials file and instead matched",
+      "  cd <repo> PYTHONPATH=. .venv/bin/alembic upgrade head",
+      "because `PYTHONPATH=.` ends in a dot, the next word is `.venv/...`, and `.venv`",
+      "glob-matches `*.env*`. In a Python repo that is most commands, so the guard",
+      "blocked the migrations a phase legitimately needed. 'Bash(source *.env*)' is",
+      "kept: `source` is a whole word and cannot collide the same way. The lesson is",
+      "that a one-character command name makes a terrible pattern anchor."
     ]
   },
   "phases": [
