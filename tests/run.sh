@@ -1612,6 +1612,48 @@ assert_contains "$how" "squash-merged" "and the answer says which signal replied
 # main. Mutation: delete the artifact-presence branch and this assertion returns
 # not_landed, which is a roadmap that can never advance past entry one.
 
+# --- the state file is not the only thing that knows where the work is
+# 🛑 `feature_dir` is load-bearing for the squash check above, and it lives ONLY in
+# the roadmap state file. Measured: hand-picking a landing set dropped the
+# pipeline's own state commit, the field went missing, a COMPLETED entry read as
+# pending, and the next run started specify again. Caught 30 seconds in, but on
+# course to re-spend a full pipeline — losing this field means paying for finished
+# work twice, which is the most expensive way for state loss to surface.
+#
+# The answer is already committed: spec-kit names directories `NNN-<slug>` and the
+# entry knows its slug. So an empty feature_dir must NOT be able to un-land an
+# entry whose artifacts are sitting on the base ref.
+IFS=$'\t' read -r landed how < <(entry_landed "$RB" main "" 002-second 0 second)
+assert_eq "$landed" "done" \
+  "an entry with NO feature_dir recorded is still found, by slug, on the base ref"
+assert_contains "$how" "found by slug" \
+  "and says so, rather than implying the state file answered"
+
+# The slug must actually have to match — otherwise the fallback would call every
+# entry landed the moment any spec directory existed. With a branch recorded but no
+# matching directory, the answer is a definite not_landed.
+IFS=$'\t' read -r landed how < <(entry_landed "$RB" main "" 001-first 0 no-such-entry)
+assert_eq "$landed" "not_landed" \
+  "a slug matching no directory on the base is still not_landed"
+
+# ⚠️ In a SEPARATE repository on purpose. The first version of this case added a
+# branch and two commits to $RB, the fixture the rest of this file shares — and
+# broke six later assertions that depend on its shape. A test that mutates a shared
+# fixture to prove a point about isolation is its own counter-example.
+HB="$WORK/hyphen-slug"; mkbare "$HB" main
+git -C "$HB" checkout -q -b 004-multi-part-slug main
+mkdir -p "$HB/specs/004-multi-part-slug"
+printf -- '- [X] T001 done\n' > "$HB/specs/004-multi-part-slug/tasks.md"
+git -C "$HB" add -A >/dev/null 2>&1; git -C "$HB" commit -qm "entry four"
+git -C "$HB" checkout -q main
+git -C "$HB" merge --squash -q 004-multi-part-slug >/dev/null 2>&1
+git -C "$HB" commit -qm "entry four (squashed) (#14)"
+# Splitting on the LAST dash, or on every dash, would compare the wrong thing and
+# silently stop matching any hyphenated name — which is most of them (`board-ui`,
+# `cutover-backfill-v1-retirement`).
+IFS=$'\t' read -r landed how < <(entry_landed "$HB" main "" "" 0 multi-part-slug)
+assert_eq "$landed" "done" "a hyphenated slug still matches after the numeric prefix"
+
 # --- unknown is not a synonym for no
 IFS=$'\t' read -r landed how < <(entry_landed "$RB" no-such-ref specs/001-first 001-first 0)
 assert_eq "$landed" "unknown" "a base ref that does not exist is unknown, not not_landed"
@@ -1702,6 +1744,17 @@ assert_contains "$out" "name one with --slug" "rather than picking one for you"
 # --- tree safety: the tool must not refuse over its OWN bookkeeping
 printf '\nroadmap: tree safety\n'
 mkdir -p "$RB/.specify/roadmaps" "$RB/specs/001-first/.pipeline"
+# ⚠️ A roadmap of its OWN, with slugs that match no spec directory on main. The
+# `good` roadmap's entries are `first`/`second`, and this repo's main carries
+# `specs/001-first` and `specs/002-second` from the squash-merge fixture above —
+# so once entry_landed learned to find a directory by slug, every `good` entry
+# correctly reported LANDED and `run` exited 0 before it ever reached the
+# dirty-tree check these assertions exist to exercise. The guard was right; the
+# precondition was stale.
+cat > "$RB/.specify/roadmaps/tree.json" <<'TREEEOF'
+{"goal":"tree safety","base":"main","entries":[
+ {"slug":"never-merged-anywhere","title":"t","description":"d"}]}
+TREEEOF
 printf '{}\n' > "$RB/.specify/roadmaps/good.state.json"
 printf '{}\n' > "$RB/specs/001-first/.pipeline/state.json"
 assert_eq "$(tracked_changes "$RB")" "" "the tool's own state files are not 'uncommitted changes'"
@@ -1711,13 +1764,13 @@ assert_eq "$(untracked_files "$RB")" "" "nor are they reported as stray untracke
 # dirtied the tree and then blocked on it — every roadmap stopped at entry one.
 # Mutation: drop _is_tool_bookkeeping and both assertions fail.
 
-out=$("$SPEC_ROADMAP" run --repo "$RB" --slug good --base main --dry-run 2>&1); rc=$?
+out=$("$SPEC_ROADMAP" run --repo "$RB" --slug tree --base main --dry-run 2>&1); rc=$?
 assert_eq "$rc" "0" "and a run proceeds with only tool state present"
 
 # --- a TRACKED modification refuses, because that is what a checkout can block
 printf 'edited by a human\n' >> "$RB/README.md"
 assert_contains "$(tracked_changes "$RB")" "README.md" "a tracked modification IS reported"
-out=$("$SPEC_ROADMAP" run --repo "$RB" --slug good --base main 2>&1); rc=$?
+out=$("$SPEC_ROADMAP" run --repo "$RB" --slug tree --base main 2>&1); rc=$?
 assert_eq "$rc" "1" "and it stops the roadmap before any branch switch"
 assert_contains "$out" "uncommitted tracked changes" "saying what kind of problem it is"
 assert_contains "$out" "README.md" "and naming the file"
@@ -1731,7 +1784,7 @@ git -C "$RB" checkout -- README.md
 printf 'scratch\n' > "$RB/scratch.txt"
 assert_eq "$(tracked_changes "$RB")" "" "an untracked file is not a tracked change"
 assert_contains "$(untracked_files "$RB")" "scratch.txt" "but it is reported as stray"
-out=$("$SPEC_ROADMAP" run --repo "$RB" --slug good --base main --dry-run 2>&1); rc=$?
+out=$("$SPEC_ROADMAP" run --repo "$RB" --slug tree --base main --dry-run 2>&1); rc=$?
 assert_eq "$rc" "0" "an untracked file does NOT block the run"
 assert_contains "$out" "will follow this checkout" "it warns instead, and says why it matters"
 [ -f "$RB/scratch.txt" ] && t_pass "and the untracked file is left where it was" \
@@ -1741,7 +1794,7 @@ rm -f "$RB/scratch.txt"
 # creates untracked spec files, so an untracked-blocks rule stops the roadmap
 # immediately after its own first phase.
 
-out=$("$SPEC_ROADMAP" run --repo "$RB" --slug good --base main --dry-run 2>&1)
+out=$("$SPEC_ROADMAP" run --repo "$RB" --slug tree --base main --dry-run 2>&1)
 assert_contains "$out" "would run: spec-run" "--dry-run shows the spec-run it would invoke"
 assert_not_contains "$out" "waiting on you" "and does not pretend to have run anything"
 

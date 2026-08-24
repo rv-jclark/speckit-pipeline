@@ -190,7 +190,7 @@ roadmap_fetch_base() { # roadmap_fetch_base <repo> <base>  -> 0 fresh, 1 stale
 #     not_landed it is not, and we could see clearly enough to say so
 #     unknown    the question could not be answered — NOT a synonym for "no"
 entry_landed() {
-  local repo="$1" base="$2" fdir="$3" branch="$4" fresh="$5"
+  local repo="$1" base="$2" fdir="$3" branch="$4" fresh="$5" slug="${6:-}"
 
   if ! git -C "$repo" rev-parse --verify --quiet "$base" >/dev/null 2>&1; then
     printf 'unknown\tthe base ref %s does not exist in this repository\n' "$base"; return 0
@@ -218,6 +218,39 @@ entry_landed() {
   if [ -n "$fdir" ] && git -C "$repo" cat-file -e "$base:$fdir/tasks.md" 2>/dev/null; then
     printf 'done\t%s/tasks.md is present on %s (squash-merged, so not an ancestor)\n' "$fdir" "$base"
     return 0
+  fi
+
+  # 🛑 The state file is not the only place that knows where an entry's work is —
+  # git does too, and git is the thing that cannot be reset by a stray `git stash`.
+  # `feature_dir` is load-bearing for the check above, and it lives ONLY in
+  # .specify/roadmaps/<slug>.state.json. Measured: hand-picking a landing set
+  # dropped the pipeline's own state commit, the field went missing, a COMPLETED
+  # entry read as pending, and the next run started specify again from scratch —
+  # caught 30 seconds in, but it was on course to re-spend a full pipeline. The
+  # failure mode of losing this field is paying for finished work twice, which is
+  # the most expensive way for state loss to surface.
+  #
+  # So: derive it. spec-kit names feature directories `NNN-<slug>` and the roadmap
+  # entry knows its slug, so the answer is already committed on the base ref.
+  if [ -z "$fdir" ] && [ -n "$slug" ]; then
+    local name derived=""
+    while IFS= read -r name; do
+      name=${name%/}
+      [ -n "$name" ] || continue
+      # Strip the numeric prefix at the FIRST dash only — a slug may contain
+      # dashes itself (`board-ui`, `cutover-backfill-v1-retirement`), so this is a
+      # string comparison rather than a pattern, and needs no escaping.
+      case "$name" in
+        [0-9]*-*) [ "${name#*-}" = "$slug" ] && { derived="$name"; break; };;
+      esac
+    done <<EOF
+$(git -C "$repo" ls-tree --name-only "$base:specs" 2>/dev/null)
+EOF
+    if [ -n "$derived" ] && git -C "$repo" cat-file -e "$base:specs/$derived/tasks.md" 2>/dev/null; then
+      printf 'done\tspecs/%s/tasks.md is present on %s — found by slug, because no feature_dir was recorded\n' \
+        "$derived" "$base"
+      return 0
+    fi
   fi
 
   # Only now does "no" become sayable — and only if the ref is fresh. A stale ref

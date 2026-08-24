@@ -386,7 +386,7 @@ if [ "$CMD" = show ]; then
     status=$(roadmap_entry_get "$ST" "$slug" status pending)
     fdir=$(roadmap_entry_get "$ST" "$slug" feature_dir "")
     branch=$(roadmap_entry_get "$ST" "$slug" branch "")
-    IFS=$'\t' read -r landed how < <(entry_landed "$REPO" "$BASE" "$fdir" "$branch" "$fresh")
+    IFS=$'\t' read -r landed how < <(entry_landed "$REPO" "$BASE" "$fdir" "$branch" "$fresh" "$slug")
     [ "$landed" = "done" ] && status="done"
     case "$status" in
       done)           mark="✓";;
@@ -480,7 +480,7 @@ while [ "$ei" -lt "$n_entries" ]; do
   fdir=$(roadmap_entry_get "$ST" "$slug" feature_dir "")
   branch=$(roadmap_entry_get "$ST" "$slug" branch "")
 
-  IFS=$'\t' read -r landed how < <(entry_landed "$REPO" "$BASE" "$fdir" "$branch" "$fresh")
+  IFS=$'\t' read -r landed how < <(entry_landed "$REPO" "$BASE" "$fdir" "$branch" "$fresh" "$slug")
 
   if [ "$landed" = "done" ]; then
     [ "$status" != "done" ] && roadmap_entry_set "$ST" "$slug" '{"status":"done"}'
