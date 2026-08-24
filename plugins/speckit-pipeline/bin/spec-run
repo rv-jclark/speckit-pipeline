@@ -445,6 +445,24 @@ read 16/76, so a human reviewing it could not tell the work was nearly finished.
 
 Ticking as you go also means an interruption costs only the task in flight, and it
 lets your own work be resumed in a fresh process rather than restarted.
+
+VERIFY NARROWLY AS YOU GO, BROADLY ONCE AT THE END. Per task, run the smallest
+check that can fail for the right reason — the single test file you touched, a
+typecheck of the package, one focused `-k` selection. Run the FULL suite once, at
+the end of the pass, after the last task you intend to tick.
+
+Why, measured on one pass: it reported 27,706,579 cache-read tokens against 28,608
+output tokens — a ratio of 968 to 1. Practically all of the cost of a pass is
+re-reading its own transcript on every turn, so anything large dumped early is paid
+for again by every turn that follows it. That pass had 9 tool results over 4k
+characters, together about 27k tokens, mostly full-suite output. Four full-suite
+runs mid-pass cost far more than the one at the end, and tell you no more.
+
+TRUNCATE what you do run. Pipe verification through `tail -30` (or `tail -60` when
+a failure needs context) rather than letting thousands of lines into the transcript.
+On a failure, re-run just the failing file to get its detail — that is cheaper than
+having carried every passing line along with it. Never `cat` a lockfile, a build
+log or a generated bundle into the transcript at all.
 EOF
 }
 

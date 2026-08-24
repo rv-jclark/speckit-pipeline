@@ -1005,6 +1005,22 @@ assert_contains "$contract_impl" "YOU ARE HEADLESS" \
 assert_contains "$contract_impl" "ONE PASS OF A CHUNKED PHASE" \
   "and, being chunked, is told to do one ## Phase group and stop"
 
+# 🛑 Cost in a pass is dominated by re-reading its own transcript, not by output:
+# one measured pass reported 27,706,579 cache-read tokens against 28,608 output
+# tokens (968:1). So anything large dumped EARLY is paid for again by every turn
+# after it — that pass carried 9 tool results over 4k chars, ~27k tokens, mostly
+# full-suite output from runs made between tasks.
+#
+# The instruction is narrow-then-broad rather than "defer all verification",
+# because ticking a task requires knowing it passed: a deferred check would mean
+# ticking on faith and discovering the failure a pass later.
+assert_contains "$contract_impl" "VERIFY NARROWLY AS YOU GO, BROADLY ONCE AT THE END" \
+  "implement is told where to put its verification, not just to do it"
+assert_contains "$contract_impl" "27,706,579" \
+  "and given the measurement, so the next reader can check the reasoning"
+assert_contains "$contract_impl" "tail -30" \
+  "and a concrete truncation to use rather than a vague instruction to be brief"
+
 # ------------------------------------------------------ chunked implement ------
 # Cost is ~linear in cache_read, which grows with turn count, so one long phase
 # costs ~90k*T + 0.7k*T^2 tokens and k shorter passes divide the quadratic term by
