@@ -671,7 +671,27 @@ run_phase() { # run_phase <phase_json>
   # result event is still the last JSON object on stdout, so everything
   # downstream — cost, turns, denials, the artifact verdict — is unchanged.
   [ "$STREAM" -eq 1 ] && out_format=stream-json
-  local -a argv=("$CLAUDE_BIN" -p "$prompt"
+  # 🛑 Hold a power assertion for the phase's lifetime. `pmset` on the machine this
+  # was written for reports `sleep 1` — one minute of idle — and a phase runs for
+  # tens of minutes, so it is racing a sleep it does not hold off. Measured cost of
+  # not doing this, in one entry: the tasks phase died with exit 137 and an empty
+  # stderr (which reads like an OOM and is not), and one implement pass spent $7.89
+  # to return "API Error: Your computer went to sleep mid-response" and tick nothing.
+  # Two different signatures, one cause.
+  #
+  # `caffeinate -i` prevents idle sleep only — deliberately not `-d` (the display may
+  # sleep) and not `-s` (which only applies on AC power and would silently do nothing
+  # on battery). As a child of the phase it dies with it, so nothing is left holding
+  # the machine awake after a run.
+  local -a wake=()
+  if command -v caffeinate >/dev/null 2>&1; then wake=(caffeinate -i); fi
+  # ⚠️ `${wake[@]+"${wake[@]}"}` and NOT `"${wake[@]}"`: on bash 3.2 — still the
+  # system shell on macOS — expanding an EMPTY array under `set -u` raises
+  # "unbound variable" rather than expanding to nothing. So the plain form works
+  # only where caffeinate exists and breaks the runner outright everywhere it does
+  # not, which is every Linux host. Found by mutation: removing the caffeinate
+  # branch failed 88 assertions, not the 1 that was supposed to fail.
+  local -a argv=(${wake[@]+"${wake[@]}"} "$CLAUDE_BIN" -p "$prompt"
     --model "$model"
     --effort "$effort"
     --output-format "$out_format"

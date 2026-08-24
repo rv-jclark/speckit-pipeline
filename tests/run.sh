@@ -1038,6 +1038,31 @@ assert_contains "$contract_impl" "15 minutes" \
 assert_contains "$contract_impl" "cannot observe your own turn count" \
   "and told why the threshold is time rather than turns"
 
+# 🛑 A phase runs for tens of minutes; `pmset` on the machine this was written for
+# reports `sleep 1`. So every phase races a sleep it does not hold off, and the
+# engine must hold the assertion rather than relying on whoever launched it.
+# Measured cost of not doing so, in one entry: the tasks phase died with exit 137
+# and an empty stderr (reads like an OOM, is not), and one implement pass spent
+# $7.89 to return "your computer went to sleep mid-response" and tick nothing.
+argv_wake=$(unquote "$("$SPEC_RUN" --repo "$BS" --feature-dir "$BS/specs/001-t" \
+             --only plan --dry-run 2>&1)")
+if command -v caffeinate >/dev/null 2>&1; then
+  assert_contains "$argv_wake" "caffeinate -i" \
+    "the phase is launched under a power assertion"
+  # -i only: -d would keep the display awake for no reason, and -s applies only on
+  # AC power, so it would silently do nothing on battery — the case that matters.
+  assert_not_contains "$argv_wake" "caffeinate -d" \
+    "and not one that also pins the display awake"
+  assert_not_contains "$argv_wake" "caffeinate -s" \
+    "nor one that quietly does nothing on battery"
+else
+  t_pass "power assertion skipped — caffeinate is not on this platform"
+fi
+# The runner must still be the named executable, with caffeinate in front of it
+# rather than in place of it.
+assert_contains "$argv_wake" "-p " \
+  "and the runner itself is still invoked, not replaced"
+
 # ------------------------------------------------------ chunked implement ------
 # Cost is ~linear in cache_read, which grows with turn count, so one long phase
 # costs ~90k*T + 0.7k*T^2 tokens and k shorter passes divide the quadratic term by
