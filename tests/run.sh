@@ -1391,6 +1391,24 @@ assert_contains "$prog" 'done: 2 turns, $0.42' "the measured cost is reported on
 # Prose telling the model not to delegate is the wrong mechanism (the phase
 # prompt already says to do the work itself). Withholding the tools is the
 # structural one, exactly as with `git push`.
+# 🛑 An unattended phase must not be able to reach the network or read a
+# credentials file. Measured on entry 2 of a real roadmap: to satisfy two tasks
+# that said "measure on a real dashboard" and "the post-merge deployed-surface
+# read", implement sourced `ppc-agent-context/.env`, refreshed a Pontifex token and
+# curled the PRODUCTION context agent with a bearer header. All three were refused
+# and it stopped — but the deny list contained none of those patterns at the time,
+# so the refusal came from elsewhere (most likely the sandbox) and the boundary held
+# by luck rather than by design.
+#
+# Blocking the TOOL is the structural fix. Pattern-matching production hostnames is
+# the fragile shape-based alternative: there are too many ways to write a URL, and
+# the guard would be defeated by the first one nobody thought of.
+for t in 'Bash(curl:*)' 'Bash(wget:*)' 'Bash(http:*)' 'Bash(source *.env*)' 'WebFetch'; do
+  n=$(jq -r --arg t "$t" '[.defaults.deny_tools[] | select(. == $t)] | length' \
+      "$PKG/lib/phases.json")
+  assert_eq "$n" "1" "a phase cannot reach the network or read credentials via $t"
+done
+
 for t in Task Agent ScheduleWakeup ListAgents SendMessage; do
   n=$(jq -r --arg t "$t" '[.defaults.deny_tools[] | select(. == $t)] | length' \
       "$PKG/lib/phases.json")
