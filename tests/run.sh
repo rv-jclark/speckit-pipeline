@@ -1021,6 +1021,23 @@ assert_contains "$contract_impl" "27,706,579" \
 assert_contains "$contract_impl" "tail -30" \
   "and a concrete truncation to use rather than a vague instruction to be brief"
 
+# 🛑 Cost within a pass grows with roughly the SQUARE of its length, because every
+# turn re-reads everything before it. So two short passes beat one long pass over
+# the same tasks — each starts from a clean prefix. Measured across one entry's 14
+# passes: 39 94 90 67 60 45 70 97 75 94 76 58 104 46 turns (mean 72, max 104).
+#
+# ⚠️ Expressed in WALL CLOCK, not turns, because a phase cannot observe its own turn
+# count — the CLI reports num_turns only in its final result, so a turn target would
+# be an instruction it could not act on. This repo already learned that when a
+# transcript showing 414 messages turned out to belong to a phase the CLI had not
+# stopped at a 400 cap.
+assert_contains "$contract_impl" "PREFER TO STOP EARLY WHEN A PASS RUNS LONG" \
+  "a chunked pass is told to stop early rather than run a group to its end"
+assert_contains "$contract_impl" "15 minutes" \
+  "with a concrete threshold it can actually observe"
+assert_contains "$contract_impl" "cannot observe your own turn count" \
+  "and told why the threshold is time rather than turns"
+
 # ------------------------------------------------------ chunked implement ------
 # Cost is ~linear in cache_read, which grows with turn count, so one long phase
 # costs ~90k*T + 0.7k*T^2 tokens and k shorter passes divide the quadratic term by

@@ -427,6 +427,28 @@ half-written, with no record of why the first half looks as it does.
 
 If the next group is very large, doing part of it is acceptable — but tick
 exactly what you finished, and leave nothing half-applied.
+
+AND PREFER TO STOP EARLY WHEN A PASS RUNS LONG. Note the time when you start. Once
+you are past roughly 15 minutes, finish the task in flight, tick it, and stop at
+that task boundary even if the group has more in it. Report what is left; the next
+pass continues from your tasks.md.
+
+This is worth doing because of how a pass is billed. Cost is dominated by re-reading
+the transcript: one measured pass reported 27,706,579 cache-read tokens against
+28,608 output tokens. Every turn re-reads everything before it, so the cost of a
+pass grows with roughly the SQUARE of its length — which means two short passes are
+substantially cheaper than one long one covering the same tasks, because each starts
+from a clean prefix.
+
+Measured across the 14 passes of one entry, turns per pass were:
+39 94 90 67 60 45 70 97 75 94 76 58 104 46 (mean 72, max 104). The long ones are
+where the money went.
+
+⚠️ Wall clock, not turns, deliberately: you cannot observe your own turn count — the
+CLI reports it only in its final result — so a turn target would be something you
+could not act on. Time you can read. And this is a PREFERENCE, not a hard stop:
+finishing a coupled pair of tasks is worth two extra minutes, whereas pushing
+through another eight tasks is not.
 EOF
   fi
   cat <<'EOF'
