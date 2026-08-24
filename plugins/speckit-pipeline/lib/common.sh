@@ -371,6 +371,31 @@ extract_json() { # extract_json <text>
   return 1
 }
 
+# The FINAL result envelope, not merely the last JSON object. A phase killed
+# mid-stream leaves an ordinary stream line as its last object — measured: a plan
+# phase SIGTERMed at exit 143 ended on
+# {"type":"system","subtype":"thinking_tokens",...}, which parses cleanly and
+# carries no cost, so "some JSON parsed" was read as "the phase completed" and a
+# 3,779-byte stub plan.md was recorded ok. Only a result envelope means finished.
+extract_result_json() { # extract_result_json <text>
+  local text="$1" whole out
+  # Non-stream --output-format json: the whole output is one (possibly
+  # pretty-printed) value, which the line-wise pass below would miss.
+  whole=$(printf '%s' "$text" \
+          | jq -c 'select(type == "object"
+                          and (.type == "result" or has("total_cost_usd")))' \
+            2>/dev/null) || whole=""
+  if [ -n "$whole" ]; then printf '%s' "$whole"; return 0; fi
+  # Streamed: one object per line. Filter to object-shaped lines first — a
+  # truncated tail line is not valid JSON and would fail the whole slurp.
+  out=$(printf '%s\n' "$text" | grep -E '^\{.*\}$' 2>/dev/null \
+        | jq -c -s 'map(select(type == "object"
+                               and (.type == "result" or has("total_cost_usd"))))
+                    | last // empty' 2>/dev/null) || out=""
+  if [ -n "$out" ] && [ "$out" != null ]; then printf '%s' "$out"; return 0; fi
+  return 1
+}
+
 state_total_cost() { jq '[.phases[].cost_usd // 0] | add // 0' "$1"; }
 
 # Overwrite a phase's cost/turns with a total, and record how many passes made it.

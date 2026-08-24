@@ -791,13 +791,27 @@ run_phase() { # run_phase <phase_json>
   fi
 
   local cost turns dur result unmeasured="" json="" errcap="" denials=0 denied_tools="" denial_note=""
+  local cli_error="" cli_subtype=""
   errcap=$(head -c 4000 "$errf" 2>/dev/null || true)
-  json=$(extract_json "$out") || json=""
+  json=$(extract_result_json "$out") || json=""
   if [ -n "$json" ]; then
     cost=$(jq -r '.total_cost_usd // empty' <<<"$json")
     turns=$(jq -r '.num_turns // empty'     <<<"$json")
     dur=$(jq -r '.duration_ms // empty'     <<<"$json")
     result=$(jq -r '.result // empty'       <<<"$json")
+    # The runner's OWN verdict on itself. It is not a hint to be weighed against
+    # the artifact: `is_error` means the phase stopped without finishing, and
+    # `subtype` says how — `error_max_turns` above all.
+    #
+    # Measured: a plan phase hit its 80-turn cap having written research.md,
+    # data-model.md, four contracts and quickstart.md, but leaving plan.md as the
+    # UNFILLED TEMPLATE. The envelope said {"subtype":"error_max_turns",
+    # "is_error":true,"num_turns":81} and the pipeline recorded `ok`, because the
+    # template is over the size floor and carries no open markers. The next phase
+    # then planned against a placeholder. Asking the runner is cheaper and far
+    # more reliable than inferring completion from bytes on disk.
+    cli_error=$(jq -r 'if .is_error == true then "1" else "" end' <<<"$json" 2>/dev/null || true)
+    cli_subtype=$(jq -r '.subtype // empty' <<<"$json" 2>/dev/null || true)
     # The CLI reports the tool calls it refused, so what a phase was blocked from
     # doing is a MEASURED fact rather than something to infer from a bad artifact.
     # This matters most where the permission model is not the default: an empty
@@ -847,6 +861,20 @@ run_phase() { # run_phase <phase_json>
     status=failed
     note="the phase did not complete: exit $rc with no result returned${artifact:+ — $artifact may be partially written}"
     unmeasured=""
+  fi
+
+  # The runner said it failed. Believe it, whatever the artifact looks like — a
+  # phase that ran out of turns leaves exactly the plausible-looking file that
+  # every size-and-marker check passes. `error_max_turns` is also ACTIONABLE in a
+  # way a thin artifact is not: the remedy is a higher cap, not a rewrite.
+  if [ -n "$cli_error" ]; then
+    status=failed
+    case "$cli_subtype" in
+      error_max_turns)
+        note="the phase ran OUT OF TURNS after ${turns:-?} (raise max_turns for '$id' in phases.json)${artifact:+ — $artifact is likely unfinished}";;
+      *)
+        note="the runner reported failure (${cli_subtype:-unknown})${artifact:+ — $artifact is likely unfinished}";;
+    esac
   fi
 
   # No parseable result AND an artifact that did not move: the phase did not run.

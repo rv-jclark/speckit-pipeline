@@ -797,6 +797,78 @@ assert_contains "$out" "may be partially written" "and the artifact is called in
 # Deleting it would be worse: it is the only record of how far the phase got, and
 # the next attempt overwrites it anyway.
 
+# ------------------------------- killed AFTER streaming, and out of turns ------
+# The fake above prints NOTHING before dying, so the "no parseable result" branch
+# catches it. That is not how a real phase dies. These two cases were both
+# measured on one entry and both were recorded `ok`.
+printf '\ninterrupted phase, mid-stream\n'
+cat > "$FAKE/claude-killed-streaming" <<'FAKEEOF'
+#!/usr/bin/env bash
+[ "${1:-}" = "--help" ] && exit 0
+{ printf '# Implementation Plan\n\n'
+  for i in $(seq 1 40); do printf 'a wholly plausible plan line %s\n' "$i"; done
+  printf '\n## Complexity Tracking\n\n> Not applicable.\n'; } > "$SPEC_TEST_ARTIFACT"
+# stream as a real phase does, then die BEFORE the result envelope. The last
+# object is valid JSON and carries no cost — which is why "some JSON parsed" is
+# not evidence of completion.
+printf '{"type":"system","subtype":"init","session_id":"s1"}\n'
+printf '{"type":"system","subtype":"thinking_tokens","estimated_tokens":6100}\n'
+exit 143
+FAKEEOF
+chmod +x "$FAKE/claude-killed-streaming"
+mkdir -p "$KL/specs/002-x"
+out=$(SPEC_TEST_ARTIFACT="$KL/specs/002-x/plan.md" \
+      "$SPEC_RUN" --repo "$KL" --feature-dir "$KL/specs/002-x" \
+        --only plan --claude-bin claude-killed-streaming 2>&1); rc=$?
+assert_eq "$rc" "1" "a phase killed AFTER streaming fails despite a plausible artifact"
+assert_contains "$out" "did not complete: exit 143" "and the signal is still named"
+# Mutation: revert extract_result_json to extract_json and this reports `ok` —
+# the trailing thinking_tokens line parses, so the unmeasured flag never sets and
+# the interrupted-phase guard cannot fire. Measured exactly so on entry 014.
+
+printf '\nout of turns\n'
+cat > "$FAKE/claude-maxturns" <<'FAKEEOF'
+#!/usr/bin/env bash
+[ "${1:-}" = "--help" ] && exit 0
+# The supporting artifacts get written; the MAIN one is left as the template.
+d=$(dirname "$SPEC_TEST_ARTIFACT")
+printf '# Research\n\nplenty of real content here, repeated for bulk.\n' > "$d/research.md"
+{ printf '# Implementation Plan: [FEATURE]\n\n'
+  printf '**Date**: [DATE]\n\n## Project Structure\n\n'
+  printf '# [REMOVE IF UNUSED] Option 1: Single project\n'
+  for i in $(seq 1 40); do printf 'template filler line %s\n' "$i"; done; } > "$SPEC_TEST_ARTIFACT"
+# A real result envelope, reporting its own failure. exit 0 — the runner exits
+# cleanly having given up, which is why the exit code alone cannot catch this.
+printf '{"type":"result","subtype":"error_max_turns","is_error":true,"num_turns":81,"total_cost_usd":4.63,"duration_ms":742815}\n'
+exit 0
+FAKEEOF
+chmod +x "$FAKE/claude-maxturns"
+mkdir -p "$KL/specs/003-x"
+out=$(SPEC_TEST_ARTIFACT="$KL/specs/003-x/plan.md" \
+      "$SPEC_RUN" --repo "$KL" --feature-dir "$KL/specs/003-x" \
+        --only plan --claude-bin claude-maxturns 2>&1); rc=$?
+assert_eq "$rc" "1" "a phase that ran out of turns FAILS even though it exited 0"
+assert_contains "$out" "OUT OF TURNS" "and says so in the runner's own terms"
+assert_contains "$out" "raise max_turns" "and names the actionable remedy"
+# Mutation: drop the is_error branch and this reports `ok` at 81 turns with a
+# cost, because the template clears the size floor and asks no questions.
+
+# The template check stands on its own, independent of how the phase exited.
+printf '\nan unfilled template is not an artifact\n'
+TPL="$WORK/tpl.md"
+printf '# Implementation Plan: [FEATURE]\n\n# [REMOVE IF UNUSED] Option 1\n' > "$TPL"
+for i in $(seq 1 40); do printf 'filler %s\n' "$i" >> "$TPL"; done
+IFS=$'\t' read -r st note < <(verify_phase plan "$WORK" "tpl.md")
+assert_eq "$st" "failed" "a plan.md still carrying template placeholders fails"
+assert_contains "$note" "still the TEMPLATE" "and says which way it is unfinished"
+# And the inverse: a filled document with ordinary lowercase placeholders in an
+# example table must still pass, or the check is useless in practice.
+printf '# Implementation Plan: Trust and access\n\n' > "$TPL"
+printf 'Call `[endpoint]` with `[action]` for user [name]; see US1.\n' >> "$TPL"
+for i in $(seq 1 40); do printf 'real content %s\n' "$i" >> "$TPL"; done
+IFS=$'\t' read -r st note < <(verify_phase plan "$WORK" "tpl.md")
+assert_eq "$st" "ok" "a FILLED plan keeping lowercase example placeholders passes"
+
 # ------------------------------------ the vendored bundle is self-consistent ----
 printf '\nthe bundle satisfies its own preflight\n'
 # spec-bootstrap installs the vendored assets; spec-run then reads the project's

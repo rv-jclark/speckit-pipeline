@@ -326,7 +326,7 @@ EOF
            --session-id "$(new_uuid)" "${plan_extra[@]+"${plan_extra[@]}"}" \
            --disallowed-tools "Bash(git push:*),Bash(gh pr merge:*),Bash(git checkout:*),Bash(git commit:*)" \
            2>"$errf" ); rc=$?
-  json=$(extract_json "$out") || json=""
+  json=$(extract_result_json "$out") || json=""
   cost=$( [ -n "$json" ] && jq -r '.total_cost_usd // empty' <<<"$json" || echo "" )
 
   if [ ! -f "$RM" ]; then

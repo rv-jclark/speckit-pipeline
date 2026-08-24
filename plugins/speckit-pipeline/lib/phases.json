@@ -141,7 +141,7 @@
       "effort": "high",
       "mcp": "none",
       "artifact": "spec.md",
-      "max_turns": 60,
+      "max_turns": 150,
       "gate": "on_needs_input"
     },
     {
@@ -152,7 +152,7 @@
       "effort": "high",
       "mcp": "none",
       "artifact": "spec.md",
-      "max_turns": 40,
+      "max_turns": 80,
       "gate": "always"
     },
     {
@@ -162,7 +162,7 @@
       "effort": "high",
       "mcp": "inherit",
       "artifact": "plan.md",
-      "max_turns": 80,
+      "max_turns": 250,
       "gate": "on_needs_input"
     },
     {
@@ -172,7 +172,7 @@
       "effort": "medium",
       "mcp": "none",
       "artifact": "tasks.md",
-      "max_turns": 60,
+      "max_turns": 120,
       "gate": "on_needs_input"
     },
     {
@@ -183,7 +183,7 @@
       "effort": "high",
       "mcp": "none",
       "artifact": null,
-      "max_turns": 30,
+      "max_turns": 60,
       "gate": "on_needs_input"
     },
     {
@@ -194,7 +194,7 @@
       "effort": "high",
       "mcp": "inherit",
       "artifact": "tasks.md",
-      "max_turns": 80,
+      "max_turns": 120,
       "gate": "on_needs_input"
     },
     {

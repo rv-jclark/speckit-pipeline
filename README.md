@@ -574,13 +574,21 @@ done its part and the next move is a human's.
 
 | Phase | Model | Effort | Ceiling | MCP | Optional |
 |---|---|---|---|---|---|
-| specify | opus | high | — / 60 turns | dropped | |
-| clarify | opus | high | — / 40 turns | dropped | `--with clarify` |
-| plan | opus | high | — / 80 turns | kept | |
-| tasks | sonnet | medium | — / 60 turns | dropped | |
-| analyze | opus | high | — / 30 turns | dropped | `--with analyze` |
-| converge | opus | high | — / 80 turns | kept | `--with converge` |
+| specify | opus | high | — / 150 turns | dropped | |
+| clarify | opus | high | — / 80 turns | dropped | `--with clarify` |
+| plan | opus | high | — / 250 turns | kept | |
+| tasks | sonnet | medium | — / 120 turns | dropped | |
+| analyze | opus | high | — / 60 turns | dropped | `--with analyze` |
+| converge | opus | high | — / 120 turns | kept | `--with converge` |
 | implement | sonnet | medium | — / 1200 turns | kept | |
+
+**The ceilings are deliberately generous.** An unused turn costs nothing; a hit
+ceiling truncates the artifact. Measured on one real entry: `specify` used 57 of
+60, and `plan` hit 80 having written `research.md`, `data-model.md`, four
+contracts and `quickstart.md` but leaving `plan.md` as the untouched template —
+which then verified `ok`, because a template clears the size floor and asks no
+questions. Size and marker checks cannot tell "finished" from "stopped
+somewhere that looks finished"; `is_error` in the result envelope can.
 
 **`implement` runs in CHUNKS** — one `## Phase` group of `tasks.md` per pass, each
 pass a fresh process, looping until no unchecked boxes remain. This is the biggest
@@ -951,7 +959,7 @@ reports success over a directory the rest of the pipeline cannot find.
 ## Tests
 
 ```bash
-./tests/run.sh          # shellcheck + 430 fixture assertions
+./tests/run.sh          # shellcheck + 438 fixture assertions
 ```
 
 **The suite is hermetic.** A stub runner shadows the real `claude` for the whole
@@ -1045,7 +1053,7 @@ not be measured are recorded `unmeasured`, never as `$0`.
 ## Tests, and what they cost to run
 
 ```bash
-./tests/run.sh          # shellcheck + 430 assertions, ~2 minutes
+./tests/run.sh          # shellcheck + 438 assertions, ~2 minutes
 ```
 
 Hermetic: a stub runner shadows the real `claude` for the whole run, so nothing

@@ -44,6 +44,24 @@ _clarification_markers() { # count unresolved template markers
   printf '%s\n' "${n:-0}"
 }
 
+_template_placeholders() { # count UNFILLED template placeholders
+  local n
+  [ -f "$1" ] || { echo 0; return; }
+  # Precision over recall, deliberately. The vendored templates carry dozens of
+  # lowercase placeholders (`[name]`, `[endpoint]`, `[action]`) that a filled
+  # document may legitimately still contain in a table or an example, and
+  # `[US1]` is ordinary prose in a real tasks.md. These three cannot survive a
+  # genuine fill: they are the title, the date, and an instruction addressed to
+  # the author. Derived from assets/specify/templates/, not invented.
+  #
+  # Measured: a plan phase that ran out of turns left plan.md as the untouched
+  # template — `# Implementation Plan: [FEATURE]` over three `[REMOVE IF UNUSED]`
+  # option blocks — and it verified `ok` at 3,779 bytes with no open markers,
+  # because a template is comfortably over the size floor and asks no questions.
+  n=$(grep -cE '\[REMOVE IF UNUSED\]|\[FEATURE( NAME)?\]|\[DATE\]' "$1" 2>/dev/null || true)
+  printf '%s\n' "${n:-0}"
+}
+
 _task_counts() { # prints "<unchecked> <total>"
   local f="$1" unchecked total
   [ -f "$f" ] || { echo "0 0"; return; }
@@ -71,6 +89,18 @@ verify_phase() { # verify_phase <phase_id> <feature_dir> <artifact_rel|""> [chun
   if [ "$bytes" -lt "$MIN_ARTIFACT_BYTES" ]; then
     printf 'failed\t%s is only %s bytes (min %s) — the phase did not finish writing it\n' \
       "$rel" "$bytes" "$MIN_ARTIFACT_BYTES"
+    return 0
+  fi
+
+  # Before any per-phase judgement: an artifact that is still (partly) the
+  # template was never written, however large it is and whatever phase produced
+  # it. Checked here rather than per-branch so tasks.md gets the same guarantee
+  # as plan.md.
+  local placeholders
+  placeholders=$(_template_placeholders "$path")
+  if [ "$placeholders" -gt 0 ]; then
+    printf 'failed\t%s is still the TEMPLATE — %s unfilled placeholder(s) (%s bytes); the phase did not write it\n' \
+      "$rel" "$placeholders" "$bytes"
     return 0
   fi
 
