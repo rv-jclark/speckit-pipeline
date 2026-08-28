@@ -398,6 +398,26 @@ assert_eq "$status" "unevaluated" "a phase with no artifact reports unevaluated,
 # the pair this tool exists to separate; collapsing them here would reproduce
 # the tidy-zero defect inside the thing built to detect it.
 
+# 🛑 A MISSING FEATURE DIRECTORY IS "COULD NOT CHECK", NOT "THE PHASE DID NOT WRITE IT".
+# Measured in a real run: `tasks` wrote 65 tasks correctly, verify_phase was handed a
+# feature dir that did not resolve, and the run reported `✗ tasks — tasks.md was not
+# created` and recorded the phase `failed` — while the phase's own STATUS line in the
+# same output said `ok`. Two adjacent contradicting lines, and the verdict won.
+# Mutation: drop the `-d "$fdir"` guard and this flips back to `failed`.
+res=$(verify_phase tasks "$WORK/no-such-feature-dir" tasks.md)
+assert_eq "$(cut -f1 <<<"$res")" "unevaluated" \
+  "a missing feature directory is unevaluated, NOT a failed phase"
+assert_contains "$(cut -f2 <<<"$res")" "feature directory does not exist" \
+  "and the message names the real cause"
+assert_contains "$(cut -f2 <<<"$res")" "no-such-feature-dir" \
+  "and names the directory it looked in, so the cause is legible"
+
+# The inverse must still hold, or the guard above becomes a way to hide a phase that
+# genuinely wrote nothing: an EXISTING directory missing its artifact is still failed.
+res=$(verify_phase tasks "$FD" tasks-definitely-absent.md)
+assert_eq "$(cut -f1 <<<"$res")" "failed" \
+  "an existing directory missing its artifact is still failed"
+
 { printf '# Tasks\n'; for i in $(seq 1 40); do printf 'padding line %s to clear the byte floor\n' "$i"; done; } > "$FD/tasks.md"
 status=$(verify_phase tasks "$FD" tasks.md | cut -f1)
 assert_eq "$status" "failed" "a tasks.md with no checkboxes fails"
@@ -669,6 +689,35 @@ for a in "$@"; do [ "$a" = "--help" ] && exit 0; done
 echo '{}'
 FAKEEOF
 chmod +x "$FAKE"/claude-*
+
+# 🛑 A RELATIVE --feature-dir RESOLVES AGAINST $REPO, NOT THE CALLER'S CWD.
+# `discover_feature_dir` has always absolutised against $REPO; an explicit flag was
+# taken verbatim, so the two paths into one variable meant different things and a
+# relative value silently depended on where the caller stood. Every other test in
+# this file passes an ABSOLUTE --feature-dir, which is exactly why the bug survived
+# the suite — so this one is deliberately run from a SUBDIRECTORY of the repo.
+# Mutation: remove the normalisation in spec-run and the reported feature path
+# becomes <subdir>/specs/001-t, which is where the real run went looking.
+mkdir -p "$BS/services/somewhere-deep"
+# ⚠️ Compare against the CANONICAL repo path, not $BS. spec-run does
+# `REPO=$(cd -- "$REPO" && pwd)`, so a $TMPDIR ending in `/` (which macOS's does)
+# leaves $BS carrying a double slash that $REPO does not — and the assertion fails
+# against a CORRECT fix. Caught by this test on its first run.
+BS_REAL=$(cd "$BS" && pwd)
+out=$(cd "$BS/services/somewhere-deep" && "$SPEC_RUN" --repo "$BS" \
+        --feature-dir specs/001-t --only plan --dry-run 2>&1)
+assert_contains "$out" "feature $BS_REAL/specs/001-t" \
+  "a relative --feature-dir resolves against \$REPO, not the caller's cwd"
+# ⚠️ This second one does NOT catch the mutation on its own — with the normalisation
+# removed the runner echoes the raw relative value (`feature specs/001-t`), so the
+# subdirectory never appears in the output either way. Kept because it pins that the
+# caller's cwd is never spliced in, but the assertion ABOVE is the load-bearing one.
+assert_not_contains "$out" "somewhere-deep/specs/001-t" \
+  "and never against the subdirectory the caller happened to be in"
+
+# An absolute --feature-dir is unchanged by the normalisation.
+out=$("$SPEC_RUN" --repo "$BS" --feature-dir "$BS_REAL/specs/001-t" --only plan --dry-run 2>&1)
+assert_contains "$out" "feature $BS_REAL/specs/001-t" "an absolute --feature-dir is passed through as-is"
 
 argv=$("$SPEC_RUN" --repo "$BS" --feature-dir "$BS/specs/001-t" \
         --only plan --claude-bin claude-wrapper-fixture --dry-run 2>&1)
@@ -1173,6 +1222,16 @@ if command -v caffeinate >/dev/null 2>&1; then
     "nor one that quietly does nothing on battery"
 else
   t_pass "power assertion skipped — caffeinate is not on this platform"
+  # 🛑 The three assertions above CANNOT run here, so the suite's total is
+  # platform-dependent — and the README count is a single number, so it could not
+  # be true in both places at once. Measured: 3 assertions on macOS vs this 1 pass
+  # on Linux, a gap of 2, which left CI red on main from 2026-08-24 (442 against a
+  # README advertising 444) while the same tree was green locally.
+  #
+  # Recording the shortfall rather than padding with fake passes: a t_pass per
+  # unrunnable assertion would make the number agree by asserting nothing, which is
+  # the opposite of what this count exists to detect.
+  PLATFORM_GATED_ASSERTIONS=$((${PLATFORM_GATED_ASSERTIONS:-0} + 2))
 fi
 # The runner must still be the named executable, with caffeinate in front of it
 # rather than in place of it.
@@ -2474,9 +2533,18 @@ printf '\n%s passed, %s failed' "$pass" "$fail"
 [ "$skipped" -gt 0 ] && printf ', %s skipped' "$skipped"
 # The README advertises a number. If it is wrong, one of the two is stale — and
 # a count in a README is the single easiest claim to leave behind.
-if [ "${DOC_ASSERTION_COUNT:-0}" -gt 0 ] && [ $((pass + fail)) -ne "$DOC_ASSERTION_COUNT" ]; then
+# Assertions that CANNOT run on this platform are added back, so the advertised number
+# is the number of assertions the suite HAS rather than the number this host could
+# execute. Without this the count is unsatisfiable in two places at once: macOS runs 3
+# caffeinate assertions where Linux runs 1, so a README true locally is false in CI —
+# which is exactly how main sat red from 2026-08-24 while the same tree passed locally.
+_tally=$((pass + fail + ${PLATFORM_GATED_ASSERTIONS:-0}))
+if [ "${PLATFORM_GATED_ASSERTIONS:-0}" -gt 0 ]; then
+  printf ', %s not applicable on this platform' "$PLATFORM_GATED_ASSERTIONS"
+fi
+if [ "${DOC_ASSERTION_COUNT:-0}" -gt 0 ] && [ "$_tally" -ne "$DOC_ASSERTION_COUNT" ]; then
   printf '\n  \033[31m✗\033[0m the README advertises %s assertions; this run had %s.\n' \
-    "$DOC_ASSERTION_COUNT" "$((pass + fail))"
+    "$DOC_ASSERTION_COUNT" "$_tally"
   printf '    Update the count in README.md, or work out which assertions stopped running.\n\n'
   exit 1
 fi

@@ -90,6 +90,24 @@ verify_phase() { # verify_phase <phase_id> <feature_dir> <artifact_rel|""> [chun
     printf 'unevaluated\tphase declares no artifact; nothing was checked\n'
     return 0
   fi
+
+  # 🛑 "I looked in the wrong place" is NOT "the phase did not write it", and
+  # reporting the second for the first accuses a phase that succeeded. A missing
+  # feature directory means this check could not run at all, so it reports
+  # `unevaluated` — the same verdict used when a phase declares no artifact —
+  # and names the directory so the cause is legible instead of being attributed
+  # to the phase's output.
+  #
+  # This is the general form of the bug the --feature-dir normalisation in
+  # spec-run fixes: that removed one way to arrive here, this makes ANY way of
+  # arriving here honest. A check that cannot distinguish those two states will
+  # eventually accuse a working phase, whatever the caller passed.
+  if [ ! -d "$fdir" ]; then
+    printf 'unevaluated\tfeature directory does not exist, so %s could not be checked: %s\n' \
+      "$rel" "$fdir"
+    return 0
+  fi
+
   path="$fdir/$rel"
 
   if [ ! -f "$path" ]; then
