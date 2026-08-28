@@ -162,6 +162,25 @@ if [ -z "$REPO" ]; then
 fi
 REPO=$(cd -- "$REPO" && pwd)
 
+# 🛑 An explicit --feature-dir is resolved against $REPO, exactly as a discovered
+# one is (see discover_feature_dir). Both write the same variable, so both must
+# mean the same thing — before this, discovery absolutised and the flag was taken
+# verbatim, which made a relative --feature-dir silently depend on the CALLER's
+# cwd. Measured: invoked with `--feature-dir specs/292-x` from a subdirectory of
+# the repo, `tasks` wrote 65 tasks correctly and verify_phase looked for
+# <subdir>/specs/292-x/tasks.md, reported "tasks.md was not created", recorded
+# the phase `failed`, and halted the run — while the phase's own STATUS line in
+# the same output said `ok`. The state dir was never created either.
+#
+# Normalised HERE rather than at parse time because $REPO is not known then: it
+# may come from --repo or from `git rev-parse`, and the latter is resolved above.
+if [ -n "$FEATURE_DIR" ]; then
+  case "$FEATURE_DIR" in
+    /*) : ;;
+     *) FEATURE_DIR="$REPO/$FEATURE_DIR" ;;
+  esac
+fi
+
 [ -n "$CLAUDE_BIN" ] || CLAUDE_BIN=$(jqd "$CONFIG" '.defaults.claude_bin' claude)
 export SPEC_RUN_CLAUDE_BIN="$CLAUDE_BIN"
 

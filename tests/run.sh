@@ -398,6 +398,26 @@ assert_eq "$status" "unevaluated" "a phase with no artifact reports unevaluated,
 # the pair this tool exists to separate; collapsing them here would reproduce
 # the tidy-zero defect inside the thing built to detect it.
 
+# 🛑 A MISSING FEATURE DIRECTORY IS "COULD NOT CHECK", NOT "THE PHASE DID NOT WRITE IT".
+# Measured in a real run: `tasks` wrote 65 tasks correctly, verify_phase was handed a
+# feature dir that did not resolve, and the run reported `✗ tasks — tasks.md was not
+# created` and recorded the phase `failed` — while the phase's own STATUS line in the
+# same output said `ok`. Two adjacent contradicting lines, and the verdict won.
+# Mutation: drop the `-d "$fdir"` guard and this flips back to `failed`.
+res=$(verify_phase tasks "$WORK/no-such-feature-dir" tasks.md)
+assert_eq "$(cut -f1 <<<"$res")" "unevaluated" \
+  "a missing feature directory is unevaluated, NOT a failed phase"
+assert_contains "$(cut -f2 <<<"$res")" "feature directory does not exist" \
+  "and the message names the real cause"
+assert_contains "$(cut -f2 <<<"$res")" "no-such-feature-dir" \
+  "and names the directory it looked in, so the cause is legible"
+
+# The inverse must still hold, or the guard above becomes a way to hide a phase that
+# genuinely wrote nothing: an EXISTING directory missing its artifact is still failed.
+res=$(verify_phase tasks "$FD" tasks-definitely-absent.md)
+assert_eq "$(cut -f1 <<<"$res")" "failed" \
+  "an existing directory missing its artifact is still failed"
+
 { printf '# Tasks\n'; for i in $(seq 1 40); do printf 'padding line %s to clear the byte floor\n' "$i"; done; } > "$FD/tasks.md"
 status=$(verify_phase tasks "$FD" tasks.md | cut -f1)
 assert_eq "$status" "failed" "a tasks.md with no checkboxes fails"
@@ -669,6 +689,35 @@ for a in "$@"; do [ "$a" = "--help" ] && exit 0; done
 echo '{}'
 FAKEEOF
 chmod +x "$FAKE"/claude-*
+
+# 🛑 A RELATIVE --feature-dir RESOLVES AGAINST $REPO, NOT THE CALLER'S CWD.
+# `discover_feature_dir` has always absolutised against $REPO; an explicit flag was
+# taken verbatim, so the two paths into one variable meant different things and a
+# relative value silently depended on where the caller stood. Every other test in
+# this file passes an ABSOLUTE --feature-dir, which is exactly why the bug survived
+# the suite — so this one is deliberately run from a SUBDIRECTORY of the repo.
+# Mutation: remove the normalisation in spec-run and the reported feature path
+# becomes <subdir>/specs/001-t, which is where the real run went looking.
+mkdir -p "$BS/services/somewhere-deep"
+# ⚠️ Compare against the CANONICAL repo path, not $BS. spec-run does
+# `REPO=$(cd -- "$REPO" && pwd)`, so a $TMPDIR ending in `/` (which macOS's does)
+# leaves $BS carrying a double slash that $REPO does not — and the assertion fails
+# against a CORRECT fix. Caught by this test on its first run.
+BS_REAL=$(cd "$BS" && pwd)
+out=$(cd "$BS/services/somewhere-deep" && "$SPEC_RUN" --repo "$BS" \
+        --feature-dir specs/001-t --only plan --dry-run 2>&1)
+assert_contains "$out" "feature $BS_REAL/specs/001-t" \
+  "a relative --feature-dir resolves against \$REPO, not the caller's cwd"
+# ⚠️ This second one does NOT catch the mutation on its own — with the normalisation
+# removed the runner echoes the raw relative value (`feature specs/001-t`), so the
+# subdirectory never appears in the output either way. Kept because it pins that the
+# caller's cwd is never spliced in, but the assertion ABOVE is the load-bearing one.
+assert_not_contains "$out" "somewhere-deep/specs/001-t" \
+  "and never against the subdirectory the caller happened to be in"
+
+# An absolute --feature-dir is unchanged by the normalisation.
+out=$("$SPEC_RUN" --repo "$BS" --feature-dir "$BS_REAL/specs/001-t" --only plan --dry-run 2>&1)
+assert_contains "$out" "feature $BS_REAL/specs/001-t" "an absolute --feature-dir is passed through as-is"
 
 argv=$("$SPEC_RUN" --repo "$BS" --feature-dir "$BS/specs/001-t" \
         --only plan --claude-bin claude-wrapper-fixture --dry-run 2>&1)
