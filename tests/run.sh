@@ -1222,6 +1222,16 @@ if command -v caffeinate >/dev/null 2>&1; then
     "nor one that quietly does nothing on battery"
 else
   t_pass "power assertion skipped — caffeinate is not on this platform"
+  # 🛑 The three assertions above CANNOT run here, so the suite's total is
+  # platform-dependent — and the README count is a single number, so it could not
+  # be true in both places at once. Measured: 3 assertions on macOS vs this 1 pass
+  # on Linux, a gap of 2, which left CI red on main from 2026-08-24 (442 against a
+  # README advertising 444) while the same tree was green locally.
+  #
+  # Recording the shortfall rather than padding with fake passes: a t_pass per
+  # unrunnable assertion would make the number agree by asserting nothing, which is
+  # the opposite of what this count exists to detect.
+  PLATFORM_GATED_ASSERTIONS=$((${PLATFORM_GATED_ASSERTIONS:-0} + 2))
 fi
 # The runner must still be the named executable, with caffeinate in front of it
 # rather than in place of it.
@@ -2523,9 +2533,18 @@ printf '\n%s passed, %s failed' "$pass" "$fail"
 [ "$skipped" -gt 0 ] && printf ', %s skipped' "$skipped"
 # The README advertises a number. If it is wrong, one of the two is stale — and
 # a count in a README is the single easiest claim to leave behind.
-if [ "${DOC_ASSERTION_COUNT:-0}" -gt 0 ] && [ $((pass + fail)) -ne "$DOC_ASSERTION_COUNT" ]; then
+# Assertions that CANNOT run on this platform are added back, so the advertised number
+# is the number of assertions the suite HAS rather than the number this host could
+# execute. Without this the count is unsatisfiable in two places at once: macOS runs 3
+# caffeinate assertions where Linux runs 1, so a README true locally is false in CI —
+# which is exactly how main sat red from 2026-08-24 while the same tree passed locally.
+_tally=$((pass + fail + ${PLATFORM_GATED_ASSERTIONS:-0}))
+if [ "${PLATFORM_GATED_ASSERTIONS:-0}" -gt 0 ]; then
+  printf ', %s not applicable on this platform' "$PLATFORM_GATED_ASSERTIONS"
+fi
+if [ "${DOC_ASSERTION_COUNT:-0}" -gt 0 ] && [ "$_tally" -ne "$DOC_ASSERTION_COUNT" ]; then
   printf '\n  \033[31m✗\033[0m the README advertises %s assertions; this run had %s.\n' \
-    "$DOC_ASSERTION_COUNT" "$((pass + fail))"
+    "$DOC_ASSERTION_COUNT" "$_tally"
   printf '    Update the count in README.md, or work out which assertions stopped running.\n\n'
   exit 1
 fi
