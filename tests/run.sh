@@ -42,7 +42,15 @@ pass=0; fail=0; skipped=0
 # 0 failed" and exited 0. Green, and lying about how much it had checked.
 t_note() { printf '  %s\n' "$1"; }
 t_pass() { pass=$((pass+1)); printf '  \033[32m✓\033[0m %s\n' "$1"; }
-t_fail() { fail=$((fail+1)); printf '  \033[31m✗\033[0m %s\n' "$1"; [ -n "${2:-}" ] && printf '      %s\n' "$2"; }
+# ⚠️ `return 0` is load-bearing. Without it t_fail's status is that of its last
+# command — the `[ -n "${2:-}" ]` test — so a one-argument t_fail returned 1, and
+# the `cond && t_fail "X" || t_pass "X"` form used below then ran BOTH branches:
+# one assertion printed a ✗ AND a ✓ and was counted twice. Measured: a genuinely
+# failing grandchild-reap check reported `451 passed, 1 failed` with a tally of
+# 452 against a README advertising 451, so the count check blamed the README for
+# a defect in the harness. t_pass has never had this problem (printf returns 0),
+# which is why the far more common `&& t_pass || t_fail` form was always safe.
+t_fail() { fail=$((fail+1)); printf '  \033[31m✗\033[0m %s\n' "$1"; [ -n "${2:-}" ] && printf '      %s\n' "$2"; return 0; }
 t_skip() { skipped=$((skipped+1)); printf '  \033[33m-\033[0m %s (skipped: %s)\n' "$1" "$2"; }
 
 # A floor on the tally, because the failure above is invisible by construction:
@@ -214,6 +222,22 @@ late_src=${late_src% }
 assert_eq "${late_src:-none}" "none" \
   "every library is sourced before the first assertion"
 [ -n "$late_src" ] && printf '      sourced late at line(s): %s\n' "$late_src"
+
+# 🛑 The harness checks itself, because every number it reports depends on this.
+# A one-argument t_fail must return 0, or the `cond && t_fail "X" || t_pass "X"`
+# form runs BOTH branches (see the note on t_fail) and one assertion prints a ✗
+# AND a ✓ while being counted twice. Measured: `451 passed, 1 failed` with a tally
+# of 452 against a README advertising 451, so the count check blamed the README
+# for a defect in the harness — the count is only as trustworthy as this.
+#
+# The REAL t_fail is called on purpose rather than a copy of it: a copy would go
+# stale exactly when this matters. Its output is discarded and the counter it
+# bumped is restored, so the self-check costs one assertion and no failure.
+_f_before=$fail
+t_fail "harness self-check — not a real failure" >/dev/null 2>&1; _t_fail_rc=$?
+fail=$_f_before
+assert_eq "$_t_fail_rc" "0" \
+  "t_fail returns 0, so a failing 'cond && t_fail || t_pass' counts once, not twice"
 
 # And no assertion may run AFTER the tally is printed. Nine of them did on the
 # first attempt at this section: the summary reported "339 passed, 0 failed"
@@ -398,25 +422,33 @@ assert_eq "$status" "unevaluated" "a phase with no artifact reports unevaluated,
 # the pair this tool exists to separate; collapsing them here would reproduce
 # the tidy-zero defect inside the thing built to detect it.
 
-# 🛑 A MISSING FEATURE DIRECTORY IS "COULD NOT CHECK", NOT "THE PHASE DID NOT WRITE IT".
+# 🛑 A MISSING FEATURE DIRECTORY NAMES THE DIRECTORY — AND STILL STOPS THE RUN.
 # Measured in a real run: `tasks` wrote 65 tasks correctly, verify_phase was handed a
 # feature dir that did not resolve, and the run reported `✗ tasks — tasks.md was not
-# created` and recorded the phase `failed` — while the phase's own STATUS line in the
-# same output said `ok`. Two adjacent contradicting lines, and the verdict won.
-# Mutation: drop the `-d "$fdir"` guard and this flips back to `failed`.
+# created` — while the phase's own STATUS line in the same output said `ok`. Two
+# adjacent contradicting lines. So the MESSAGE must not accuse the phase.
+#
+# ⚠️ The VERDICT is a different question, and softening it to `unevaluated` (which
+# only warns) was measured to be far worse than the misleading message: see the
+# pipeline-halt test below. The message is honest; the stop is unconditional.
 res=$(verify_phase tasks "$WORK/no-such-feature-dir" tasks.md)
-assert_eq "$(cut -f1 <<<"$res")" "unevaluated" \
-  "a missing feature directory is unevaluated, NOT a failed phase"
+assert_eq "$(cut -f1 <<<"$res")" "failed" \
+  "a missing feature directory still stops the run"
+assert_not_contains "$(cut -f2 <<<"$res")" "tasks.md was not created" \
+  "but it does NOT accuse the phase of not writing its artifact"
 assert_contains "$(cut -f2 <<<"$res")" "feature directory does not exist" \
   "and the message names the real cause"
 assert_contains "$(cut -f2 <<<"$res")" "no-such-feature-dir" \
   "and names the directory it looked in, so the cause is legible"
 
-# The inverse must still hold, or the guard above becomes a way to hide a phase that
-# genuinely wrote nothing: an EXISTING directory missing its artifact is still failed.
+# The ordinary case must keep its own wording, or the message above becomes a way to
+# describe every missing artifact: an EXISTING directory missing its artifact is
+# still failed, and is still reported as the phase not having written it.
 res=$(verify_phase tasks "$FD" tasks-definitely-absent.md)
 assert_eq "$(cut -f1 <<<"$res")" "failed" \
   "an existing directory missing its artifact is still failed"
+assert_contains "$(cut -f2 <<<"$res")" "was not created" \
+  "and that one IS the phase's own failure to write it"
 
 { printf '# Tasks\n'; for i in $(seq 1 40); do printf 'padding line %s to clear the byte floor\n' "$i"; done; } > "$FD/tasks.md"
 status=$(verify_phase tasks "$FD" tasks.md | cut -f1)
@@ -718,6 +750,38 @@ assert_not_contains "$out" "somewhere-deep/specs/001-t" \
 # An absolute --feature-dir is unchanged by the normalisation.
 out=$("$SPEC_RUN" --repo "$BS" --feature-dir "$BS_REAL/specs/001-t" --only plan --dry-run 2>&1)
 assert_contains "$out" "feature $BS_REAL/specs/001-t" "an absolute --feature-dir is passed through as-is"
+
+# 🛑 A SPECIFY THAT WRITES NOTHING STOPS THE PIPELINE — THE WHOLE PIPELINE.
+# This is the ONLY test that runs a NEW feature end to end against a runner that
+# exits 0 and writes nothing, and it exists because nothing else covers the state
+# every new feature starts in: before specify there is no feature directory, so
+# spec-run passes `/nonexistent` and verify_phase's missing-directory branch is
+# reached on the FIRST phase of every run. Every other test here supplies a
+# feature dir that exists, which is exactly why a regression here went unseen.
+#
+# Measured with verify.sh reporting `unevaluated` (a warning, not a stop) for a
+# missing directory: specify, plan, tasks AND implement all ran to completion
+# against a directory that never existed — implement being a 1200-turn phase.
+# The suite was fully green while the pipeline had no stop at all.
+#
+# Mutation: change that branch's verdict from `failed` to `unevaluated` and this
+# fails on the `→ plan` assertion — the run carries on past a dead specify.
+NOTHING="$WORK/writes-nothing"; mkbare "$NOTHING" main
+"$SPEC_BOOTSTRAP" "$NOTHING" >/dev/null 2>&1
+git -C "$NOTHING" add -A >/dev/null 2>&1
+git -C "$NOTHING" commit -qm bootstrap >/dev/null 2>&1
+# The suite's default stub `claude` is already this runner: exits 0, returns a
+# well-formed and fully-measured envelope, and creates no files. No --claude-bin
+# here on purpose — the point is the DEFAULT path.
+out=$("$SPEC_RUN" --repo "$NOTHING" "a feature whose specify writes nothing" \
+        --gate none 2>&1); rc=$?
+assert_eq "$rc" "1" "a specify that writes nothing exits 1 rather than continuing"
+assert_contains "$out" "feature directory does not exist" \
+  "and says the directory is missing, not that the phase failed to write spec.md"
+assert_not_contains "$out" "→ plan" \
+  "and the pipeline never reaches plan"
+assert_not_contains "$out" "→ implement" \
+  "and above all never reaches implement, which is a 1200-turn phase"
 
 argv=$("$SPEC_RUN" --repo "$BS" --feature-dir "$BS/specs/001-t" \
         --only plan --claude-bin claude-wrapper-fixture --dry-run 2>&1)

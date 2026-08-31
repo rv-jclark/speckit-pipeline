@@ -6,3 +6,6 @@ specs/*/.pipeline/
 
 # run logs, for tailing while a pipeline works
 .runs/
+
+# local worktrees, for running phases side by side
+.worktrees/

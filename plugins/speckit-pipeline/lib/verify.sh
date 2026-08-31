@@ -91,19 +91,27 @@ verify_phase() { # verify_phase <phase_id> <feature_dir> <artifact_rel|""> [chun
     return 0
   fi
 
-  # 🛑 "I looked in the wrong place" is NOT "the phase did not write it", and
-  # reporting the second for the first accuses a phase that succeeded. A missing
-  # feature directory means this check could not run at all, so it reports
-  # `unevaluated` — the same verdict used when a phase declares no artifact —
-  # and names the directory so the cause is legible instead of being attributed
-  # to the phase's output.
+  # 🛑 "I looked in the wrong place" is NOT "the phase did not write it", so this
+  # does not report `%s was not created` and accuse a phase that may have
+  # succeeded — it names the directory, which is the fact the reader needs.
   #
-  # This is the general form of the bug the --feature-dir normalisation in
-  # spec-run fixes: that removed one way to arrive here, this makes ANY way of
-  # arriving here honest. A check that cannot distinguish those two states will
-  # eventually accuse a working phase, whatever the caller passed.
+  # But the VERDICT here must still stop the pipeline, and this is the one thing
+  # that cannot be relaxed: before specify runs there IS no feature directory —
+  # /speckit-specify is what creates it — so spec-run passes `/nonexistent` as
+  # the sentinel for "not discovered yet" (see the verify_phase call site). A
+  # specify phase that exits 0, is fully measured and writes NOTHING therefore
+  # lands here on every new feature, and it is a total failure of the phase.
+  #
+  # Measured, with a runner that exits 0 and writes nothing: reporting
+  # `unevaluated` here — which only warns — let specify, plan, tasks AND
+  # implement all run to completion against a directory that never existed,
+  # implement being a 1200-turn phase. `failed` halts, and the message above
+  # still tells the reader it was a path, not the phase's work.
+  #
+  # So: honest MESSAGE, unchanged verdict. A missing directory means the
+  # artifact is not there, whoever is at fault, and that is a stop either way.
   if [ ! -d "$fdir" ]; then
-    printf 'unevaluated\tfeature directory does not exist, so %s could not be checked: %s\n' \
+    printf 'failed\tfeature directory does not exist, so %s could not be checked: %s\n' \
       "$rel" "$fdir"
     return 0
   fi
