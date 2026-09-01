@@ -50,6 +50,25 @@ So do these two things, in this order, every time:
    leaves the user with *less* visibility, not more. And per Monitor's own rule,
    the filter must match failure states too; one that greps only for success is
    silent through a crash, and silence is indistinguishable from progress.
+3. 🛑 **Reap the watcher when the run ends — on EVERY exit path, including failure
+   and abandonment.** The `tail -f` above outlives the Monitor that started it, and
+   nothing else reaps it:
+
+   ```
+   pkill -f "tail -f -n +1 <logfile>"
+   ```
+
+   Match on the **full logfile path**, never a bare `pkill tail` — a concurrent run
+   is following its own log and a broad pattern kills that one too.
+
+   ⚠️ Measured 2026-09-01 on the author's machine: **17 orphaned watchers**, each a
+   `tail` plus a `grep`, the oldest following a log last written **five days**
+   earlier, one already reparented to `ppid=1`. They cost little individually and
+   accumulate silently — the host they were found on had reached load average 338
+   with swap 97% consumed, and these were part of it. The leak is *here*, in the
+   thing that spawns them: `timeout_ms: 3000000` bounds the Monitor, not the pipeline
+   it launched, so a watcher survives its Monitor by days. Do not rely on a periodic
+   cleanup elsewhere to cover this — the spawner reaps what it spawns.
 
 Pass `--stream` so there is per-step output to filter in the first place.
 

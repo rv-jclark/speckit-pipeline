@@ -1408,6 +1408,25 @@ assert_contains "$(cat "$SPEC_RUN")" "trap _on_signal INT TERM" \
 assert_contains "$(cat "$SPEC_RUN")" "kill_descendants \$\$" \
   "and takes its phase down with it"
 
+# The Monitor watcher is spawned by the AGENT following commands/*.md, not by
+# spec-run, so no trap can reach it — the instruction to reap it is the only
+# mechanism available, which makes the instruction itself load-bearing and worth
+# asserting. Measured 2026-09-01: 17 orphaned tail+grep pairs, the oldest following
+# a log five days stale, on a host that had reached load average 338 with swap 97%.
+# Whitespace is normalised before matching: these phrases are hard-wrapped in the
+# markdown, and a raw substring search reports a phrase that IS present as ABSENT,
+# which invites the next reader to paste it in again rather than fix the match.
+for _cmd_doc in "$PKG/commands/spec-run.md" "$PKG/commands/spec-roadmap.md"; do
+  _doc_flat="$(tr -s '[:space:]' ' ' < "$_cmd_doc")"
+  _doc_name="$(basename "$_cmd_doc")"
+  assert_contains "$_doc_flat" 'pkill -f "tail -f -n +1 <logfile>"' \
+    "$_doc_name tells the agent how to reap its watcher"
+  assert_contains "$_doc_flat" "Reap the watcher when the run ends" \
+    "$_doc_name names reaping as a required step"
+  assert_contains "$_doc_flat" "full logfile path" \
+    "$_doc_name warns against a broad pkill that hits a concurrent run's watcher"
+done
+
 argv=$("$SPEC_RUN" --repo "$BS" --feature-dir "$BS/specs/001-t" --only tasks --dry-run 2>&1)
 assert_contains "$argv" "--model sonnet" "tasks is invoked on sonnet"
 

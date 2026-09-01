@@ -50,6 +50,19 @@ So do these two things, in this order, every time:
    leaves the user with *less* visibility, not more. And per Monitor's own rule,
    the filter must match failure states too; one that greps only for success is
    silent through a crash, and silence is indistinguishable from progress.
+3. 🛑 **Reap the watcher when the run ends — on EVERY exit path, including failure
+   and abandonment**, matching on the full logfile path so a concurrent roadmap's
+   watcher is left alone:
+
+   ```
+   pkill -f "tail -f -n +1 <logfile>"
+   ```
+
+   A roadmap runs many entries and so spawns many watchers, which makes this worse
+   here than in `spec-run`: measured 2026-09-01, **17** orphaned `tail`+`grep` pairs
+   were following logs from finished runs, the oldest **five days** stale. See
+   `spec-run.md` for the full measurement — `timeout_ms` bounds the Monitor, not the
+   pipeline it launched, so the watcher outlives it by days.
 
 Pass `--stream` so there is per-step output to filter in the first place.
 
