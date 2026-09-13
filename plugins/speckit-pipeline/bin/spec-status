@@ -84,6 +84,8 @@ jq -r '.phases | to_entries[] |
   done
 printf '  %-10s %-8s %-7s %-12s %10s\n' TOTAL "" "" "" "\$$(state_total_cost "$STATE")"
 
+print_token_profile "$STATE"
+
 # What to do next, derived from the recorded statuses rather than announced.
 say ""
 blocked=$(jq -r '[.phases | to_entries[] | select(.value.status=="needs_input" or .value.status=="failed")]

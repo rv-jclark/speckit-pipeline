@@ -74,6 +74,46 @@ _template_placeholders() { # count UNFILLED template placeholders
   printf '%s\n' "${n:-0}"
 }
 
+# Unresolved blocking findings in review.md: an UNCHECKED box whose text opens
+# with BLOCKER or MAJOR. Same shape as _tasks_blocked and for the same reason —
+# the marker must be explicit and at the front, or the count becomes somewhere to
+# hide work. A TICKED box is a finding someone has dealt with, and a NOTE has no
+# box at all, so neither can gate.
+_review_blockers() { # <review.md path>
+  local c
+  [ -f "$1" ] || { printf '0\n'; return 0; }
+  c=$(grep -cE '^[[:space:]]*[-*][[:space:]]*\[[[:space:]]\][[:space:]]*(🛑[[:space:]]*)?(BLOCKER|MAJOR)' \
+      "$1" 2>/dev/null) || c=0
+  printf '%s\n' "${c:-0}"
+}
+
+# Citations of the form path/to/file.ext:123 — the evidence that this phase read
+# code rather than paraphrasing the spec back at itself.
+#
+# This is the only anti-rubber-stamp check in the pipeline, and it is here
+# because review is the one phase whose output is entirely PROSE. Every other
+# artifact has structure that a phase which did nothing cannot fake: a tasks.md
+# needs checkboxes, a plan.md fails on its own template markers. A review can be
+# fluent, confident, well-organised and completely unfounded, and nothing about
+# its shape would differ. A file:line that resolves to a real file is the
+# cheapest thing to require that a phase cannot produce without having looked.
+#
+# Deliberately not verified to EXIST on disk: a review may legitimately cite a
+# path the diff deleted, and resolving each one would make the verifier depend on
+# the working tree's current state rather than on the artifact. The requirement
+# is that specific locations were named, which is falsifiable here; whether each
+# is right is what the human reading the review is for.
+# Counts OCCURRENCES, not matching lines: `grep -c` counts lines even alongside
+# -o, so a findings block listing three locations on one `where:` line would
+# report 1. The number is quoted back to the reader as evidence of coverage, so
+# it should be the number of places named.
+_review_citations() { # <review.md path>
+  local c
+  [ -f "$1" ] || { printf '0\n'; return 0; }
+  c=$(grep -oE '[A-Za-z0-9_./-]+\.[A-Za-z0-9]+:[0-9]+' "$1" 2>/dev/null | grep -c . ) || c=0
+  printf '%s\n' "${c:-0}"
+}
+
 _task_counts() { # prints "<unchecked> <total>"
   local f="$1" unchecked total
   [ -f "$f" ] || { echo "0 0"; return; }
@@ -208,6 +248,30 @@ verify_phase() { # verify_phase <phase_id> <feature_dir> <artifact_rel|""> [chun
         return 0
       fi
       printf 'ok\tall %s task(s) checked off\n' "$total"
+      ;;
+
+    review)
+      # Citations FIRST, before the findings count, because the order encodes
+      # which failure is worse. A review with no locations has not established
+      # that it read anything, so its verdict — including a clean one — carries no
+      # weight, and "no blocking findings" from a phase that cannot show it looked
+      # is the single most expensive thing this file could wave through. Checking
+      # the findings first would let exactly that report as `ok`.
+      local cites blockers
+      cites=$(_review_citations "$path")
+      if [ "${cites:-0}" -eq 0 ]; then
+        printf 'failed\t%s cites no path:line anywhere (%s bytes) — nothing shows the code was read, so its verdict cannot be relied on\n' \
+          "$rel" "$bytes"
+        return 0
+      fi
+      blockers=$(_review_blockers "$path")
+      if [ "${blockers:-0}" -gt 0 ]; then
+        printf 'needs_input\t%s records %s unresolved BLOCKER/MAJOR finding(s) over %s citation(s) — read them before merging\n' \
+          "$rel" "$blockers" "$cites"
+        return 0
+      fi
+      printf 'ok\t%s written, %s bytes, %s citation(s), no blocking findings\n' \
+        "$rel" "$bytes" "$cites"
       ;;
 
     *)

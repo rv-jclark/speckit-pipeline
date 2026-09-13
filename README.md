@@ -5,9 +5,9 @@ Run the [spec-kit](https://github.com/github/spec-kit) phases as **separate
 ceiling per phase — instead of one long conversation that does all of them.
 
 ```
-specify  →  [clarify]  →  plan  →  tasks  →  [analyze]  →  [converge]  →  implement
- opus         opus         opus    sonnet      opus          opus          sonnet
- high         high         high    medium      high          high          medium
+specify  →  [clarify]  →  plan  →  tasks  →  [analyze]  →  [converge]  →  implement  →  review
+ opus         opus         opus    sonnet      opus          opus          sonnet       opus
+ high         high         high    medium      high          high          medium       xhigh
 ```
 Bracketed phases are opt-in (`--with clarify`). Every value there is data, not
 code — see [Phases](#phases).
@@ -248,13 +248,13 @@ spec-roadmap run
 # what has run, on what, for how much
 spec-run --list                  # the configured phases
 spec-status                      # inside Claude Code: /spec-status
-cat specs/*/.pipeline/cost.log  # per-attempt cost, turns, duration
+cat specs/*/.pipeline/cost.log  # per-attempt cost, turns, duration, token split
 ```
 
 Per-run overrides, when a phase deserves a different model than the config says:
 
 ```bash
-spec-run --model plan=sonnet --effort tasks=low --budget 25 "..."
+spec-run --model plan=sonnet --effort tasks=low --mcp implement=inherit --budget 25 "..."
 ```
 
 ### When it stops
@@ -285,8 +285,9 @@ specs/NNN-my-feature/
 ├── spec.md, plan.md, tasks.md      the artifacts, written by the skills
 ├── research.md, data-model.md …    plan's supporting output
 └── .pipeline/
-    ├── state.json                  per-phase status, model, cost, session ids
+    ├── state.json                  per-phase status, model, cost, tokens, session ids
     ├── cost.log                    one tab-separated line per attempt
+    ├── review.md                   review's findings, with path:line citations
     └── <phase>.result.json         that phase's stdout, stderr and exit code
 ```
 
@@ -580,7 +581,8 @@ done its part and the next move is a human's.
 | tasks | sonnet | medium | — / 120 turns | dropped | |
 | analyze | opus | high | — / 60 turns | dropped | `--with analyze` |
 | converge | opus | high | — / 120 turns | kept | `--with converge` |
-| implement | sonnet | medium | — / 1200 turns | kept | |
+| implement | sonnet | medium | — / 1200 turns | dropped | |
+| review | opus | xhigh | — / 200 turns | dropped | |
 
 **The ceilings are deliberately generous.** An unused turn costs nothing; a hit
 ceiling truncates the artifact. Measured on one real entry: `specify` used 57 of
@@ -644,11 +646,53 @@ unpopulated producers — and **0 of 57 tasks ticked**, so nothing in `tasks.md`
 pointed at the gap. Re-running implement over that state means re-deriving what is
 already done from the code; converge writes it down first.
 
-**`plan` keeps its MCP servers.** It is the phase that decides which frameworks,
-ORMs and APIs the implementation will use, and a project whose conventions live
-behind an MCP documentation server — a `dream-psychic-rag`, a private design
-system — will otherwise have that decision made from memory. Every other
-non-implementing phase still drops them.
+**`review` is the only phase that reads code in order to judge it**, and it runs
+last. Every other check here is *artifact-shaped* — present, over the byte floor,
+no template markers, boxes ticked — which catches a phase that died and cannot
+tell a feature that works from a feature that merely has all its files.
+
+The gap it is aimed at is structural, not incidental. A chunked implement runs
+each task group in its own process and hands off through `tasks.md` alone, so
+pass 4 knows only what pass 2 left on disk. Each pass is individually plausible;
+until this phase, nothing had read them side by side. So what survives to here
+are the **cross-pass** defects: two passes inventing the same helper twice, a
+data shape that drifted between producer and consumer, an interface one pass
+changed and another pass's caller still uses the old way, an obligation every
+task addressed partially and none addressed fully.
+
+It writes `review.md` and, when something blocks, **appends** a
+`## Phase N: Review remediation` section to `tasks.md`. It has the default write
+scope, so it cannot touch code — fixing is implement's job, which is why findings
+become tasks. That also makes the remediation loop the machinery that already
+exists: `spec-run --resume` after a blocking review re-enters the chunked
+implement loop on the new tasks, then reviews again.
+
+Two decisions in it are load-bearing:
+
+- **It is not optional**, unlike `analyze` and `converge`. An opt-in final check
+  runs on the days you remember to ask for it, which are not the days you need it.
+- **It gates `on_needs_input`, not `always`** — and the verdict comes off disk,
+  not from the phase's own report. `verify.sh` reads `review.md` for *unresolved*
+  BLOCKER/MAJOR findings (an unchecked box, marker at the front) and for at least
+  one `path:line` citation. No citations is a **failure**, checked before the
+  findings count and deliberately so: a review that cannot show it read anything
+  has a worthless verdict, and "no blocking findings" is the most expensive thing
+  to wave through. A clean, cited review passes straight to the merge stop rather
+  than stopping a human to show them a report saying nothing is wrong.
+
+**`plan` keeps its MCP servers, and it is now the only phase that does.** It
+decides which frameworks, ORMs and APIs the implementation will use, and a project
+whose conventions live behind an MCP documentation server — a `dream-psychic-rag`,
+a private design system — will otherwise have that decision made from memory.
+
+**`implement` dropped them**, reversing the earlier default. Every MCP tool
+definition sits in the *cached prefix of every turn*, so a phase that never calls
+one still pays for the whole list once per turn — and on a host with a large MCP
+surface that is the cheapest reduction available, because it removes a fixed cost
+paid T times rather than shortening the work. If your implement phase genuinely
+drives a server, put it back with `--mcp implement=inherit`. The flag exists so
+the two can be **measured** against each other rather than argued about: run one
+feature both ways and compare `cache_read` in `cost.log`.
 
 All of that is data, in
 [`plugins/speckit-pipeline/lib/phases.json`](plugins/speckit-pipeline/lib/phases.json).
@@ -656,12 +700,12 @@ Retuning which model runs which phase must never require editing the engine, so
 it doesn't. Per-run overrides:
 
 ```bash
-spec-run --model plan=sonnet --effort tasks=low --budget 25 "..."
+spec-run --model plan=sonnet --effort tasks=low --mcp implement=inherit --budget 25 "..."
 ```
 
 Phases that talk to nothing external run with `--strict-mcp-config` and an empty
-server list: a phase should not pay for a tool list it cannot use. Implementation
-keeps its MCP servers.
+server list: a phase should not pay for a tool list it cannot use, on every turn,
+for the length of the phase. `plan` is the exception.
 
 ## Permissions
 
@@ -753,6 +797,16 @@ after every phase the engine reads the artifact off disk and judges that:
 | `failed` | absent, or too thin to have been finished |
 | `unevaluated` | the phase declares no artifact. **Not a pass.** "The check passed" and "the check never ran" are different facts. |
 
+Every verdict above is **artifact-shaped**: present, over the byte floor, no
+template markers, boxes ticked. That is deliberate — those are the facts a dead
+phase cannot fake — but it means none of them can read code, and so none of them
+can tell a feature that works from a feature that merely has all its files. The
+`review` phase is where that judgement happens, and it is the one artifact whose
+verifier looks for *evidence of reading*: a `review.md` citing no `path:line`
+anywhere is recorded `failed`, checked before its findings count, because a
+review that cannot show it looked has a worthless verdict — and a worthless
+clean verdict is the most expensive thing this file could wave through.
+
 Then a **scope check**: whatever the phase touched is compared against its
 declared `write_scope`. A specify phase that writes source code is reported and
 the run stops. Paired with the deny list, a stray write cannot reach anything
@@ -791,8 +845,8 @@ session id (the history is kept in `state.json`, so earlier threads stay
 resumable).
 
 State is recorded at `specs/<feature>/.pipeline/state.json` — status, session id,
-model, effort, cost, turns and artifact hash per phase — with a tab-separated
-`cost.log` beside it. That file is the resume authority, because a present
+model, effort, cost, turns, the token split and artifact hash per phase — with a
+tab-separated `cost.log` beside it. That file is the resume authority, because a present
 `plan.md` cannot distinguish "planning finished" from "planning was killed
 halfway through writing it".
 
@@ -959,7 +1013,7 @@ reports success over a directory the rest of the pipeline cannot find.
 ## Tests
 
 ```bash
-./tests/run.sh          # shellcheck + 464 fixture assertions
+./tests/run.sh          # shellcheck + 505 fixture assertions
 ```
 
 **The suite is hermetic.** A stub runner shadows the real `claude` for the whole
@@ -1050,10 +1104,39 @@ Every run appends to `specs/<feature>/.pipeline/cost.log`, so "is opus on plan
 worth it" is measurable in your repo rather than arguable. Attempts that could
 not be measured are recorded `unmeasured`, never as `$0`.
 
+### Where the tokens went
+
+Cost and turns say *what* a phase spent; only the token split says *where*, and
+the split is nowhere near even. `cost.log` and `spec-status` both carry four
+counts per attempt — `cache_read`, `cache_write`, `input`, `output` — read
+straight out of the result envelope's `usage` block. Measured across 40 real
+phase envelopes on the author's machine:
+
+| | share of the bill |
+|---|---|
+| cache reads | 60–75% |
+| cache writes | ~20% (the 1-hour TTL doubles their rate) |
+| output — the only part that is the actual work | 10–15% |
+
+The figure to tune against is **read/turn**, which `spec-status` derives: cache
+reads divided by turns is the *average resident context*, because every turn
+re-reads everything before it. One real `plan` phase read 17,946,392 cached
+tokens over 96 turns, so it was carrying ~187k tokens on every one of them.
+
+That is the number a shorter pass or a smaller preamble actually moves — and why
+the two cheap levers here are structural rather than clever: chunk the long phase
+so the quadratic term is divided, and stop loading tool lists and documents the
+phase cannot use into a prefix it pays for once per turn.
+
+The counts are recorded **raw, never priced**. A dollar figure needs a per-model
+rate table, and a rate table in the engine goes stale silently the first time
+anything is repriced — at which point the log would be confidently wrong about
+the one thing it exists to measure.
+
 ## Tests, and what they cost to run
 
 ```bash
-./tests/run.sh          # shellcheck + 464 assertions, ~3.5 minutes
+./tests/run.sh          # shellcheck + 505 assertions, ~3.5 minutes
 ```
 
 Hermetic: a stub runner shadows the real `claude` for the whole run, so nothing

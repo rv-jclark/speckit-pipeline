@@ -167,13 +167,38 @@ assert_eq "$missing" "" "every phase declares id, skill, model, effort, gate, ar
 # is a phase nobody decided the model for. A completeness check with no
 # exhaustiveness assertion is decoration.
 ids=$(jq -r '[.phases[].id] | join(",")' "$CONFIG")
-assert_eq "$ids" "specify,clarify,plan,tasks,analyze,converge,implement" \
-  "the phase list is exactly the seven phases this suite covers"
+assert_eq "$ids" "specify,clarify,plan,tasks,analyze,converge,implement,review" \
+  "the phase list is exactly the eight phases this suite covers"
 
 assert_eq "$(jq -r '.phases[]|select(.id=="specify").model' "$CONFIG")" "opus" "specify runs on opus"
 assert_eq "$(jq -r '.phases[]|select(.id=="plan").model' "$CONFIG")" "opus" "plan runs on opus"
 assert_eq "$(jq -r '.phases[]|select(.id=="tasks").model' "$CONFIG")" "sonnet" "tasks runs on sonnet"
 assert_eq "$(jq -r '.phases[]|select(.id=="implement").model' "$CONFIG")" "sonnet" "implement runs on sonnet"
+assert_eq "$(jq -r '.phases[]|select(.id=="review").model' "$CONFIG")" "opus" "review runs on opus"
+
+# review is the last phase and it is NOT optional. Both halves matter and neither
+# is implied by the other: positioned before implement it would be reviewing code
+# that does not exist yet, and made optional it would run on the days somebody
+# remembers to ask rather than the days it is needed.
+assert_eq "$(jq -r '.phases[-1].id' "$CONFIG")" "review" \
+  "review runs LAST — there is nothing to review before implement has run"
+# 🛑 `select(…).optional // false` is WRONG here and looked right: when select
+# matches nothing, `empty // false` yields false, so the filter emits one `false`
+# per non-matching phase and the comparison is against an eight-line string. The
+# bracket form makes the subject singular before the default is applied.
+assert_eq "$(jq -r '[.phases[]|select(.id=="review")][0].optional // false' "$CONFIG")" "false" \
+  "and it is not optional, unlike analyze and converge"
+# Its verdict has to be able to stop the run, and it has to have an artifact to
+# form a verdict FROM: a phase declaring no artifact records `unevaluated`, which
+# this suite already asserts is not a pass. A final review that cannot fail is
+# decoration.
+assert_eq "$(jq -r '.phases[]|select(.id=="review").artifact' "$CONFIG")" "review.md" \
+  "review declares an artifact, so its outcome is checked rather than unevaluated"
+# The default write scope, NOT implement's null. review appends remediation tasks
+# and must never fix anything itself — a reviewer that can edit the code it is
+# judging has no independent verdict to give.
+assert_eq "$(jq -r '.phases[]|select(.id=="review") | has("write_scope")' "$CONFIG")" "false" \
+  "review inherits the default write scope, so it cannot touch code"
 
 # Every phase carries a ceiling. A phase with no budget and no turn cap is an
 # unbounded spend that looks identical to a bounded one until it runs away.
@@ -375,8 +400,8 @@ assert_eq "$diag_models_list" "$cfg_models" "the README diagram names the same m
 diag_efforts=$(grep -A3 '^specify  →' "$README" | sed -n '3p' | tr -s ' ' ' ' | sed 's/^ //;s/ $//')
 cfg_efforts=$(jq -r '[.phases[].effort] | join(" ")' "$CONFIG")
 assert_eq "$diag_efforts" "$cfg_efforts" "and the same effort levels, in order"
-[ "$diag_models" -eq 7 ] && t_pass "the diagram covers all seven phases" \
-  || t_fail "the diagram covers all seven phases" "found $diag_models model labels"
+[ "$diag_models" -eq 8 ] && t_pass "the diagram covers all eight phases" \
+  || t_fail "the diagram covers all eight phases" "found $diag_models model labels"
 # Position matters, not just membership: the diagram is the first thing a reader
 # sees, and a correct set in the wrong order is the more misleading failure.
 
@@ -511,6 +536,60 @@ assert_contains "$(cut -f2 <<<"$res")" "2 of 3" "the remainder is reported WITH 
 sed -i'' -e 's/- \[ \]/- [x]/g' "$FD/tasks.md"
 res=$(verify_phase implement "$FD" tasks.md)
 assert_eq "$(cut -f1 <<<"$res")" "ok" "implement with every task checked passes"
+
+# --- review: the one artifact whose verifier looks for evidence of READING
+# Every other verdict here is artifact-shaped — present, over the floor, no
+# template markers, boxes ticked — which is what a dead phase cannot fake. A
+# review is entirely prose, and prose can be fluent, confident, well-organised
+# and completely unfounded with nothing about its shape differing. So the check is
+# for specific locations, which a phase cannot produce without having looked.
+_pad40() { i=1; while [ "$i" -le 40 ]; do printf 'padding line %s\n' "$i"; i=$((i+1)); done; }
+
+{ printf '# Review\n\n## Verdict\n\nIt hangs together.\n'; _pad40
+  printf 'No findings. Read src/orders/repo.py:412 and src/api.py:88.\n'; } > "$FD/review.md"
+res=$(verify_phase review "$FD" review.md)
+assert_eq "$(cut -f1 <<<"$res")" "ok" "a cited review with no blocking findings passes"
+assert_contains "$(cut -f2 <<<"$res")" "citation" "and the citation count is reported"
+
+# The uncited case is a FAILURE, not a warning, and it is checked BEFORE the
+# findings count. That order is the assertion: a review that cannot show it read
+# anything has a worthless verdict, and a worthless CLEAN verdict is the most
+# expensive thing this file could wave through — it advances the run.
+{ printf '# Review\n\n## Verdict\n\nEverything looks great to me.\n'; _pad40
+  printf 'No findings.\n'; } > "$FD/review.md"
+res=$(verify_phase review "$FD" review.md)
+assert_eq "$(cut -f1 <<<"$res")" "failed" "an uncited review fails rather than passing clean"
+assert_contains "$(cut -f2 <<<"$res")" "nothing shows the code was read" \
+  "saying what is missing is the evidence, not the findings"
+
+# An unresolved blocking finding gates. Unchecked means unresolved, on the same
+# convention as tasks.md, and the marker must be at the FRONT — prose that merely
+# mentions the word must not gate, or the check becomes unusable in a review that
+# explains its own severity scale.
+{ printf '# Review\n\n## Findings\n\n'
+  printf -- '- [ ] 🛑 BLOCKER F1 — the producer writes a shape the consumer cannot read\n'
+  printf '      where:  src/queue/worker.ts:145\n'; _pad40; } > "$FD/review.md"
+res=$(verify_phase review "$FD" review.md)
+assert_eq "$(cut -f1 <<<"$res")" "needs_input" "an unresolved BLOCKER stops the run"
+assert_contains "$(cut -f2 <<<"$res")" "1 unresolved" "and is counted"
+
+{ printf '# Review\n\n## Findings\n\n'
+  printf -- '- [ ] MAJOR F2 — two passes each added their own retry helper\n'
+  printf '      where:  src/a.py:10, src/b.py:20\n'; _pad40; } > "$FD/review.md"
+assert_eq "$(verify_phase review "$FD" review.md | cut -f1)" "needs_input" \
+  "a MAJOR gates as well as a BLOCKER"
+
+{ printf '# Review\n\n## Findings\n\n'
+  printf -- '- [x] 🛑 BLOCKER F1 — already dealt with, src/x.py:9\n'
+  printf -- '- MINOR F3 — safe to ship, src/y.py:4\n'
+  printf -- '- NOTE F4 — BLOCKER severity is defined in the skill, for reference\n'; _pad40
+  } > "$FD/review.md"
+res=$(verify_phase review "$FD" review.md)
+assert_eq "$(cut -f1 <<<"$res")" "ok" \
+  "a TICKED blocker, an unboxed MINOR and a NOTE mentioning the word all fail to gate"
+# That trio is the point: each is a different way the count could have been
+# inflated into a gate with nothing to decide — which is the failure the
+# BLOCKED-task rule above already exists to undo.
 
 ( unset -f file_sha 2>/dev/null
   out=$(bash -c ". '$PKG/lib/verify.sh'" 2>&1); rc=$?
@@ -1066,7 +1145,7 @@ printf '\nrequired skills are derived, not assumed\n'
 # a 0.11.3-shaped project: phase skills, no git-* skills, no hooks needing them
 V11="$WORK/v11"; mkbare "$V11" main
 mkdir -p "$V11/.specify/scripts/bash" "$V11/.specify/templates" "$V11/specs"
-for sk in specify plan tasks implement analyze clarify converge; do mkdir -p "$V11/.claude/skills/speckit-$sk"; done
+for sk in specify plan tasks implement analyze clarify converge review; do mkdir -p "$V11/.claude/skills/speckit-$sk"; done
 printf 'installed:\n- agent-context\nhooks:\n  after_specify:\n  - extension: agent-context\n    command: speckit.agent-context.update\n' \
   > "$V11/.specify/extensions.yml"
 mkdir -p "$V11/.claude/skills/speckit-agent-context-update"
@@ -1127,8 +1206,11 @@ case "$prompt" in
   /speckit-plan*)      { printf '# Plan\n'; pad; } > "$dir/plan.md";;
   /speckit-tasks*)     { printf '# Tasks\n'; pad; printf -- '- [ ] T001 x\n'; } > "$dir/tasks.md";;
   /speckit-implement*) { printf '# Tasks\n'; pad; printf -- '- [x] T001 x\n'; } > "$dir/tasks.md";;
+  /speckit-review*)    { printf '# Review\n'; pad; printf 'No findings. Checked src/main.py:12.\n'; } > "$dir/review.md";;
 esac
-echo '{"total_cost_usd":0.01,"num_turns":1,"duration_ms":5,"result":"STATUS: ok"}'
+echo '{"total_cost_usd":0.01,"num_turns":1,"duration_ms":5,"result":"STATUS: ok",
+       "usage":{"cache_read_input_tokens":900,"cache_creation_input_tokens":300,
+                "input_tokens":10,"output_tokens":40}}'
 FAKEEOF
 chmod +x "$FAKE/claude-eats-stdin"
 
@@ -1139,13 +1221,45 @@ out=$(SPEC_RUN_CLAUDE_BIN=claude-eats-stdin "$SPEC_RUN" --repo "$MP" "build the 
 assert_eq "$rc" "0" "a full run with a stdin-reading runner completes"
 ran=$(jq -r '[.phases | to_entries[] | select(.value.status=="ok") | .key] | join(",")' \
       "$MP/specs/001-multi/.pipeline/state.json" 2>/dev/null)
-assert_eq "$ran" "specify,plan,tasks,implement" \
-  "and ALL FOUR default phases ran, in order, not just the first"
+assert_eq "$ran" "specify,plan,tasks,implement,review" \
+  "and ALL FIVE default phases ran, in order, not just the first"
 # Mutation: restore `done < <(jq -c '.phases[]' "$CONFIG")` and this reports
 # "specify" alone — the exact shape the real run produced.
-assert_contains "$out" "→ implement" "the last phase was reached"
-n_phase_lines=$(printf '%s\n' "$out" | grep -cE '^→ (specify|plan|tasks|implement)' || true)
-assert_eq "$n_phase_lines" "4" "four phases were announced, so none was silently skipped"
+assert_contains "$out" "→ review" "the last phase was reached"
+n_phase_lines=$(printf '%s\n' "$out" | grep -cE '^→ (specify|plan|tasks|implement|review)' || true)
+assert_eq "$n_phase_lines" "5" "five phases were announced, so none was silently skipped"
+
+# ------------------------------------------------ the token split is recorded --
+# The whole reason to keep a cost log is to be able to answer "where did it go",
+# and cost plus turns cannot: they say what was spent, not what it was spent on.
+# Measured across 40 real phase envelopes, cache reads are 60-75% of a phase's
+# bill and output is 10-15% — so a log without the split points at the 13% and
+# stays silent about the 70%.
+MPCOST="$MP/specs/001-multi/.pipeline/cost.log"
+assert_contains "$(head -1 "$MPCOST")" "cache_read" "cost.log carries a cache_read column"
+_cl=$(awk -F'\t' '$2=="review"{print $8"/"$9"/"$10"/"$11}' "$MPCOST" | tail -1)
+assert_eq "$_cl" "900/300/10/40" \
+  "and the four token counts land in their own columns, from the envelope's usage block"
+_su=$(jq -r '.phases.review.usage | "\(.cache_read_tokens)/\(.cache_write_tokens)/\(.input_tokens)/\(.output_tokens)"' \
+      "$MP/specs/001-multi/.pipeline/state.json")
+assert_eq "$_su" "900/300/10/40" "the state file records them too, so spec-status can read them"
+assert_contains "$out" "token profile" "and the run prints a token profile"
+# read/turn is the figure worth printing: cache_read over turns is the AVERAGE
+# RESIDENT CONTEXT, because every turn re-reads everything before it. One real
+# plan phase read 17,946,392 cached tokens over 96 turns — ~187k carried on every
+# turn — and that, not the turn count, is what a shorter pass actually moves.
+assert_contains "$out" "READ/TURN" "naming the average resident context"
+
+# An UNMEASURED figure must not record as a measured zero, exactly as with cost.
+# A stub that reports no usage block is the ordinary case for an older runner, and
+# "this phase read nothing" would be remarkable news rather than a missing field.
+assert_eq "$(fmt_tokens "")" "unmeasured" "an absent token count reads as unmeasured, not 0"
+assert_eq "$(fmt_tokens "null")" "unmeasured" "and so does a null one"
+assert_eq "$(fmt_tokens 17946392)" "17.9M" "a large count is abbreviated for comparison"
+assert_eq "$(fmt_tokens 900)" "900" "a small one is left alone"
+assert_eq "$(fmt_read_per_turn 17946392 96)" "187k" "read/turn is cache reads over turns"
+assert_eq "$(fmt_read_per_turn 17946392 "")" "" "with no turn count it prints nothing"
+assert_eq "$(fmt_read_per_turn 17946392 0)" "" "and never divides by zero to reach a confident 0"
 
 # ------------------------------------------------- a name that does not exist --
 printf '\nunknown phase names\n'
@@ -1267,6 +1381,45 @@ assert_contains "$contract_impl" "15 minutes" \
 assert_contains "$contract_impl" "cannot observe your own turn count" \
   "and told why the threshold is time rather than turns"
 
+# 🛑 The runner already knows where the next pass should start, and used to throw
+# it away. tasks_unchecked() reads the same file the pass then re-scanned for
+# itself: the run logs of one entry show passes opening on shapes like
+#   awk '/^#+ Phase/{...} /- \[/{if ($0 ~ /- \[ \]/) unchecked[phase]++}' tasks.md
+# to work out which group was next. Those turns are not merely their own cost —
+# their output joins the prefix that EVERY later turn of the pass re-reads, so a
+# discovery turn is paid for once and then again per turn thereafter.
+DG="$WORK/digest"; mkdir -p "$DG/specs/001-d"
+cp -R "$BS/.specify" "$BS/.claude" "$DG/" 2>/dev/null
+( cd "$DG" && git init -q && git add -A >/dev/null 2>&1 && git commit -qm f )
+{ printf '# Tasks\n\n## Phase 1: Setup\n\n'
+  printf -- '- [x] T001 done already\n- [x] T002 also done\n\n'
+  printf '## Phase 2: Core endpoints\n\n'
+  printf -- '- [x] T003 done\n- [ ] T004 write the handler\n- [ ] T005 wire it up\n\n'
+  printf '## Phase 3: Polish\n\n'
+  printf -- '- [ ] T006 docs\n'; } > "$DG/specs/001-d/tasks.md"
+argv_dg=$(unquote "$("$SPEC_RUN" --repo "$DG" --feature-dir "$DG/specs/001-d" \
+                     --only implement --dry-run 2>&1)")
+assert_contains "$argv_dg" "WHERE YOU ARE IN tasks.md" \
+  "a chunked pass is handed its place in tasks.md rather than made to find it"
+assert_contains "$argv_dg" "Phase 2: Core endpoints" \
+  "naming the next group with unfinished work, not the first group"
+assert_contains "$argv_dg" "T004 T005" \
+  "and that group's unchecked task ids, in order"
+assert_not_contains "$argv_dg" "T003" \
+  "while leaving out the ones already ticked"
+assert_contains "$argv_dg" "3 unchecked of 6" \
+  "with the overall count, so the pass knows how much is left beyond its group"
+assert_contains "$argv_dg" "2 group(s) with work left" \
+  "and how many groups still have work"
+# The digest is a POINTER, not a replacement for reading: skipping Phase 1
+# entirely is the whole behaviour under test, and a digest that named Phase 1
+# would send every pass back to work that is already done.
+
+# Non-chunked phases must not receive it. They have no pass to place, and a
+# prompt that describes a loop the phase is not in is worse than no prompt.
+assert_not_contains "$contract" "WHERE YOU ARE IN tasks.md" \
+  "and specify, which is not chunked, is not handed one"
+
 # 🛑 A phase runs for tens of minutes; `pmset` on the machine this was written for
 # reports `sleep 1`. So every phase races a sleep it does not hold off, and the
 # engine must hold the assertion rather than relying on whoever launched it.
@@ -1327,7 +1480,9 @@ root=$(pwd); f="$root/specs/001-c/tasks.md"
 if grep -q '^- \[ \]' "$f" 2>/dev/null; then
   awk 'BEGIN{done=0} /^- \[ \]/ && !done {sub(/\[ \]/,"[x]"); done=1} {print}' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
 fi
-echo '{"total_cost_usd":0.02,"num_turns":3,"duration_ms":5,"result":"STATUS: ok"}'
+echo '{"total_cost_usd":0.02,"num_turns":3,"duration_ms":5,"result":"STATUS: ok",
+       "usage":{"cache_read_input_tokens":1000,"cache_creation_input_tokens":200,
+                "input_tokens":5,"output_tokens":50}}'
 FAKEEOF
 chmod +x "$FAKE/claude-ticks-one"
 
@@ -1344,6 +1499,17 @@ assert_eq "$(jq -r '.phases.implement.cost_usd' "$CH/specs/001-c/.pipeline/state
   "cost is the sum of all passes, not the last one"
 assert_eq "$(jq -r '.phases.implement.passes' "$CH/specs/001-c/.pipeline/state.json")" "3" \
   "and the pass count is recorded"
+# The tokens roll up the same way, and this is the field where getting it wrong
+# would matter most: implement is both the most expensive phase and the only
+# chunked one, so a per-pass figure recorded as the phase's would understate
+# exactly the thing worth measuring — by an order of magnitude on twelve passes.
+_ru=$(jq -r '.phases.implement.usage | "\(.cache_read_tokens)/\(.cache_write_tokens)/\(.input_tokens)/\(.output_tokens)"' \
+      "$CH/specs/001-c/.pipeline/state.json")
+assert_eq "$_ru" "3000/600/15/150" "the token counts are summed over all three passes, not the last"
+# Every pass also keeps its own line, because the per-pass numbers are what show
+# a long pass costing more than two short ones.
+assert_eq "$(awk -F'\t' '$2=="implement"{n++} END{print n+0}' "$CH/specs/001-c/.pipeline/cost.log")" "3" \
+  "while cost.log keeps one line per pass"
 
 # 🛑 The guard that keeps this from being worse than truncation: a pass that ticks
 # nothing must END the loop. Otherwise a phase that cannot progress spends
@@ -1432,7 +1598,12 @@ assert_contains "$argv" "--model sonnet" "tasks is invoked on sonnet"
 
 argv=$("$SPEC_RUN" --repo "$BS" --feature-dir "$BS/specs/001-t" --only implement --dry-run 2>&1)
 assert_contains "$argv" "--model sonnet" "implement is invoked on sonnet"
-assert_not_contains "$argv" "--strict-mcp-config" "implement keeps its MCP servers"
+# implement DROPS its MCP servers, reversing the earlier default. Every tool
+# definition sits in the cached prefix of every turn, so a phase that never calls
+# one pays for the whole list once per turn — a fixed cost paid T times, which is
+# cheaper to remove than the work is to shorten.
+assert_contains "$argv" "--strict-mcp-config" "implement drops its MCP servers"
+
 deny=$(unquote "$argv")
 assert_contains "$deny" "Bash(gh pr merge:*)" "merging is denied even to implement"
 assert_not_contains "$deny" "Bash(git push:*)" "implement MAY push its own branch"
@@ -1445,6 +1616,39 @@ assert_not_contains "$deny" "Bash(gh pr create:*)" "implement MAY open a pull re
 
 argv=$("$SPEC_RUN" --repo "$BS" --feature-dir "$BS/specs/001-t" --only plan --model plan=sonnet --dry-run 2>&1)
 assert_contains "$argv" "--model sonnet" "--model plan=sonnet overrides the config"
+
+# --mcp, in its OWN variable. Reusing `argv` here is a real trap and was one
+# while this was being written: the deny assertions above read whatever `argv`
+# last held, so an invocation inserted between them silently changed what they
+# were checking — `implement MAY push its own branch` started failing against a
+# plan invocation that legitimately denies it.
+argv_mcp=$("$SPEC_RUN" --repo "$BS" --feature-dir "$BS/specs/001-t" --only implement \
+            --mcp implement=inherit --dry-run 2>&1)
+assert_not_contains "$argv_mcp" "--strict-mcp-config" \
+  "--mcp implement=inherit restores the servers the config drops"
+argv_mcp=$("$SPEC_RUN" --repo "$BS" --feature-dir "$BS/specs/001-t" --only plan \
+            --mcp plan=none --dry-run 2>&1)
+assert_contains "$argv_mcp" "--strict-mcp-config" \
+  "and --mcp plan=none takes them from the one phase that keeps them"
+# Both directions, deliberately: a flag that cannot restore what the default
+# removed is not an override, and the measurement this exists to enable — run one
+# feature both ways, compare cache_read — needs the same phase to go BOTH ways.
+assert_contains "$argv_mcp" "--model opus" "without disturbing anything else about the phase"
+
+# A misspelled value must not silently mean `inherit`. The two spellings are
+# indistinguishable in the output: the run would simply cost more than the flag
+# said it would, which is the exact failure this flag exists to measure.
+out=$("$SPEC_RUN" --repo "$BS" --feature-dir "$BS/specs/001-t" --mcp implement=non --dry-run 2>&1); rc=$?
+assert_eq "$rc" "3" "--mcp with a value that is neither none nor inherit is a usage error"
+assert_contains "$out" "none or inherit" "naming what it does take"
+out=$("$SPEC_RUN" --repo "$BS" --feature-dir "$BS/specs/001-t" --mcp nope=none --dry-run 2>&1); rc=$?
+assert_eq "$rc" "3" "and --mcp naming an unknown phase is one too"
+# The `info` line states which way it went, for the same reason an unapplied
+# ceiling must not read as an applied one: whether a tool list was loaded is
+# otherwise invisible, and it is one of the larger things a phase pays for.
+assert_contains "$("$SPEC_RUN" --repo "$BS" --feature-dir "$BS/specs/001-t" \
+                    --only implement --dry-run 2>&1)" "mcp none" \
+  "and the run says which way it went"
 
 out=$("$SPEC_RUN" --repo "$BS" --feature-dir "$BS/specs/001-t" --only plan --model plan=gpt4 --dry-run 2>&1); rc=$?
 assert_eq "$rc" "1" "an unknown model alias is rejected before any spend"
@@ -2205,6 +2409,7 @@ case "$prompt" in
   /speckit-plan*)    { printf '# Plan\n'; pad; } > "$dir/plan.md";;
   /speckit-tasks*)   { printf '# Tasks\n'; pad; printf -- '- [ ] T001 do it\n'; } > "$dir/tasks.md";;
   /speckit-implement*) { printf '# Tasks\n'; pad; printf -- '- [x] T001 do it\n'; } > "$dir/tasks.md";;
+  /speckit-review*)  { printf '# Review\n'; pad; printf 'No findings. Checked src/app.py:7.\n'; } > "$dir/review.md";;
 esac
 echo '{"total_cost_usd":0.05,"num_turns":3,"duration_ms":100,"result":"STATUS: ok"}'
 FAKEEOF
@@ -2281,6 +2486,7 @@ case "$prompt" in
   /speckit-plan*)      { printf '# Plan\n'; pad; } > "$root/$rel/plan.md";;
   /speckit-tasks*)     { printf '# Tasks\n'; pad; printf -- '- [ ] T1 x\n'; } > "$root/$rel/tasks.md";;
   /speckit-implement*) { printf '# Tasks\n'; pad; printf -- '- [x] T1 x\n'; } > "$root/$rel/tasks.md";;
+  /speckit-review*)    { printf '# Review\n'; pad; printf 'No findings. Checked src/x.py:3.\n'; } > "$root/$rel/review.md";;
 esac
 echo '{"total_cost_usd":0.02,"num_turns":2,"duration_ms":30,"result":"STATUS: ok"}'
 FAKEEOF

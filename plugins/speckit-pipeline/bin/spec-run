@@ -82,6 +82,13 @@ OPTIONS
   --gate <all|none|p,..> override which phases pause for you
   --model <phase>=<m>    override one phase's model      (repeatable)
   --effort <phase>=<e>   override one phase's effort      (repeatable)
+  --mcp <phase>=<none|inherit>
+                         override whether one phase gets your MCP servers
+                         (repeatable). Every MCP tool definition sits in the
+                         CACHED PREFIX of every turn, so a phase that cannot use
+                         them still pays for them on each one. Use this to
+                         measure that: run the same phase both ways and compare
+                         the cache_read column of cost.log.
   --budget <usd>         ceiling across the whole run
   --force                re-run phases already recorded ok
   --stream               show each phase's steps as they happen, instead of one
@@ -110,7 +117,7 @@ STREAM=${SPEC_RUN_STREAM:-0}
 declare -a ADD_DIRS=()
 FROM=""; STOP_AFTER=""; WITH=""; ONLY=""; GATE_OVERRIDE=""
 BUDGET=""; FORCE=0; DRY_RUN=0; LIST=0
-declare -a MODEL_OVERRIDES=() EFFORT_OVERRIDES=()
+declare -a MODEL_OVERRIDES=() EFFORT_OVERRIDES=() MCP_OVERRIDES=()
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -127,6 +134,7 @@ while [ $# -gt 0 ]; do
     --budget)       BUDGET="${2:-}"; shift 2 || exit 3;;
     --model)        MODEL_OVERRIDES+=("${2:-}"); shift 2 || exit 3;;
     --effort)       EFFORT_OVERRIDES+=("${2:-}"); shift 2 || exit 3;;
+    --mcp)          MCP_OVERRIDES+=("${2:-}"); shift 2 || exit 3;;
     --force)        FORCE=1; shift;;
     --dry-run)      DRY_RUN=1; shift;;
     --stream)       STREAM=1; shift;;
@@ -251,12 +259,22 @@ case "$GATE_OVERRIDE" in
   *) _check_phase_names --gate "$GATE_OVERRIDE";;
 esac
 
-# The model/effort overrides name phases too.
-for _o in "${MODEL_OVERRIDES[@]:-}" "${EFFORT_OVERRIDES[@]:-}"; do
+# The model/effort/mcp overrides name phases too.
+for _o in "${MODEL_OVERRIDES[@]:-}" "${EFFORT_OVERRIDES[@]:-}" "${MCP_OVERRIDES[@]:-}"; do
   [ -n "$_o" ] || continue
   case "$_o" in
-    *=*) _check_phase_names "--model/--effort" "${_o%%=*}";;
+    *=*) _check_phase_names "--model/--effort/--mcp" "${_o%%=*}";;
     *)   die_usage "override must be <phase>=<value>, got: $_o";;
+  esac
+done
+# `--mcp plan=non` must not silently mean `inherit`. The value here decides
+# whether a whole tool list is loaded, and the two spellings are indistinguishable
+# in the output — the run would simply cost more than the flag said it would.
+for _o in "${MCP_OVERRIDES[@]:-}"; do
+  [ -n "$_o" ] || continue
+  case "${_o#*=}" in
+    none|inherit) ;;
+    *) die_usage "--mcp takes none or inherit, got: ${_o#*=}";;
   esac
 done
 
@@ -267,10 +285,14 @@ phase_selected() { # phase_selected <id> <optional>
   return 0
 }
 
-override_for() { # override_for <phase> <"model"|"effort">  -> prints override or nothing
+override_for() { # override_for <phase> <"model"|"effort"|"mcp">  -> prints override or nothing
   local phase="$1" kind="$2" entry
   local -a list=()
-  if [ "$kind" = model ]; then list=("${MODEL_OVERRIDES[@]:-}"); else list=("${EFFORT_OVERRIDES[@]:-}"); fi
+  case "$kind" in
+    model)  list=("${MODEL_OVERRIDES[@]:-}");;
+    effort) list=("${EFFORT_OVERRIDES[@]:-}");;
+    mcp)    list=("${MCP_OVERRIDES[@]:-}");;
+  esac
   for entry in "${list[@]}"; do
     [ -n "$entry" ] || continue
     case "$entry" in "$phase="*) printf '%s\n' "${entry#*=}"; return 0;; esac
@@ -377,12 +399,29 @@ init_state_if_possible || true
 COST_LOG=""
 RUN_TOTAL=0
 
+# The token columns are the whole reason this log is worth keeping. Cost and turns
+# say WHAT a phase spent; only the token split says WHERE, and the split is not
+# close to even. Measured across 40 real phase envelopes on this machine, cache
+# reads are 60-75% of a phase's bill, cache writes ~20% (the 1-hour TTL doubles
+# their price), and output — the only part that is the actual work — is 10-15%.
+#
+# read/turn is the figure to tune against: cache_read divided by turns is the
+# AVERAGE RESIDENT CONTEXT, because every turn re-reads everything before it. A
+# real plan phase read 17,946,392 cached tokens over 96 turns, so it was carrying
+# ~187k tokens on every one of them. That number, not the turn count, is what a
+# shorter pass or a smaller preamble actually moves.
+#
+# All four are recorded RAW rather than priced. A dollar figure needs a per-model
+# rate table, and a rate table in here goes stale silently the first time
+# Anthropic reprices anything — at which point the log would be confidently wrong
+# about the one thing it exists to measure. Tokens are what was observed.
 init_cost_log() {
   [ -n "$FEATURE_DIR" ] || return 0
   COST_LOG="$FEATURE_DIR/.pipeline/cost.log"
   mkdir -p "$(dirname "$COST_LOG")"
   [ -f "$COST_LOG" ] || \
-    printf '# started_at\tphase\tmodel\teffort\tcost_usd\tturns\tduration_ms\n' > "$COST_LOG"
+    printf '# started_at\tphase\tmodel\teffort\tcost_usd\tturns\tduration_ms\tcache_read\tcache_write\tinput\toutput\n' \
+      > "$COST_LOG"
 }
 
 # Everything the phase must know that is not in the skill: which phase it is,
@@ -469,6 +508,7 @@ could not act on. Time you can read. And this is a PREFERENCE, not a hard stop:
 finishing a coupled pair of tasks is worth two extra minutes, whereas pushing
 through another eight tasks is not.
 EOF
+    tasks_digest "${FEATURE_DIR:-}"
   fi
   cat <<'EOF'
 
@@ -518,6 +558,59 @@ tasks_unchecked() { # tasks_unchecked <feature_dir>
   printf '%s\n' "${c:-0}"
 }
 
+# Where the next pass should start, computed HERE and handed over in the prompt.
+#
+# The runner already knows this — tasks_unchecked() above reads the same file —
+# and every pass was re-deriving it anyway. Measured in the run logs of one
+# entry, passes opened with turns spent on shapes like
+#   awk '/^#+ Phase/{...} /- \[/{if ($0 ~ /- \[ \]/) unchecked[phase]++}' tasks.md
+#   awk 'NR>=2215 && /^class /{print NR": "$0}' src/main.py | head -5
+# to establish which group was next. Those turns are not just their own cost:
+# their output joins the prefix that EVERY later turn of the pass re-reads, so a
+# discovery turn is paid for once and then again per turn thereafter.
+#
+# Stated as fact rather than instruction, and deliberately not as the only
+# source: the pass still reads tasks.md, because this digest is a pointer and the
+# tasks are the work. What it removes is the search, not the reading.
+tasks_digest() { # tasks_digest <feature_dir>
+  local f="${1:-}/tasks.md"
+  [ -f "$f" ] || return 0
+  # One awk pass, because three greps over a large tasks.md is the same mistake
+  # in miniature. Groups are `## Phase ...` headings; a task is a checkbox line.
+  # Tasks before any heading are attributed to a synthetic "(no group)" so a
+  # tasks.md written without headings still gets a digest rather than an empty one.
+  awk '
+    /^#+[[:space:]]*Phase/ { group = $0; sub(/^#+[[:space:]]*/, "", group)
+                             order[++ng] = group; seen[group] = 1; next }
+    /^[[:space:]]*[-*][[:space:]]*\[[[:space:]xX]\]/ {
+      g = (group == "" ? "(no group)" : group)
+      if (!seen[g]) { order[++ng] = g; seen[g] = 1 }
+      total[g]++; tot++
+      if ($0 ~ /^[[:space:]]*[-*][[:space:]]*\[[[:space:]]\]/) {
+        un[g]++; unt++
+        # The task id, when there is one: `- [ ] T045 [P] do the thing`.
+        if (match($0, /T[0-9]+/)) ids[g] = ids[g] (ids[g] == "" ? "" : " ") substr($0, RSTART, RLENGTH)
+      }
+    }
+    END {
+      if (tot == 0) exit 0
+      groups_left = 0
+      for (i = 1; i <= ng; i++) if (un[order[i]] > 0) groups_left++
+      nextg = ""
+      for (i = 1; i <= ng && nextg == ""; i++) if (un[order[i]] > 0) nextg = order[i]
+      if (nextg == "") exit 0
+      printf "\nWHERE YOU ARE IN tasks.md — the runner computed this before starting you,\n"
+      printf "so you do not need to scan the file to find your place:\n"
+      printf "  next group:  %s\n", nextg
+      printf "  its tasks:   %s\n", (ids[nextg] == "" ? "(unnumbered)" : ids[nextg])
+      printf "               %d unchecked of %d in this group\n", un[nextg], total[nextg]
+      printf "  overall:     %d unchecked of %d, across %d group(s) with work left\n", unt, tot, groups_left
+      printf "Go to that group and do it. Do not re-count the file to work out where to\n"
+      printf "start — that costs turns, and every turn after it re-reads the result.\n"
+    }
+  ' "$f" 2>/dev/null || true
+}
+
 # Run a phase repeatedly, each pass a FRESH process, until its task list is clear.
 #
 # Why: cost is ~linear in cache_read, which is ~98% of a phase's input and grows
@@ -538,6 +631,12 @@ tasks_unchecked() { # tasks_unchecked <feature_dir>
 run_phase_chunked() { # run_phase_chunked <phase_json>
   local pj="$1" id max_passes pass=0 before after rc
   local tot_cost=0 tot_turns=0 c n saved_force="$FORCE"
+  # Token totals across the passes, for the same reason cost and turns are
+  # totalled: each pass overwrites the phase's record, so without this the state
+  # file reports the LAST pass's tokens as the phase's. On a twelve-pass implement
+  # that understates the phase by an order of magnitude — and it is the phase most
+  # worth measuring, so the field would be most wrong exactly where it matters.
+  local tot_read=0 tot_write=0 tot_in=0 tot_out=0 u
   id=$(jq -r '.id' <<<"$pj")
   max_passes=$(jq -r '.max_passes // 12' <<<"$pj")
 
@@ -559,8 +658,10 @@ run_phase_chunked() { # run_phase_chunked <phase_json>
         dim "  · $id — no unchecked tasks; nothing to do"
       else
         ok "$id — task list clear after $pass pass(es)"
-        [ -n "$STATE" ] && [ "$DRY_RUN" -eq 0 ] && \
+        if [ -n "$STATE" ] && [ "$DRY_RUN" -eq 0 ]; then
           state_phase_set_totals "$STATE" "$id" "$tot_cost" "$tot_turns" "$pass"
+          state_phase_set_usage  "$STATE" "$id" "$tot_read" "$tot_write" "$tot_in" "$tot_out"
+        fi
       fi
       return 0
     fi
@@ -586,6 +687,10 @@ run_phase_chunked() { # run_phase_chunked <phase_json>
       n=$(state_phase_get "$STATE" "$id" num_turns 0)
       tot_cost=$(awk -v a="$tot_cost" -v b="$c" 'BEGIN{printf "%.10g", a + b}')
       tot_turns=$((tot_turns + ${n:-0}))
+      u=$(state_phase_get "$STATE" "$id" 'usage.cache_read_tokens'  0); tot_read=$((tot_read   + ${u:-0}))
+      u=$(state_phase_get "$STATE" "$id" 'usage.cache_write_tokens' 0); tot_write=$((tot_write + ${u:-0}))
+      u=$(state_phase_get "$STATE" "$id" 'usage.input_tokens'       0); tot_in=$((tot_in       + ${u:-0}))
+      u=$(state_phase_get "$STATE" "$id" 'usage.output_tokens'      0); tot_out=$((tot_out     + ${u:-0}))
     fi
 
     after=$(tasks_unchecked "${FEATURE_DIR:-}")
@@ -609,8 +714,10 @@ run_phase_chunked() { # run_phase_chunked <phase_json>
       grep -n '^[[:space:]]*-[[:space:]]*\[[[:space:]]\]' "${FEATURE_DIR:-}/tasks.md" 2>/dev/null |
         head -5 | cut -c1-160 | sed 's/^/    /'
       say  "  and the phase's own account: ${FEATURE_DIR:-<feature>}/.pipeline/$id.result.json"
-      [ -n "$STATE" ] && [ "$DRY_RUN" -eq 0 ] && \
+      if [ -n "$STATE" ] && [ "$DRY_RUN" -eq 0 ]; then
         state_phase_set_totals "$STATE" "$id" "$tot_cost" "$tot_turns" "$pass"
+        state_phase_set_usage  "$STATE" "$id" "$tot_read" "$tot_write" "$tot_in" "$tot_out"
+      fi
       return 2
     fi
     [ "$DRY_RUN" -eq 1 ] && { FORCE="$saved_force"; return 0; }
@@ -634,6 +741,7 @@ run_phase() { # run_phase <phase_json>
   local o
   o=$(override_for "$id" model); [ -n "$o" ] && model="$o"
   o=$(override_for "$id" effort); [ -n "$o" ] && effort="$o"
+  o=$(override_for "$id" mcp); [ -n "$o" ] && mcp="$o"
 
   valid_model "$model"  || die "phase '$id': not a model alias: $model" \
     "expected one of: opus sonnet haiku fable, or a full claude-* id"
@@ -734,7 +842,11 @@ run_phase() { # run_phase <phase_json>
   # cannot use; one that drives a browser or an API must keep it.
   if [ "$mcp" = none ]; then argv+=(--strict-mcp-config --mcp-config '{"mcpServers":{}}'); fi
 
-  info "$id — $model/$effort${maxb:+, ≤\$$maxb}${maxt:+, ≤$maxt turns}"
+  # mcp is stated, not assumed. It is now overridable per run, and whether a tool
+  # list was loaded is invisible in the output while being one of the larger
+  # things a phase pays for on every turn — the same reason an unapplied ceiling
+  # must not read as an applied one.
+  info "$id — $model/$effort${maxb:+, ≤\$$maxb}${maxt:+, ≤$maxt turns}, mcp $mcp"
 
   if [ "$DRY_RUN" -eq 1 ]; then
     printf '  '; printf '%q ' "${argv[@]}"; printf '\n\n'
@@ -811,6 +923,7 @@ run_phase() { # run_phase <phase_json>
 
   local cost turns dur result unmeasured="" json="" errcap="" denials=0 denied_tools="" denial_note=""
   local cli_error="" cli_subtype=""
+  local tok_read="" tok_write="" tok_in="" tok_out=""
   errcap=$(head -c 4000 "$errf" 2>/dev/null || true)
   json=$(extract_result_json "$out") || json=""
   if [ -n "$json" ]; then
@@ -818,6 +931,14 @@ run_phase() { # run_phase <phase_json>
     turns=$(jq -r '.num_turns // empty'     <<<"$json")
     dur=$(jq -r '.duration_ms // empty'     <<<"$json")
     result=$(jq -r '.result // empty'       <<<"$json")
+    # The token split, from the envelope's own usage block. `// empty` and not
+    # `// 0` for the same reason cost uses it: a runner that reports no usage and
+    # a phase that genuinely read nothing must not record the same figure. A
+    # measured 0 is news; an unmeasured 0 is a lie that looks like good news.
+    tok_read=$(jq  -r '.usage.cache_read_input_tokens // empty'     <<<"$json")
+    tok_write=$(jq -r '.usage.cache_creation_input_tokens // empty' <<<"$json")
+    tok_in=$(jq    -r '.usage.input_tokens // empty'                <<<"$json")
+    tok_out=$(jq   -r '.usage.output_tokens // empty'               <<<"$json")
     # The runner's OWN verdict on itself. It is not a hint to be weighed against
     # the artifact: `is_error` means the phase stopped without finishing, and
     # `subtype` says how — `error_max_turns` above all.
@@ -853,9 +974,11 @@ run_phase() { # run_phase <phase_json>
   [ -n "$cost" ] && RUN_TOTAL=$(awk -v a="$RUN_TOTAL" -v b="$cost" 'BEGIN{printf "%.4f", a+b}')
 
   if [ -n "$COST_LOG" ]; then
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
       "$(now_iso)" "$id" "$model" "$effort" "${cost:-unmeasured}" \
-      "${turns:-unmeasured}" "${dur:-unmeasured}" >> "$COST_LOG"
+      "${turns:-unmeasured}" "${dur:-unmeasured}" \
+      "${tok_read:-unmeasured}" "${tok_write:-unmeasured}" \
+      "${tok_in:-unmeasured}" "${tok_out:-unmeasured}" >> "$COST_LOG"
   fi
 
   # A non-zero exit is evidence, not a verdict — and a zero exit is not a pass.
@@ -941,7 +1064,10 @@ run_phase() { # run_phase <phase_json>
 
   local sha
   sha=$(file_sha "${FEATURE_DIR:-}/${artifact:-nonexistent}")
-  [ -n "$STATE" ] && state_phase_finish "$STATE" "$id" "$status" "$cost" "$turns" "$dur" "$sha" "$note"
+  if [ -n "$STATE" ]; then
+    state_phase_finish "$STATE" "$id" "$status" "$cost" "$turns" "$dur" "$sha" "$note"
+    state_phase_set_usage "$STATE" "$id" "$tok_read" "$tok_write" "$tok_in" "$tok_out"
+  fi
 
   case "$status" in
     ok)          ok   "$id — $note  $(dim_s "($(fmt_cost "$cost"), ${turns:-?} turns)")";;
@@ -1093,6 +1219,7 @@ if [ -n "$STATE" ] && [ -f "$STATE" ] && [ "$DRY_RUN" -eq 0 ]; then
     done
   printf '  %-10s %-8s %-7s %-12s %10s\n' TOTAL "" "" "" "\$$(state_total_cost "$STATE")"
   dim "  state: $STATE"
+  print_token_profile "$STATE"
   say ""
 fi
 

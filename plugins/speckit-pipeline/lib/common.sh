@@ -328,6 +328,52 @@ state_phase_finish() { # ... <state_file> <phase> <status> <cost> <turns> <durat
 # different facts and only one of them is good news.
 fmt_cost() { [ -n "${1:-}" ] && printf '$%s' "$1" || printf 'cost unmeasured'; }
 
+# The token split for one phase, kept SEPARATE from state_phase_finish rather than
+# bolted onto its signature. That function already takes eight positional
+# arguments; a twelfth would be the kind of call nobody can read at the site, and
+# every existing caller and test would have to move for a field none of them use.
+#
+# `usage` is written as a whole object so a partially-reported envelope cannot
+# leave three measured fields beside one stale one. Every field is null-unless-
+# measured, on the same principle as cost_usd: an unmeasured 0 reads as thrift.
+state_phase_set_usage() { # <state_file> <phase> <cache_read> <cache_write> <in> <out>
+  local f="$1" tmp
+  [ -f "$f" ] || return 0
+  tmp=$(mktmp)
+  jq --arg p "$2" --arg cr "$3" --arg cw "$4" --arg ti "$5" --arg to "$6" \
+    '.phases[$p] += { usage: {
+        cache_read_tokens:(if $cr == "" then null else ($cr|tonumber? // null) end),
+        cache_write_tokens:(if $cw == "" then null else ($cw|tonumber? // null) end),
+        input_tokens:(if $ti == "" then null else ($ti|tonumber? // null) end),
+        output_tokens:(if $to == "" then null else ($to|tonumber? // null) end)
+     } }' "$f" > "$tmp" && mv "$tmp" "$f"
+}
+
+# Average resident context: cache reads divided by turns. Printed rather than
+# derived at each call site because it is the one figure worth looking at and the
+# one most easily got wrong — dividing by a null turn count yields a confident 0.
+# Prints nothing when either input is missing, so an absent number stays absent.
+fmt_read_per_turn() { # fmt_read_per_turn <cache_read_tokens> <turns>
+  local r="${1:-}" t="${2:-}"
+  case "$r" in ''|null|*[!0-9]*) return 0;; esac
+  case "$t" in ''|null|*[!0-9]*) return 0;; esac
+  [ "$t" -gt 0 ] || return 0
+  awk -v r="$r" -v t="$t" 'BEGIN{printf "%.0fk", (r/t)/1000}'
+}
+
+# Token counts run to eight digits and a column of them is unreadable. k/M is not
+# decoration here: the interesting comparison is between phases, and 17.9M beside
+# 1.6M states the ratio at a glance where 17946392 beside 1583648 does not.
+fmt_tokens() { # fmt_tokens <n>
+  local n="${1:-}"
+  case "$n" in ''|null) printf 'unmeasured'; return 0;; esac
+  case "$n" in *[!0-9]*) printf '%s' "$n"; return 0;; esac
+  if   [ "$n" -ge 1000000 ]; then awk -v n="$n" 'BEGIN{printf "%.1fM", n/1000000}'
+  elif [ "$n" -ge 1000 ];    then awk -v n="$n" 'BEGIN{printf "%.1fk", n/1000}'
+  else printf '%s' "$n"
+  fi
+}
+
 # Every attempt gets its OWN session id. Reusing one is not a way back into a
 # thread — `claude --session-id <existing>` refuses and exits in about two
 # seconds, which is how a re-run of the plan phase came back "ok" over the
@@ -397,6 +443,55 @@ extract_result_json() { # extract_result_json <text>
 }
 
 state_total_cost() { jq '[.phases[].cost_usd // 0] | add // 0' "$1"; }
+
+# Where a run's tokens went, per phase. Lives here rather than in spec-run or
+# spec-status because both print it and a second copy would drift: the two
+# summaries disagreeing about the same state file is worse than either being
+# absent, since only one of them can be right and nothing says which.
+#
+# Prints NOTHING when no phase recorded usage. An older state file predates these
+# fields entirely, and a table of "unmeasured" rows looks like a measurement that
+# came back empty rather than one that was never taken.
+print_token_profile() { # print_token_profile <state_file>
+  local f="$1" any
+  [ -f "$f" ] || return 0
+  any=$(jq -r '[.phases[] | select(.usage.cache_read_tokens != null)] | length' "$f" 2>/dev/null) || return 0
+  [ "${any:-0}" -gt 0 ] || return 0
+
+  # The spacing belongs to the block, not to its callers: a caller that printed
+  # the blank line itself would leave a stray one behind on the return above,
+  # which is the common case on any state file written before these fields.
+  say ""
+  say "token profile  $(dim_s "read/turn is the average resident context — the figure a shorter pass moves")"
+  printf '  %-10s %12s %12s %9s %9s %11s\n' PHASE 'CACHE READ' 'CACHE WRITE' INPUT OUTPUT 'READ/TURN'
+  jq -r '.phases | to_entries[] |
+         [.key,
+          (.value.usage.cache_read_tokens  // "" | tostring),
+          (.value.usage.cache_write_tokens // "" | tostring),
+          (.value.usage.input_tokens       // "" | tostring),
+          (.value.usage.output_tokens      // "" | tostring),
+          (.value.num_turns                // "" | tostring)] | @tsv' "$f" |
+    while IFS=$'\t' read -r p cr cw ti to nt; do
+      printf '  %-10s %12s %12s %9s %9s %11s\n' \
+        "$p" "$(fmt_tokens "$cr")" "$(fmt_tokens "$cw")" \
+        "$(fmt_tokens "$ti")" "$(fmt_tokens "$to")" \
+        "$(fmt_read_per_turn "$cr" "$nt")"
+    done
+  # Totals are summed over the phases that HAVE a figure, and the row says how
+  # many those were. A total that silently covers four of seven phases is the
+  # shape of understatement this whole block exists to remove.
+  jq -r '[.phases[] | select(.usage.cache_read_tokens != null)] as $m |
+         [($m|length), (.phases|length),
+          ([$m[].usage.cache_read_tokens  // 0] | add // 0),
+          ([$m[].usage.cache_write_tokens // 0] | add // 0),
+          ([$m[].usage.input_tokens       // 0] | add // 0),
+          ([$m[].usage.output_tokens      // 0] | add // 0)] | @tsv' "$f" |
+    while IFS=$'\t' read -r nm np cr cw ti to; do
+      printf '  %-10s %12s %12s %9s %9s\n' TOTAL \
+        "$(fmt_tokens "$cr")" "$(fmt_tokens "$cw")" "$(fmt_tokens "$ti")" "$(fmt_tokens "$to")"
+      [ "$nm" = "$np" ] || dim "  ($nm of $np phase(s) reported usage; the rest are not in this total)"
+    done
+}
 
 # Overwrite a phase's cost/turns with a total, and record how many passes made it.
 # A chunked phase runs as SEVERAL processes, and state_phase_finish is called by
