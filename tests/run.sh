@@ -1550,23 +1550,51 @@ assert_contains "$out" "→ implement" "and the phase still runs once"
 # repository while a human was separately verifying and merging that same work.
 # The commit simply appeared, authored by the repo's git identity.
 printf '\nsignals: the phase dies with the runner\n'
-_orph_marker="$WORK/orphan-alive"
-rm -f "$_orph_marker"
-( sleep 45 & echo $! > "$WORK/orphan.pid"; wait ) >/dev/null 2>&1 &
-_orph_parent=$!
-sleep 1
-_orph_child=$(cat "$WORK/orphan.pid" 2>/dev/null)
-if [ -n "$_orph_child" ] && kill -0 "$_orph_child" 2>/dev/null; then
-  kill_descendants "$_orph_parent"
-  kill -TERM "$_orph_parent" 2>/dev/null
-  # Reap it, or bash prints an async "Terminated" job notice into the results.
-  wait "$_orph_parent" 2>/dev/null || true
-  sleep 1
-  kill -0 "$_orph_child" 2>/dev/null \
-    && t_fail "kill_descendants reaps a grandchild, not just the child" \
-    || t_pass "kill_descendants reaps a grandchild, not just the child"
+# 🛑 The precondition is the EXACT query kill_descendants makes, not
+# `command -v ps`. Under Claude Code's own Bash sandbox `ps` IS on PATH and
+# `ps -eo pid=,ppid=` is refused with "operation not permitted" — so the process
+# table reads as EMPTY, kill_descendants finds no children, and this assertion
+# goes red against a function that is correct. Verified both ways on macOS 25.5:
+# refused inside the sandbox, and outside it the grandchild is found and reaped.
+#
+# Probing for the binary would have succeeded and still left the failure, which
+# is why the probe is the query rather than the command. An environment that
+# cannot answer it must SKIP: this is the guard over the worst bug in this repo's
+# history, and a red tick on it that means "your shell cannot run ps" is how a
+# reader learns to skim failures on the assertions that matter most.
+_orph_parent=""; _orph_child=""
+if [ "$(ps -eo pid=,ppid= 2>/dev/null | grep -c .)" -eq 0 ]; then
+  t_skip "kill_descendants reaps a grandchild" \
+         "the process table is unreadable here, so the function cannot be exercised"
+  # Gated, not padded — same accounting as the caffeinate block above, and for
+  # the same reason: the README advertises one number and it has to be true on a
+  # host that can read the table and on one that cannot.
+  PLATFORM_GATED_ASSERTIONS=$((${PLATFORM_GATED_ASSERTIONS:-0} + 1))
 else
-  t_skip "kill_descendants reaps a grandchild" "could not stage the process tree"
+  ( sleep 45 & echo $! > "$WORK/orphan.pid"; wait ) >/dev/null 2>&1 &
+  _orph_parent=$!
+  sleep 1
+  _orph_child=$(cat "$WORK/orphan.pid" 2>/dev/null)
+  if [ -n "$_orph_child" ] && kill -0 "$_orph_child" 2>/dev/null; then
+    kill_descendants "$_orph_parent"
+    kill -TERM "$_orph_parent" 2>/dev/null
+    # Reap it, or bash prints an async "Terminated" job notice into the results.
+    wait "$_orph_parent" 2>/dev/null || true
+    sleep 1
+    kill -0 "$_orph_child" 2>/dev/null \
+      && t_fail "kill_descendants reaps a grandchild, not just the child" \
+      || t_pass "kill_descendants reaps a grandchild, not just the child"
+  else
+    t_skip "kill_descendants reaps a grandchild" "could not stage the process tree"
+    PLATFORM_GATED_ASSERTIONS=$((${PLATFORM_GATED_ASSERTIONS:-0} + 1))
+  fi
+  # Tear the staged tree down on every path out. The skip above left a 45-second
+  # `sleep` and its subshell running — harmless, but this is the section about not
+  # orphaning processes, and a leak here would be the joke writing itself.
+  kill_descendants "$_orph_parent" 2>/dev/null || true
+  kill -TERM "$_orph_parent" 2>/dev/null || true
+  wait "$_orph_parent" 2>/dev/null || true
+  if [ -n "$_orph_child" ]; then kill -9 "$_orph_child" 2>/dev/null || true; fi
 fi
 # And the runner installs it, so an interrupted run cannot leave a phase behind.
 assert_contains "$(cat "$SPEC_RUN")" "trap _on_signal INT TERM" \
