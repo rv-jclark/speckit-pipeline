@@ -484,15 +484,44 @@ extract_json() { # extract_json <text>
 # {"type":"system","subtype":"thinking_tokens",...}, which parses cleanly and
 # carries no cost, so "some JSON parsed" was read as "the phase completed" and a
 # 3,779-byte stub plan.md was recorded ok. Only a result envelope means finished.
+#
+# 🛑 IT MUST RETURN EXACTLY ONE ENVELOPE, and the FIRST version did not — a phase
+# can emit TWO. Measured 2026-09-15 on the SDLC roadmap's entry 8: the implement
+# pass hit `API Error: No response from API`, the CLI retried inside the same
+# invocation, and the stream carried two `result` records. The non-stream branch
+# below used bare `jq` (no `-s`), which over a SEQUENCE emits one line per match
+# — so it returned BOTH, matched non-empty, and the streamed branch below (which
+# already took `last`, correctly) never ran.
+#
+# Every downstream `jq -r … <<<"$json"` then produced two lines. Observed in that
+# run's log: `$21.8689346\n22.644156`, `194\n6 turns`, `(success\nsuccess)` and
+# `[: 0\n0: integer expression expected` from the denial count. And the VERDICT
+# went the wrong way: `cli_error` is read from `.is_error`, and the FIRST
+# envelope is the ABORTED attempt — so its error verdict outvoted the retry's
+# success. A pass that exited 0 reporting `STATUS: ok`, having ticked 27 of 94
+# tasks, was recorded `failed`, and the roadmap stopped on it.
+#
+# ⚠️ Whether the defect is fatal or silent depends on WHICH attempt failed,
+# because `$(…)` strips TRAILING newlines: two clean envelopes give "\n\n" -> ""
+# and read as no error, while an error followed by a success gives "1\n" -> "1"
+# and reads as an error. Never put an emptiness test over a jq sequence.
+#
+# The LAST envelope is the right one by definition — it is the attempt that
+# actually ended the invocation. So slurp and take it.
+# ⚠️ Stated bound: `total_cost_usd` looks cumulative across the invocation but
+# `num_turns` is per-segment, so a retried phase's recorded turns describe the
+# FINAL segment only (6, against ~200 really executed in that run). A lower
+# bound, not a measurement.
 extract_result_json() { # extract_result_json <text>
   local text="$1" whole out
   # Non-stream --output-format json: the whole output is one (possibly
   # pretty-printed) value, which the line-wise pass below would miss.
   whole=$(printf '%s' "$text" \
-          | jq -c 'select(type == "object"
-                          and (.type == "result" or has("total_cost_usd")))' \
+          | jq -c -s 'map(select(type == "object"
+                                 and (.type == "result" or has("total_cost_usd"))))
+                      | last // empty' \
             2>/dev/null) || whole=""
-  if [ -n "$whole" ]; then printf '%s' "$whole"; return 0; fi
+  if [ -n "$whole" ] && [ "$whole" != null ]; then printf '%s' "$whole"; return 0; fi
   # Streamed: one object per line. Filter to object-shaped lines first — a
   # truncated tail line is not valid JSON and would fail the whole slurp.
   out=$(printf '%s\n' "$text" | grep -E '^\{.*\}$' 2>/dev/null \

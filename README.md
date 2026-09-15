@@ -833,6 +833,26 @@ finished"; the exit code can. A rolling restart, a Ctrl-C and an OOM kill all
 land here. The partial artifact is left on disk deliberately — it is the only
 record of how far the phase got, and the next attempt overwrites it anyway.
 
+🛑 **A phase can return TWO result envelopes, and reading both inverts the
+verdict.** Measured 2026-09-15: an `implement` pass hit `API Error: No response
+from API`, the CLI retried *inside the same invocation*, and the stream carried
+two `result` records. `extract_result_json`'s non-stream branch used bare `jq`
+over what is a *sequence*, so it returned both — and every figure downstream
+became two lines (`$21.8689346\n22.644156`, `194\n6 turns`, `(success\nsuccess)`,
+`[: 0\n0: integer expression expected`). The costly part is the verdict: the
+first envelope is the **abandoned** attempt, so its `is_error` outvoted the
+retry's success, and a pass that exited `0` reporting `STATUS: ok` having ticked
+27 of 94 tasks was recorded **`failed`** — stopping the roadmap on a completed
+pass. ⚠️ Whether this is fatal or silent depends on which attempt failed, because
+`$(…)` strips *trailing* newlines: two clean envelopes collapse to `""` and read
+as no error, while an error followed by a success gives `"1"` and reads as one.
+**Never put an emptiness test over a `jq` sequence.** The fix is to slurp and take
+`last` — the attempt that actually ended the invocation — in *both* branches,
+which is what the streamed branch had been doing correctly all along. ⚠️ Stated
+bound: `total_cost_usd` looks cumulative but `num_turns` is per-segment, so a
+retried phase's recorded turns describe the final segment only (6, against ~200
+really executed). That is a lower bound, not a measurement.
+
 And a **non-run check**. If a phase returns no parseable result *and* leaves its
 artifact byte-identical, it is recorded `failed` — "the phase returned no
 parseable result and did not change plan.md — it appears not to have run at
@@ -1013,7 +1033,7 @@ reports success over a directory the rest of the pipeline cannot find.
 ## Tests
 
 ```bash
-./tests/run.sh          # shellcheck + 539 fixture assertions
+./tests/run.sh          # shellcheck + 544 fixture assertions
 ```
 
 **The suite is hermetic.** A stub runner shadows the real `claude` for the whole
@@ -1136,7 +1156,7 @@ the one thing it exists to measure.
 ## Tests, and what they cost to run
 
 ```bash
-./tests/run.sh          # shellcheck + 539 assertions, ~3.5 minutes
+./tests/run.sh          # shellcheck + 544 assertions, ~3.5 minutes
 ```
 
 Hermetic: a stub runner shadows the real `claude` for the whole run, so nothing
