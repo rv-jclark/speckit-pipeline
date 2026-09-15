@@ -185,6 +185,36 @@ roadmap_fetch_base() { # roadmap_fetch_base <repo> <base>  -> 0 fresh, 1 stale
 }
 
 # entry_landed <repo> <base> <feature_dir_rel> <branch> <fresh:0|1>
+# What description does a feature directory's own pipeline state record?
+#
+# 🛑 This exists because the obvious test — "is the directory named NNN-<slug>?"
+# — IS WRONG, and the roadmap's own production data says so. spec-run is invoked
+# with the entry's DESCRIPTION, not its slug, and spec-kit derives the branch and
+# directory name from that description through a sanitiser that replaces every
+# non-alphanumeric with a dash. The two coincide often enough to look like a
+# rule and are not one. Measured across one real 9-entry roadmap:
+#
+#   mastery-rule             → specs/012-mastery-rule              matches
+#   contacts-job-attribution → specs/013-contact-network            DIFFERS
+#   gear-and-stash           → specs/017-loot-gear-v1               DIFFERS
+#   perk-milestones          → specs/018-skill-perks                DIFFERS
+#
+# Three of nine. Rejecting a directory on a slug mismatch would therefore have
+# discarded a third of that roadmap's legitimate feature directories. (The same
+# caveat applies to the slug fallback in entry_landed below: it is best-effort
+# and fails safe by finding nothing, which is why it is sound there and would not
+# have been here.)
+#
+# The description is convention-free: spec-run writes it into state.json at
+# init, so it is what the directory itself says it was created for.
+# Prints the recorded description, or nothing when there is no state to read —
+# and the caller must treat "nothing" as unknown, never as a mismatch.
+feature_dir_description() { # feature_dir_description <repo> <feature_dir_rel>
+  local st="$1/${2:-}/.pipeline/state.json"
+  [ -f "$st" ] || return 0
+  jq -r '.description // empty' "$st" 2>/dev/null || true
+}
+
 #   prints "<state>\t<how>", always exits 0
 #     done       the work is on the base branch
 #     not_landed it is not, and we could see clearly enough to say so

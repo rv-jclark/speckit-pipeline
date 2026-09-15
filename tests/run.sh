@@ -406,9 +406,23 @@ assert_eq "$diag_efforts" "$cfg_efforts" "and the same effort levels, in order"
 # sees, and a correct set in the wrong order is the more misleading failure.
 
 # the assertion count the README advertises must be the count this suite reaches
-doc_count=$(grep -oE 'shellcheck \+ [0-9]+ fixture assertions' "$README" | grep -oE '[0-9]+' || true)
+#
+# 🛑 EVERY occurrence, not the first. The README states this figure twice, and the
+# pattern used to match only the `N fixture assertions` phrasing — so the other
+# copy (`N assertions, ~3.5 minutes`) was unasserted, and it drifted the moment
+# somebody added tests: it sat at 505 while the checked one had moved to 512,
+# which is a false statement about the code in precisely the shape this section
+# exists to catch. An unchecked duplicate of a checked claim is worse than no
+# claim, because the reader cannot tell which copy is the live one.
+doc_counts=$(grep -oE 'shellcheck \+ [0-9]+ (fixture )?assertions' "$README" | grep -oE '[0-9]+' || true)
+doc_count=$(printf '%s\n' "$doc_counts" | head -1)
+n_doc_counts=$(printf '%s\n' "$doc_counts" | grep -c . || true)
 [ -n "$doc_count" ] && t_pass "the README states an assertion count ($doc_count)" \
-  || t_fail "the README states an assertion count" "no 'N fixture assertions' line found"
+  || t_fail "the README states an assertion count" "no 'N assertions' line found"
+[ "${n_doc_counts:-0}" -ge 2 ] && t_pass "and states it in $n_doc_counts places, all of them checked" \
+  || t_fail "every stated assertion count is found" "only $n_doc_counts — the pattern has drifted"
+assert_eq "$(printf '%s\n' "$doc_counts" | sort -u | grep -c .)" "1" \
+  "every copy of the count in the README states the SAME number"
 DOC_ASSERTION_COUNT="${doc_count:-0}"    # checked against the real tally at the end
 
 # ================================================================== verify ====
@@ -2762,6 +2776,119 @@ assert_not_contains "$out3" "resuming its existing feature: specs/900-unrelated-
   "the resume fallback also refuses an already-merged foreign directory"
 assert_eq "$(jq -r '.entries.one.feature_dir' "$FS/.specify/roadmaps/rm.state.json")" "" \
   "and still does not attribute it to this entry"
+
+# 🛑 The claim the guard exists to prevent, asserted rather than described. The
+# comment above stated that without it the status "flips to done on the very next
+# run"; that was true — verified by removing the guard and running twice: the
+# second run printed "✓ one — landed on main" AND "✓ roadmap 'rm' complete — all
+# 1 entries landed on main", with the entry recorded done. So the roadmap
+# declared ITSELF finished having never run a phase. A stated measurement with no
+# assertion behind it is exactly what this suite exists to stop drifting.
+out4=$(SPEC_RUN_CLAUDE_BIN=claude-broken "$SPEC_ROADMAP" run --repo "$FS" --slug rm --base main 2>&1) || true
+assert_not_contains "$out4" "landed on main" \
+  "a SECOND run still does not report the never-run entry as landed"
+assert_not_contains "$out4" "entries landed on main" \
+  "nor declare the whole roadmap complete over work that was never built"
+assert_eq "$(jq -r '.entries.one.status' "$FS/.specify/roadmaps/rm.state.json")" "blocked" \
+  "and the status stays blocked instead of flipping to done"
+
+# --- an UNMERGED foreign pointer: the merged test alone does not catch it
+# "Already merged" is a SYMPTOM of the invariant, not the invariant. The real
+# rule is "this directory is this entry's", and a manual `spec-run` on a side
+# branch satisfies the first test while failing the second. Measured with the
+# merged test alone: the pointer was recorded as the entry's feature_dir and the
+# next run printed "resuming its existing feature: specs/915-manual-sidefix",
+# handing spec-run --feature-dir another feature's plan and tasks.md.
+#
+# 🛑 Tested on the DESCRIPTION and on pointer freshness, never on the slug. The
+# slug looks like the directory's name and is not: spec-run is given the entry's
+# description, and spec-kit derives the directory from that through a sanitiser.
+# Measured on one real 9-entry roadmap, three entries disagree —
+# contacts-job-attribution → specs/013-contact-network, gear-and-stash →
+# specs/017-loot-gear-v1, perk-milestones → specs/018-skill-perks — so a
+# slug-mismatch rejection would have discarded a third of its legitimate
+# directories. This fixture keeps the two apart on purpose: the foreign
+# directory's name below would ALSO fail a slug test, so only asserting the
+# messages distinguishes the rule that shipped from the one that did not.
+FU="$WORK/foreignunmerged"; mkbare "$FU" main
+"$SPEC_BOOTSTRAP" "$FU" >/dev/null 2>&1
+git -C "$FU" add -A >/dev/null 2>&1; git -C "$FU" commit -qm bootstrap
+mkdir -p "$FU/.specify/roadmaps"
+printf '{"goal":"g","base":"main","entries":[{"slug":"one","title":"first","description":"do one"}]}\n' \
+  > "$FU/.specify/roadmaps/rm.json"
+git -C "$FU" add -A >/dev/null 2>&1; git -C "$FU" commit -qm roadmap
+# A foreign feature committed on a SIDE BRANCH only — never merged to main.
+git -C "$FU" checkout -q -b side-manual-fix
+mkdir -p "$FU/specs/915-manual-sidefix"
+{ printf '# Tasks\n'; for i in $(seq 1 40); do printf 'padding %s\n' "$i"; done; printf -- '- [ ] T1 unrelated\n'; } \
+  > "$FU/specs/915-manual-sidefix/tasks.md"
+git -C "$FU" add -A >/dev/null 2>&1; git -C "$FU" commit -qm "manual side feature, NOT merged"
+git -C "$FU" checkout -q main
+# the directory stays on disk, as it would after a manual run, pointer and all
+mkdir -p "$FU/specs/915-manual-sidefix"
+git -C "$FU" show side-manual-fix:specs/915-manual-sidefix/tasks.md \
+  > "$FU/specs/915-manual-sidefix/tasks.md"
+# A real manual run leaves pipeline state behind, and that state is what says
+# whose directory this is.
+mkdir -p "$FU/specs/915-manual-sidefix/.pipeline"
+printf '{"version":1,"feature_dir":"specs/915-manual-sidefix","description":"a manual side fix","phases":{}}\n' \
+  > "$FU/specs/915-manual-sidefix/.pipeline/state.json"
+printf '{\n  "feature_directory": "specs/915-manual-sidefix"\n}\n' > "$FU/.specify/feature.json"
+# The precondition that makes this a different case from the block above.
+git -C "$FU" cat-file -e "main:specs/915-manual-sidefix/tasks.md" 2>/dev/null \
+  && t_fail "the foreign directory is NOT on main" "it is merged, so this fixture tests the wrong thing" \
+  || t_pass "the foreign directory is not on main, so the merged test cannot catch it"
+
+out5=$(SPEC_RUN_CLAUDE_BIN=claude-broken "$SPEC_ROADMAP" run --repo "$FU" --slug rm --base main 2>&1) || true
+assert_eq "$(jq -r '.entries.one.feature_dir' "$FU/.specify/roadmaps/rm.state.json")" "" \
+  "an UNMERGED foreign directory is refused too, on pointer freshness"
+assert_contains "$out5" "this run never updated it" \
+  "because the pointer is unchanged from before the run, not because of its name"
+assert_not_contains "$out5" "slug is not" \
+  "and never on a slug comparison, which real directory names do not satisfy"
+
+out6=$(SPEC_RUN_CLAUDE_BIN=claude-broken "$SPEC_ROADMAP" run --repo "$FU" --slug rm --base main 2>&1) || true
+assert_not_contains "$out6" "resuming its existing feature: specs/915-manual-sidefix" \
+  "so no later run resumes spec-run into another feature's directory"
+assert_contains "$out6" "created for different work" \
+  "the resume probe refuses it on what the directory's own state records"
+# 🛑 Mutation, both halves, and the second is why the first is not enough: drop
+# the pointer-freshness clause and feature_dir becomes specs/915-manual-sidefix;
+# drop the probe's description clause and out6 carries that resume line even with
+# feature_dir empty, because the probe re-reads the same repo-wide pointer. The
+# damage is not a label — resume_dir is passed as --feature-dir, so implement
+# writes code against another feature's plan.
+
+# ...and the same probe still ADOPTS a directory whose state says it is this
+# entry's. Without this, the guard above could be "refuse everything", which
+# would cut a duplicate feature and build the entry twice — a silent doubling
+# that looks like success.
+printf '{"version":1,"feature_dir":"specs/915-manual-sidefix","description":"do one","phases":{}}\n' \
+  > "$FU/specs/915-manual-sidefix/.pipeline/state.json"
+printf '{\n  "feature_directory": "specs/915-manual-sidefix"\n}\n' > "$FU/.specify/feature.json"
+out7=$(SPEC_RUN_CLAUDE_BIN=claude-broken "$SPEC_ROADMAP" run --repo "$FU" --slug rm --base main 2>&1) || true
+assert_contains "$out7" "resuming its existing feature: specs/915-manual-sidefix" \
+  "a directory whose recorded description IS this entry's is still resumed"
+
+# An ABSENT state.json is unknown, not a mismatch, and must still adopt: it may
+# be this entry's own half-created work, and refusing it costs a duplicate build.
+rm -rf "$FU/specs/915-manual-sidefix/.pipeline"
+printf '{\n  "feature_directory": "specs/915-manual-sidefix"\n}\n' > "$FU/.specify/feature.json"
+out8=$(SPEC_RUN_CLAUDE_BIN=claude-broken "$SPEC_ROADMAP" run --repo "$FU" --slug rm --base main 2>&1) || true
+assert_contains "$out8" "resuming its existing feature: specs/915-manual-sidefix" \
+  "and a directory with no pipeline state at all is adopted rather than refused"
+
+# --- the reader itself
+DESCDIR="$WORK/descread"; mkdir -p "$DESCDIR/specs/001-x/.pipeline"
+printf '{"version":1,"description":"build the thing","phases":{}}\n' \
+  > "$DESCDIR/specs/001-x/.pipeline/state.json"
+assert_eq "$(feature_dir_description "$DESCDIR" "specs/001-x")" "build the thing" \
+  "feature_dir_description reads what the directory says it was created for"
+assert_eq "$(feature_dir_description "$DESCDIR" "specs/404-absent")" "" \
+  "and reports nothing — unknown, not a mismatch — when there is no state to read"
+printf '{"version":1,"phases":{}}\n' > "$DESCDIR/specs/001-x/.pipeline/state.json"
+assert_eq "$(feature_dir_description "$DESCDIR" "specs/001-x")" "" \
+  "nor invents one from state that records no description"
 
 # the merge gate still gates the case it was written for
 MG="$WORK/mergegate"; mkbare "$MG" main

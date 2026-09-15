@@ -580,10 +580,29 @@ while [ "$ei" -lt "$n_entries" ]; do
       # resumes into a PRIOR, unrelated entry's already-completed feature dir.
       probe=$(jq -r '.feature_directory // empty' "$REPO/.specify/feature.json" 2>/dev/null)
       if [ -n "$probe" ] && [ -d "$REPO/$probe" ]; then
+        probe_desc=$(feature_dir_description "$REPO" "$probe")
         if git -C "$REPO" cat-file -e "$BASE:$probe/tasks.md" 2>/dev/null; then
           warn "    .specify/feature.json points at $probe, already merged to $BASE —"
           warn "    ignoring it: that cannot be this entry's unfinished work"
+        elif [ -n "$probe_desc" ] && [ "$probe_desc" != "$description" ]; then
+          # 🛑 The directory's OWN state says it was created for different work.
+          # Adopting it here is not merely a mislabelled status: resume_dir is
+          # passed to spec-run as --feature-dir, so the phases would run against
+          # another feature's spec, plan and tasks.md. Measured: a manual
+          # `spec-run` on a side branch left the pointer behind, entry `one`
+          # failed at preflight, and the next run printed "resuming its existing
+          # feature: specs/915-manual-sidefix".
+          #
+          # Compared on the DESCRIPTION and not the slug, because the slug is not
+          # the directory's name — see feature_dir_description for the production
+          # data that killed that idea.
+          warn "    .specify/feature.json points at $probe, which its own state says"
+          warn "    was created for different work — ignoring it, it is not this entry's"
         else
+          # Empty probe_desc is UNKNOWN, not a mismatch, so it still adopts: a
+          # directory whose state.json is missing may be this entry's own
+          # half-created work, and refusing it would cut a duplicate feature and
+          # build the entry twice. Failing open here costs less than that.
           resume_dir="$probe"
         fi
       fi
@@ -700,6 +719,12 @@ while [ "$ei" -lt "$n_entries" ]; do
     fi
   fi
 
+  # What the repo-wide pointer said BEFORE this run, so that afterwards we can
+  # tell "this run went there" from "nobody moved the pointer". Captured here,
+  # immediately before the invocation, rather than earlier in the loop: anything
+  # between could legitimately change it.
+  fjson_before=$(jq -r '.feature_directory // empty' "$REPO/.specify/feature.json" 2>/dev/null)
+
   # NOT "${PASSTHROUGH[@]:-}": on bash 3.2 an empty array expands that way to a
   # single EMPTY argument, which spec-run then reads as part of the feature
   # description. It survives by luck today (an empty first positional collapses
@@ -730,11 +755,54 @@ while [ "$ei" -lt "$n_entries" ]; do
   # already-merged tasks.md and report a brand-new, never-run entry "done".
   # Guard identically: a directory already merged to $BASE cannot be this run's
   # output unless it is the directory we explicitly resumed ourselves.
-  if [ -n "$newdir" ] && [ "$newdir" != "$resume_dir" ] && \
-     git -C "$REPO" cat-file -e "$BASE:$newdir/tasks.md" 2>/dev/null; then
-    warn "    .specify/feature.json points at $newdir, already merged to $BASE —"
-    warn "    discarding it as stale: it is not this entry's"
-    newdir=""
+  #
+  # 🛑 AND a second, independent reason to refuse, because "already merged" is
+  # not the invariant — it is one symptom of it. The invariant is "this directory
+  # is this entry's", and an UNMERGED foreign pointer satisfies the merged test
+  # while failing the real one. Measured, with the merged test alone in place: a
+  # manual `spec-run` left .specify/feature.json pointing at
+  # specs/915-manual-sidefix, committed on a side branch and never merged; entry
+  # `one` failed at preflight; the pointer was recorded as entry one's
+  # feature_dir; and the NEXT run printed "resuming its existing feature:
+  # specs/915-manual-sidefix" and handed spec-run --feature-dir that path. That
+  # is worse in kind than the mislabelled status this guard was written for —
+  # implement would have written code against another feature's plan and ticked
+  # another feature's tasks.md.
+  #
+  # Reachable because the recorded-feature_dir path above is deliberately
+  # UNGUARDED: a recorded directory is normally trustworthy. This line is what
+  # makes that true.
+  if [ -n "$newdir" ] && [ "$newdir" != "$resume_dir" ]; then
+    _stale_why=""
+    if git -C "$REPO" cat-file -e "$BASE:$newdir/tasks.md" 2>/dev/null; then
+      _stale_why="it is already merged to $BASE, so it cannot be this run's output"
+    elif [ "$newdir" = "$fjson_before" ]; then
+      # The pointer is byte-identical to what it held BEFORE this run, so this
+      # run never wrote it: it is somebody else's leftover, not this entry's
+      # output. This is the real invariant — "did this invocation tell us where
+      # it went" — and unlike "already merged" it needs no naming convention and
+      # no guess about what the directory contains.
+      #
+      # An UNMERGED foreign pointer is what makes it necessary. Measured with the
+      # merged test alone in place: a manual `spec-run` left feature.json at
+      # specs/915-manual-sidefix, committed on a side branch and never merged;
+      # entry `one` failed at preflight; that path was recorded as the entry's
+      # feature_dir, and the next run printed "resuming its existing feature:
+      # specs/915-manual-sidefix", handing spec-run --feature-dir another
+      # feature's plan. implement would have written code against the wrong spec
+      # and ticked the wrong tasks.md — worse in kind than the mislabelled status
+      # the merged test was written for.
+      #
+      # A resumed entry is exempt by the condition above: it legitimately reuses
+      # a directory this run did not create, and we chose that directory
+      # ourselves.
+      _stale_why="this run never updated it — it is unchanged from before the run"
+    fi
+    if [ -n "$_stale_why" ]; then
+      warn "    .specify/feature.json points at $newdir — $_stale_why"
+      warn "    discarding it as stale: it is not this entry's"
+      newdir=""
+    fi
   fi
   newbranch=$(git -C "$REPO" rev-parse --abbrev-ref HEAD 2>/dev/null)
   ecost=0
