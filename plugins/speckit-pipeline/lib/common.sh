@@ -272,15 +272,62 @@ state_phase_start() { # state_phase_start <state_file> <phase> <session_id> <mod
      })' "$f" > "$tmp" && mv "$tmp" "$f"
 }
 
-_runner_alive() { # <pid> — true only if the pid is live AND is a spec-run
-  local pid="${1:-}"
+# Is the runner that recorded this phase still running?
+#
+#   0  alive — the pid is live AND is a spec-run
+#   1  gone  — it is not running, or is some unrelated process holding a reused pid
+#   2  CANNOT TELL — the process table is unreadable here
+#
+# 🛑 The third outcome is the whole point, and its absence was a real defect
+# against the state file that is the resume authority. The check used to end on
+#
+#     ps -o command= -p "$pid" | grep -q spec-run
+#
+# so where `ps` is DENIED rather than merely unhelpful, the grep matched nothing
+# and a LIVE runner reported as gone. Measured against a live roadmap on this
+# machine: pid 12199 was a running spec-run, and the same call returned FALSE
+# inside Claude Code's Bash sandbox (`ps` → "operation not permitted") and TRUE
+# outside it. state_reconcile_running then relabels that phase `interrupted` and
+# WRITES it, so any spec-status or spec-run from a sandboxed session recorded a
+# lie about a run that was still working — and invited a resume over work in
+# flight.
+#
+# The comment this replaces had the right instinct and guarded only one
+# direction: it worried that a reused pid would report an interrupted phase as
+# still running, because "an unsatisfiable block is worse than a wrong label".
+# Both errors are now representable, so neither has to be guessed.
+_runner_alive() { # _runner_alive <pid>
+  local pid="${1:-}" cmd
+  # No pid, or a malformed one, is GONE and not unknown: there is nothing to
+  # check, which is the same evidence as a phase that recorded no runner at all.
   case "$pid" in ''|*[!0-9]*) return 1;; esac
-  kill -0 "$pid" 2>/dev/null || return 1
-  # Checking the command too, because a bare `kill -0` is defeated by pid reuse,
-  # and the wrong direction of that error is the expensive one: a reused pid
-  # would report an interrupted phase as still running, and the tool would then
-  # refuse to re-run it — an unsatisfiable block is worse than a wrong label.
-  ps -o command= -p "$pid" 2>/dev/null | grep -q spec-run
+
+  # ⚠️ READABILITY IS A PRECONDITION, checked before anything else and not as a
+  # fallback. Two attempts got this wrong in the same way, so the ordering is the
+  # fix and deserves the emphasis:
+  #
+  #   * `ps … | grep -q spec-run` alone — a refused ps matched nothing, so a live
+  #     runner read as gone.
+  #   * `kill -0` first, then probe ps — under Claude Code's Bash sandbox
+  #     `kill -0` on a FOREIGN pid is itself refused (EPERM), and EPERM is
+  #     indistinguishable from ESRCH by exit status, so it returned `gone` and
+  #     never reached the probe at all. Measured on pid 12199, a live spec-run:
+  #     `kill -0` → "operation not permitted", `ps` → "operation not permitted",
+  #     `kill -0 $$` → fine. Signalling OURSELVES is allowed; that is why a
+  #     self-probe is the only trustworthy capability test here.
+  #
+  # The command line is REQUIRED for a positive answer — a bare pid check is
+  # defeated by pid reuse — so if the table cannot be read, the question is
+  # unanswerable however the pid check behaves. Probe with our own pid, which
+  # certainly exists, and answer CANNOT TELL.
+  [ -n "$(ps -o command= -p $$ 2>/dev/null)" ] || return 2
+
+  # From here the table IS readable, so its silence is evidence: no row for the
+  # pid means gone. `kill -0` is deliberately not used — ps answers existence and
+  # identity together, and one primitive has one failure mode instead of two.
+  cmd=$(ps -o command= -p "$pid" 2>/dev/null) || cmd=""
+  [ -n "$cmd" ] || return 1
+  case "$cmd" in *spec-run*) return 0;; *) return 1;; esac
 }
 
 state_reconcile_running() { # <state_file> — a `running` phase whose runner is
@@ -294,9 +341,23 @@ state_reconcile_running() { # <state_file> — a `running` phase whose runner is
                  | select(.value.status == "running")
                  | "\(.key)\t\(.value.runner_pid // "")"' "$f" 2>/dev/null) || return 0
   [ -n "$stale" ] || return 0
+  local alive
   while IFS="$(printf '\t')" read -r p pid; do
     [ -n "$p" ] || continue
-    _runner_alive "$pid" && continue
+    alive=0; _runner_alive "$pid" || alive=$?
+    [ "$alive" -eq 0 ] && continue
+    # 🛑 CANNOT TELL is not permission to relabel. Leaving the phase `running` is
+    # the recoverable error: a phase that really is alive keeps its true status
+    # and will record its own outcome, whereas writing `interrupted` over a live
+    # run puts a falsehood in the file the resume path trusts. Said out loud
+    # rather than skipped silently, because a `running` phase that nothing can
+    # verify is a different claim from one that was just confirmed.
+    if [ "$alive" -eq 2 ]; then
+      warn "$p is recorded running, and this shell cannot read the process table"
+      printf '  so whether its runner is alive is unknown — leaving it as running.\n' >&2
+      printf '  Re-run from a shell that can use `ps` to have it reconciled.\n' >&2
+      continue
+    fi
     tmp=$(mktmp)
     jq --arg p "$p" --arg t "$(now_iso)" \
       '.phases[$p] += {status:"interrupted", ended_at:$t,

@@ -2949,33 +2949,116 @@ IRD="$WORK/interrupted"; mkdir -p "$IRD"
 IRS="$IRD/state.json"
 printf '{"version":1,"phases":{}}\n' > "$IRS"
 
-# a runner that is definitely gone: claim a pid that cannot be ours
+# 🛑 Liveness is only ANSWERABLE where the process table can be read, and this
+# suite runs in both kinds of place — so the assertions split accordingly rather
+# than pretending one answer is universal. Inside Claude Code's Bash sandbox both
+# `ps` and `kill -0` on a foreign pid are refused, and the honest verdict there
+# is CANNOT TELL, not "gone". The gated block below is what that costs.
+_ps_ok=0
+[ -n "$(ps -o command= -p $$ 2>/dev/null)" ] && _ps_ok=1
+
+if [ "$_ps_ok" -eq 1 ]; then
+  # a runner that is definitely gone: claim a pid that cannot be ours
+  printf '%s\n' '{"version":1,"phases":{
+    "specify":{"status":"ok","cost_usd":1.5},
+    "implement":{"status":"running","runner_pid":999999}}}' > "$IRS"
+  state_reconcile_running "$IRS"
+  assert_eq "$(jqd "$IRS" '.phases.implement.status' '')" "interrupted" \
+    "a running phase whose runner is gone becomes interrupted"
+  assert_contains "$(jqd "$IRS" '.phases.implement.note' '')" "unmeasured" \
+    "saying the cost and turns were never recorded"
+
+  # a LIVE pid that is not ours must still not be trusted: a bare pid check is
+  # defeated by pid reuse, so identity is checked as well as existence.
+  printf '%s\n' '{"version":1,"phases":{"plan":{"status":"running","runner_pid":1}}}' > "$IRS"
+  state_reconcile_running "$IRS"
+  assert_eq "$(jqd "$IRS" '.phases.plan.status' '')" "interrupted" \
+    "pid 1 is alive but is not a spec-run, so the phase is still interrupted"
+else
+  t_skip "a gone runner becomes interrupted" "the process table is unreadable here"
+  PLATFORM_GATED_ASSERTIONS=$((${PLATFORM_GATED_ASSERTIONS:-0} + 3))
+fi
+
+# Independent of ps either way: a finished phase is never touched by reconcile.
 printf '%s\n' '{"version":1,"phases":{
   "specify":{"status":"ok","cost_usd":1.5},
   "implement":{"status":"running","runner_pid":999999}}}' > "$IRS"
-state_reconcile_running "$IRS"
-assert_eq "$(jqd "$IRS" '.phases.implement.status' '')" "interrupted" \
-  "a running phase whose runner is gone becomes interrupted"
+state_reconcile_running "$IRS" >/dev/null 2>&1
 assert_eq "$(jqd "$IRS" '.phases.specify.status' '')" "ok" \
   "and a finished phase is left alone"
-assert_contains "$(jqd "$IRS" '.phases.implement.note' '')" "unmeasured" \
-  "saying the cost and turns were never recorded"
-
-# a LIVE runner must not be reclassified. $$ is this suite, whose command line
-# is not spec-run, so the pid-alive test alone would be a false negative here —
-# which is the point: liveness is checked against the command too, because a
-# reused pid reporting an interrupted phase as running would make the tool
-# refuse to re-run it, and an unsatisfiable block is worse than a wrong label.
-printf '%s\n' '{"version":1,"phases":{"plan":{"status":"running","runner_pid":1}}}' > "$IRS"
-state_reconcile_running "$IRS"
-assert_eq "$(jqd "$IRS" '.phases.plan.status' '')" "interrupted" \
-  "pid 1 is alive but is not a spec-run, so the phase is still interrupted"
 
 # a phase recorded before runner_pid existed has nothing to check against
 printf '%s\n' '{"version":1,"phases":{"tasks":{"status":"running"}}}' > "$IRS"
 state_reconcile_running "$IRS"
 assert_eq "$(jqd "$IRS" '.phases.tasks.status' '')" "interrupted" \
   "a running phase with no runner_pid at all is interrupted, not trusted"
+
+# 🛑 …and an UNREADABLE process table is none of the above. It is the case that
+# made this a real defect rather than a tidiness argument: `ps` is present on
+# PATH inside Claude Code's Bash sandbox and `ps -eo`/`ps -p` is REFUSED, so the
+# old `ps … | grep -q spec-run` matched nothing and a live runner read as gone.
+# Measured against a live roadmap on this machine: pid 12199 was a running
+# spec-run, and the same call returned FALSE inside the sandbox and TRUE outside
+# it — so a spec-status from a sandboxed session wrote `interrupted` over a phase
+# that was still working, into the file the resume path trusts.
+PSF="$WORK/psfake"; mkdir -p "$PSF"
+printf '#!/usr/bin/env bash\nexit 1\n' > "$PSF/ps"; chmod +x "$PSF/ps"
+printf '#!/usr/bin/env bash\nsleep 30\n' > "$PSF/spec-run-probe"; chmod +x "$PSF/spec-run-probe"
+
+# These two hold everywhere: both return before any probe is needed.
+_al=0; _runner_alive "" || _al=$?
+assert_eq "$_al" "1" "an absent pid is GONE, not unknown — there is nothing to check"
+_al=0; _runner_alive "not-a-pid" || _al=$?
+assert_eq "$_al" "1" "and so is a malformed one"
+
+# CANNOT TELL is reachable in EVERY environment, by shadowing ps with one that
+# fails — so the case the defect got wrong is asserted even where the real table
+# is readable, and even where it is not.
+_al=$( PATH="$PSF:$PATH"; _runner_alive 999999; echo $? )
+assert_eq "$_al" "2" "with the process table unreadable, liveness reports CANNOT TELL"
+
+# …and the reconciler must not act on that. Leaving `running` is the recoverable
+# error: a live phase keeps its true status and records its own outcome, whereas
+# `interrupted` written over a live run is a falsehood in the resume authority.
+printf '%s\n' '{"version":1,"phases":{"implement":{"status":"running","runner_pid":4242}}}' > "$IRS"
+_rec=$( PATH="$PSF:$PATH"; state_reconcile_running "$IRS" 2>&1 )
+assert_eq "$(jqd "$IRS" '.phases.implement.status' '')" "running" \
+  "a running phase is LEFT running when liveness cannot be determined"
+assert_contains "$_rec" "cannot read the process table" \
+  "and says so, because an unverifiable running phase is a different claim"
+# 🛑 Mutation: restore either two-outcome form — the bare `ps | grep -q`, or
+# `kill -0` before the readability probe — and this pair fails, recording
+# `interrupted` and printing nothing. That is exactly what a live crimeball run
+# got from a sandboxed spec-status.
+
+if [ "$_ps_ok" -eq 1 ]; then
+  # A live process whose command really contains spec-run, so ALIVE is reachable
+  # rather than asserted only in its negative forms — without which "leave it
+  # running" could be satisfied by a check that never says alive at all.
+  "$PSF/spec-run-probe" & _sr_pid=$!
+  sleep 1
+  _al=0; _runner_alive "$_sr_pid" || _al=$?
+  assert_eq "$_al" "0" "a live process whose command is a spec-run reports ALIVE"
+  _al=0; _runner_alive 999999 || _al=$?
+  assert_eq "$_al" "1" "a pid that is not running reports GONE"
+  _al=0; _runner_alive 1 || _al=$?
+  assert_eq "$_al" "1" "a live pid that is not a spec-run also reports GONE"
+
+  printf '%s\n' "{\"version\":1,\"phases\":{\"implement\":{\"status\":\"running\",\"runner_pid\":$_sr_pid}}}" > "$IRS"
+  _rec=$(state_reconcile_running "$IRS" 2>&1)
+  assert_eq "$(jqd "$IRS" '.phases.implement.status' '')" "running" \
+    "a verifiably live runner keeps its phase running"
+  assert_eq "$_rec" "" "with nothing to report"
+  # Killing it makes the SAME state reconcile to interrupted — which is what keeps
+  # the assertion above from passing merely because nothing is ever relabelled.
+  kill "$_sr_pid" 2>/dev/null; wait "$_sr_pid" 2>/dev/null || true
+  state_reconcile_running "$IRS"
+  assert_eq "$(jqd "$IRS" '.phases.implement.status' '')" "interrupted" \
+    "and once that runner is really dead, the same state becomes interrupted"
+else
+  t_skip "live-runner liveness" "the process table is unreadable here"
+  PLATFORM_GATED_ASSERTIONS=$((${PLATFORM_GATED_ASSERTIONS:-0} + 6))
+fi
 
 # ------------------------------------------------ spend is read, not remembered --
 printf '\nroadmap spend\n'
