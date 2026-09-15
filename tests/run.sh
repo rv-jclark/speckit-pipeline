@@ -2710,6 +2710,59 @@ out=$(SPEC_RUN_CLAUDE_BIN=claude-broken "$SPEC_ROADMAP" run --repo "$FR" --slug 
 assert_contains "$out" "recorded as blocked" \
   "a blocked entry with no feature directory is not described as in progress"
 
+# 🛑 A failed entry must never adopt a FOREIGN, already-merged feature directory
+# via .specify/feature.json. That file is repo-wide, not scoped to this entry or
+# even this roadmap — it is whatever the last spec-run invocation ANYWHERE last
+# wrote. claude-broken fails before writing anything at all, which is exactly
+# what a missing-skill precondition check does in the real pipeline: it exits 1
+# before feature-dir discovery ever runs. Measured on a real roadmap: a stale
+# pointer left over from a different, already-landed roadmap's entry got
+# attributed to a brand-new entry that had never run a single phase, and the
+# next `run` found that unrelated entry's real tasks.md on main and reported the
+# new entry "done" — cost $0 of actual work credited as a fully landed feature.
+FS="$WORK/foreignstale"; mkbare "$FS" main
+"$SPEC_BOOTSTRAP" "$FS" >/dev/null 2>&1
+git -C "$FS" add -A >/dev/null 2>&1; git -C "$FS" commit -qm bootstrap
+# An unrelated feature, already landed on main — nothing to do with the roadmap
+# entry about to run.
+mkdir -p "$FS/specs/900-unrelated-done"
+{ printf '# Tasks\n'; for i in $(seq 1 40); do printf 'padding %s\n' "$i"; done; printf -- '- [x] T1 x\n'; } \
+  > "$FS/specs/900-unrelated-done/tasks.md"
+git -C "$FS" add -A >/dev/null 2>&1; git -C "$FS" commit -qm "unrelated feature, already landed"
+mkdir -p "$FS/.specify/roadmaps"
+printf '{"goal":"g","base":"main","entries":[{"slug":"one","title":"first","description":"do one"}]}\n' \
+  > "$FS/.specify/roadmaps/rm.json"
+git -C "$FS" add -A >/dev/null 2>&1; git -C "$FS" commit -qm roadmap
+# The stale pointer: as if the last spec-run anywhere touched this unrelated dir.
+printf '{\n  "feature_directory": "specs/900-unrelated-done"\n}\n' > "$FS/.specify/feature.json"
+
+out=$(SPEC_RUN_CLAUDE_BIN=claude-broken "$SPEC_ROADMAP" run --repo "$FS" --slug rm --base main 2>&1); rc=$?
+assert_eq "$rc" "1" "the entry still fails (claude-broken writes nothing)"
+assert_eq "$(jq -r '.entries.one.status' "$FS/.specify/roadmaps/rm.state.json")" "blocked" \
+  "and is recorded blocked, not done"
+assert_eq "$(jq -r '.entries.one.feature_dir' "$FS/.specify/roadmaps/rm.state.json")" "" \
+  "the foreign, already-merged directory is NOT attributed to this entry"
+assert_not_contains "$out" "landed on main" \
+  "and the run never claims this brand-new entry has landed"
+# Mutation: drop the already-merged guard on the failure-recording path and
+# entries.one.feature_dir becomes "specs/900-unrelated-done", status flips to
+# "done" on the very next `run`, and the roadmap silently skips entry one having
+# never run a single phase for it.
+
+out2=$(SPEC_ROADMAP_QUIET=1 "$SPEC_ROADMAP" show --repo "$FS" --slug rm 2>&1)
+assert_contains "$out2" "0 of 1 landed" \
+  "show agrees: nothing has landed, despite the foreign tasks.md sitting on main"
+
+# The same foreign-pointer risk applies to the RESUME probe (a blocked/in_progress
+# entry with no feature_dir of its own falls back to .specify/feature.json too).
+roadmap_entry_set "$FS/.specify/roadmaps/rm.state.json" one '{"status":"blocked"}'
+printf '{\n  "feature_directory": "specs/900-unrelated-done"\n}\n' > "$FS/.specify/feature.json"
+out3=$(SPEC_RUN_CLAUDE_BIN=claude-broken "$SPEC_ROADMAP" run --repo "$FS" --slug rm --base main 2>&1) || true
+assert_not_contains "$out3" "resuming its existing feature: specs/900-unrelated-done" \
+  "the resume fallback also refuses an already-merged foreign directory"
+assert_eq "$(jq -r '.entries.one.feature_dir' "$FS/.specify/roadmaps/rm.state.json")" "" \
+  "and still does not attribute it to this entry"
+
 # the merge gate still gates the case it was written for
 MG="$WORK/mergegate"; mkbare "$MG" main
 "$SPEC_BOOTSTRAP" "$MG" >/dev/null 2>&1

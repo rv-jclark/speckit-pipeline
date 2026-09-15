@@ -570,8 +570,23 @@ while [ "$ei" -lt "$n_entries" ]; do
     if [ -n "$fdir" ] && [ -d "$REPO/$fdir" ]; then
       resume_dir="$fdir"
     else
+      # 🛑 .specify/feature.json is REPO-WIDE, not scoped to this entry or even
+      # this roadmap — it is whatever the last spec-run invocation anywhere last
+      # wrote. A directory already merged onto $BASE cannot be an entry's
+      # unfinished/failed work (unfinished work is by definition not on base
+      # yet), so that is the cheap, sufficient test for "foreign": refuse to
+      # adopt it. Without this, an entry whose first attempt failed before ever
+      # touching feature.json (e.g. a missing-skill precondition check) silently
+      # resumes into a PRIOR, unrelated entry's already-completed feature dir.
       probe=$(jq -r '.feature_directory // empty' "$REPO/.specify/feature.json" 2>/dev/null)
-      [ -n "$probe" ] && [ -d "$REPO/$probe" ] && resume_dir="$probe"
+      if [ -n "$probe" ] && [ -d "$REPO/$probe" ]; then
+        if git -C "$REPO" cat-file -e "$BASE:$probe/tasks.md" 2>/dev/null; then
+          warn "    .specify/feature.json points at $probe, already merged to $BASE —"
+          warn "    ignoring it: that cannot be this entry's unfinished work"
+        else
+          resume_dir="$probe"
+        fi
+      fi
     fi
     if [ -n "$resume_dir" ]; then
       dim "    resuming its existing feature: $resume_dir"
@@ -705,6 +720,22 @@ while [ "$ei" -lt "$n_entries" ]; do
 
   # Learn where it landed, and what it cost, from the pipeline's own state.
   newdir=$(jq -r '.feature_directory // empty' "$REPO/.specify/feature.json" 2>/dev/null)
+  # 🛑 Same foreign-pointer risk as the resume probe above, and higher stakes:
+  # this value gets WRITTEN into state.json as the entry's feature_dir on every
+  # exit path, including failure. A phase that fails before ever touching
+  # feature.json (a missing-skill precondition, a bootstrap error) leaves it
+  # holding whatever an unrelated prior entry — possibly from a different
+  # roadmap entirely — last wrote there. Recording that as THIS entry's
+  # feature_dir is what let a later `entry_landed` find that prior entry's
+  # already-merged tasks.md and report a brand-new, never-run entry "done".
+  # Guard identically: a directory already merged to $BASE cannot be this run's
+  # output unless it is the directory we explicitly resumed ourselves.
+  if [ -n "$newdir" ] && [ "$newdir" != "$resume_dir" ] && \
+     git -C "$REPO" cat-file -e "$BASE:$newdir/tasks.md" 2>/dev/null; then
+    warn "    .specify/feature.json points at $newdir, already merged to $BASE —"
+    warn "    discarding it as stale: it is not this entry's"
+    newdir=""
+  fi
   newbranch=$(git -C "$REPO" rev-parse --abbrev-ref HEAD 2>/dev/null)
   ecost=0
   if [ -n "$newdir" ] && [ -f "$REPO/$newdir/.pipeline/state.json" ]; then
