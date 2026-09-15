@@ -1103,6 +1103,64 @@ assert_contains "$out" "raise max_turns" "and names the actionable remedy"
 # Mutation: drop the is_error branch and this reports `ok` at 81 turns with a
 # cost, because the template clears the size floor and asks no questions.
 
+# --------------------------------------- a phase that emits TWO result envelopes
+# 🛑 Measured 2026-09-15 on the SDLC roadmap's entry 8: the implement pass hit
+# `API Error: No response from API`, the CLI retried WITHIN the same invocation,
+# and the stream carried two `result` records. `extract_result_json`'s non-stream
+# branch used bare `jq` over what is a SEQUENCE, so it returned BOTH envelopes
+# and every figure downstream became two lines — observed in that log as
+# `$21.8689346\n22.644156`, `194\n6 turns`, `(success\nsuccess)` and
+# `[: 0\n0: integer expression expected`.
+#
+# The one that stopped the roadmap is the VERDICT: the first envelope is the
+# ABORTED attempt, so its `is_error` outvoted the retry's success and a pass that
+# exited 0 reporting `STATUS: ok` with 27 of 94 tasks ticked was recorded
+# `failed`. Hence the fake below: attempt one errors, the retry succeeds. That
+# ORDER is the whole point — with two clean envelopes `$(…)` strips the trailing
+# newlines and the same defect is silent, which is why this case must not be
+# written as two successes (the first version of it was, and it could not see
+# the failure at all).
+#
+# The artifact is fine and the exit code is 0, so nothing else in this suite can
+# see this: it is entirely a defect in reading the runner's own report.
+printf '\ntwo result envelopes (an in-invocation retry)\n'
+cat > "$FAKE/claude-two-results" <<'FAKEEOF'
+#!/usr/bin/env bash
+[ "${1:-}" = "--help" ] && exit 0
+{ printf '# Implementation Plan: Two envelopes\n\n'
+  for i in $(seq 1 40); do printf 'a wholly plausible plan line %s\n' "$i"; done
+  printf '\n## Complexity Tracking\n\n> Not applicable.\n'; } > "$SPEC_TEST_ARTIFACT"
+printf '{"type":"system","subtype":"init","session_id":"s1"}\n'
+# Attempt one, abandoned mid-flight; then the retry that finished the work.
+# Figures differ so the test can say WHICH envelope was read.
+printf '{"type":"result","subtype":"error_during_execution","is_error":true,"num_turns":194,"total_cost_usd":21.8689346,"duration_ms":900000,"permission_denials":[],"result":"API Error: No response from API"}\n'
+printf '{"type":"result","subtype":"success","is_error":false,"num_turns":6,"total_cost_usd":22.6441566,"duration_ms":40000,"permission_denials":[],"result":"STATUS: ok the retry finished the pass"}\n'
+exit 0
+FAKEEOF
+chmod +x "$FAKE/claude-two-results"
+mkdir -p "$KL/specs/004-x"
+out=$(SPEC_TEST_ARTIFACT="$KL/specs/004-x/plan.md" \
+      "$SPEC_RUN" --repo "$KL" --feature-dir "$KL/specs/004-x" \
+        --only plan --claude-bin claude-two-results 2>&1); rc=$?
+assert_eq "$rc" "0" "a phase whose CLI retried and emitted TWO result envelopes SUCCEEDS"
+# The specific wreckage the two-envelope parse produced, each asserted ABSENT —
+# a bare rc check passes against a build that merely fails differently.
+case "$out" in
+  *"integer expression expected"*) t_fail "no shell error from a two-line figure" "found 'integer expression expected'";;
+  *) t_pass "no shell error from a two-line figure";;
+esac
+case "$out" in
+  *"the runner reported failure"*) t_fail "the ABANDONED attempt's error does not outvote the retry" "found 'the runner reported failure'";;
+  *) t_pass "the ABANDONED attempt's error does not outvote the retry";;
+esac
+# And it reads the LAST envelope, not the first: the retry is the one that
+# describes how the invocation actually ended.
+assert_contains "$out" "6 turns" "the LAST envelope's turn count is the one recorded"
+case "$out" in
+  *194*) t_fail "the superseded first envelope is not reported" "found '194' from the first attempt";;
+  *) t_pass "the superseded first envelope is not reported";;
+esac
+
 # The template check stands on its own, independent of how the phase exited.
 printf '\nan unfilled template is not an artifact\n'
 TPL="$WORK/tpl.md"
