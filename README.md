@@ -5,9 +5,9 @@ Run the [spec-kit](https://github.com/github/spec-kit) phases as **separate
 ceiling per phase — instead of one long conversation that does all of them.
 
 ```
-specify  →  [clarify]  →  plan  →  tasks  →  [analyze]  →  [converge]  →  implement  →  review
- opus         opus         opus    sonnet      opus          opus          sonnet       opus
- high         high         high    medium      high          high          medium       xhigh
+specify  →  [clarify]  →  plan  →  tasks  →  [analyze]  →  [remediate]  →  [converge]  →  implement  →  review
+ opus         opus         opus    sonnet      opus            opus            opus          sonnet       opus
+ high         high         high    medium      high            high            high          medium       xhigh
 ```
 Bracketed phases are opt-in (`--with clarify`). Every value there is data, not
 code — see [Phases](#phases).
@@ -580,6 +580,7 @@ done its part and the next move is a human's.
 | plan | opus | high | — / 250 turns | kept | |
 | tasks | sonnet | medium | — / 120 turns | dropped | |
 | analyze | opus | high | — / 60 turns | dropped | `--with analyze` |
+| remediate | opus | high | — / 120 turns | dropped | `--with remediate` |
 | converge | opus | high | — / 120 turns | kept | `--with converge` |
 | implement | sonnet | medium | — / 1200 turns | dropped | |
 | review | opus | xhigh | — / 200 turns | dropped | |
@@ -628,6 +629,36 @@ failure a ceiling should actually catch, and unlike spend it means the same thin
 on subscription auth as on API auth. Add `max_budget_usd` back per phase (in your
 own `--config` / `SPEC_RUN_CONFIG` copy, or here) if you want one.
 
+**`remediate` is the touchless counterpart to `analyze`, and it drops analyze's
+own contract on purpose.** Upstream spec-kit's `/speckit-analyze` is strictly
+read-only — it reports findings and ends by asking a human to approve
+remediation before anything is applied. That is correct when a human is
+attending the pipeline. `remediate` is for when nobody is: it re-runs the same
+cross-artifact analysis itself (there is nothing else it *can* read — analyze's
+`artifact` is `null`, so it leaves no report file behind; the handoff between
+phases is files on disk, and analyze deliberately writes none) and then applies
+the fixes directly to `spec.md`, `plan.md`, `tasks.md`, and plan's supporting
+design docs, with no approval step in between.
+
+```bash
+spec-run --with remediate "add OAuth support"   # analyze, then fix it, then implement
+```
+
+It does not need `analyze` in the same `--with` list — `--with remediate` alone
+is the common case, since it performs its own analysis pass before fixing
+anything. Passing both still works; `remediate` just re-derives the same
+findings a second time.
+
+It is bounded the same way `converge` is: the default write scope (`specs/`,
+`.specify/`), so it can edit those documents but never code. And it does not
+resolve everything by force — a finding that is a genuine product decision
+(two requirements that are legitimately, mutually exclusive) is left unresolved
+and reported as `needs_input` rather than picked silently, the same escape
+every other phase in this pipeline has. It writes `remediate-report.md` as its
+artifact — one row per finding, resolved or not — so "nothing was wrong" and
+"nothing was checked" stay distinguishable, the same way `review.md` keeps them
+apart.
+
 **`converge` is the recovery phase, and it is why a dead implement is not a lost
 entry.** It reads `spec.md`, `plan.md` and `tasks.md`, assesses what the codebase
 actually implements against them, and **appends** a `## Phase N: Convergence`
@@ -669,7 +700,7 @@ implement loop on the new tasks, then reviews again.
 
 Two decisions in it are load-bearing:
 
-- **It is not optional**, unlike `analyze` and `converge`. An opt-in final check
+- **It is not optional**, unlike `analyze`, `remediate`, and `converge`. An opt-in final check
   runs on the days you remember to ask for it, which are not the days you need it.
 - **It gates `on_needs_input`, not `always`** — and the verdict comes off disk,
   not from the phase's own report. `verify.sh` reads `review.md` for *unresolved*

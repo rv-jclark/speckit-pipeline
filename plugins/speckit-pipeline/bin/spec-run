@@ -77,7 +77,7 @@ OPTIONS
                          which a plugin update would otherwise overwrite.
   --from <phase>         start at this phase
   --stop-after <phase>   stop after this phase, whatever the config says
-  --with <p[,p]>         also run optional phases (clarify, analyze)
+  --with <p[,p]>         also run optional phases (clarify, analyze, remediate)
   --only <p[,p]>         run exactly these phases
   --gate <all|none|p,..> override which phases pause for you
   --model <phase>=<m>    override one phase's model      (repeatable)
