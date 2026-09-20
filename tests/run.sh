@@ -1483,6 +1483,18 @@ assert_contains "$argv_dg" "3 unchecked of 6" \
   "with the overall count, so the pass knows how much is left beyond its group"
 assert_contains "$argv_dg" "2 group(s) with work left" \
   "and how many groups still have work"
+# 🛑 The digest also says WHERE the group sits, so the pass can Read that slice
+# rather than the file. Measured across 58 implement transcripts in one week:
+# every pass Read all of tasks.md (61 reads) at a median 49 KB, maximum 184 KB —
+# 12k to 46k tokens carried by every later turn of the pass, almost all of it
+# groups already ticked or not yet due. In the fixture, Phase 2's heading is
+# line 8 and its last line before the Phase 3 heading is 13, of 16.
+assert_contains "$argv_dg" "at lines:    8-13 of 16" \
+  "the digest names the line range the next group occupies"
+assert_contains "$argv_dg" "READ ONLY THOSE LINES" \
+  "and tells the pass to read that slice rather than the whole file"
+assert_contains "$argv_dg" "offset 8 and limit 6" \
+  "with the Read arguments spelled out so the instruction can be followed literally"
 # The digest is a POINTER, not a replacement for reading: skipping Phase 1
 # entirely is the whole behaviour under test, and a digest that named Phase 1
 # would send every pass back to work that is already done.

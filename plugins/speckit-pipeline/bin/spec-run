@@ -570,8 +570,16 @@ tasks_unchecked() { # tasks_unchecked <feature_dir>
 # discovery turn is paid for once and then again per turn thereafter.
 #
 # Stated as fact rather than instruction, and deliberately not as the only
-# source: the pass still reads tasks.md, because this digest is a pointer and the
-# tasks are the work. What it removes is the search, not the reading.
+# source: the pass still reads its group in tasks.md, because this digest is a
+# pointer and the tasks are the work. What it removes is the search, and the
+# reading of every OTHER group.
+#
+# The line range is the second half of that. Measured across 58 implement
+# transcripts in one week: every pass Read the whole of tasks.md (61 reads), at a
+# median of 49 KB and a maximum of 184 KB — 12k to 46k tokens that then sat in
+# the prefix of every later turn of the pass, almost all of it groups already
+# ticked or not yet due. The runner knows exactly which lines the next group
+# occupies, so it says so, and the pass can Read that slice with offset/limit.
 tasks_digest() { # tasks_digest <feature_dir>
   local f="${1:-}/tasks.md"
   [ -f "$f" ] || return 0
@@ -580,11 +588,12 @@ tasks_digest() { # tasks_digest <feature_dir>
   # Tasks before any heading are attributed to a synthetic "(no group)" so a
   # tasks.md written without headings still gets a digest rather than an empty one.
   awk '
-    /^#+[[:space:]]*Phase/ { group = $0; sub(/^#+[[:space:]]*/, "", group)
-                             order[++ng] = group; seen[group] = 1; next }
+    /^#+[[:space:]]*Phase/ { if (group != "") last[group] = NR - 1
+                             group = $0; sub(/^#+[[:space:]]*/, "", group)
+                             order[++ng] = group; seen[group] = 1; first[group] = NR; next }
     /^[[:space:]]*[-*][[:space:]]*\[[[:space:]xX]\]/ {
       g = (group == "" ? "(no group)" : group)
-      if (!seen[g]) { order[++ng] = g; seen[g] = 1 }
+      if (!seen[g]) { order[++ng] = g; seen[g] = 1; first[g] = NR }
       total[g]++; tot++
       if ($0 ~ /^[[:space:]]*[-*][[:space:]]*\[[[:space:]]\]/) {
         un[g]++; unt++
@@ -594,6 +603,10 @@ tasks_digest() { # tasks_digest <feature_dir>
     }
     END {
       if (tot == 0) exit 0
+      # The last group runs to the end of the file. A "(no group)" that never
+      # met a heading has no last[] either; it also runs to the end.
+      if (group != "") last[group] = NR
+      if (!("(no group)" in last) && ("(no group)" in seen)) last["(no group)"] = NR
       groups_left = 0
       for (i = 1; i <= ng; i++) if (un[order[i]] > 0) groups_left++
       nextg = ""
@@ -602,11 +615,16 @@ tasks_digest() { # tasks_digest <feature_dir>
       printf "\nWHERE YOU ARE IN tasks.md — the runner computed this before starting you,\n"
       printf "so you do not need to scan the file to find your place:\n"
       printf "  next group:  %s\n", nextg
+      printf "  at lines:    %d-%d of %d in tasks.md\n", first[nextg], last[nextg], NR
       printf "  its tasks:   %s\n", (ids[nextg] == "" ? "(unnumbered)" : ids[nextg])
       printf "               %d unchecked of %d in this group\n", un[nextg], total[nextg]
       printf "  overall:     %d unchecked of %d, across %d group(s) with work left\n", unt, tot, groups_left
       printf "Go to that group and do it. Do not re-count the file to work out where to\n"
       printf "start — that costs turns, and every turn after it re-reads the result.\n"
+      printf "READ ONLY THOSE LINES of tasks.md (Read with offset %d and limit %d), not the\n", first[nextg], last[nextg] - first[nextg] + 1
+      printf "whole file: the groups before yours are done and the ones after are not yours,\n"
+      printf "and every line you load here is re-read on every turn that follows. Tick a task\n"
+      printf "with an Edit on its own line; that needs no wider read either.\n"
     }
   ' "$f" 2>/dev/null || true
 }
