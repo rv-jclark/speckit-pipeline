@@ -1,0 +1,239 @@
+#!/usr/bin/env bash
+#
+# spec-reap — kill the log watchers a front-end spawned to follow a run.
+#
+# commands/spec-run.md tells the front-end session to attach a `Monitor` to a
+# `tail -f` of the run log, and then to reap that `tail` on every exit path. The
+# reap was written as one line of prose:
+#
+#     pkill -f "tail -f -n +1 <logfile>"
+#
+# which is correct on macOS and Linux and does not exist on Windows. Git for
+# Windows' msys ships neither `pkill` nor `pgrep`, so under Git Bash the
+# instruction failed with `pkill: command not found` (rc=127) and the watcher
+# leaked — exactly the accumulation the doc warns about. Reported in issue #9,
+# where the orphan was found with `ps -W`.
+#
+# Making it a script rather than three paragraphs of platform caveats is the
+# point. The front-end is an agent following a markdown file; a doc offering a
+# preferred form and two fallbacks is a doc that gets the fallback wrong, and
+# the failure is silent by construction — a leaked watcher looks like nothing at
+# all until the host is at load average 338.
+#
+# 🛑 What it will NOT do is report success without having looked. A refused or
+# absent process table answers "nothing is running" to every question asked of
+# it, which is indistinguishable from a clean reap and is the reason the leak
+# went unnoticed for five days in the first place. That case exits 1 and says
+# which table it could not read. Same reasoning as _runner_alive() in
+# lib/common.sh, which learned it against a live runner.
+#
+# Exit codes:  0 reaped, or there was demonstrably nothing to reap
+#              1 the process table could not be read, so nothing is known
+#              3 usage error
+
+set -uo pipefail
+
+SPECKIT_PIPELINE_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+export SPECKIT_PIPELINE_ROOT
+# shellcheck source=../lib/common.sh
+. "$SPECKIT_PIPELINE_ROOT/lib/common.sh"
+
+DRY_RUN=0; ALL=0; LOGS=""
+
+usage() {
+  cat <<'EOF'
+spec-reap — kill the `tail -f` log watchers a run left behind
+
+USAGE
+  spec-reap <logfile> [<logfile>...]   reap the watchers following these logs
+  spec-reap --all                      reap every watcher on a .runs/ log
+
+OPTIONS
+  --all        reap watchers following any path containing /.runs/, not one log
+  --dry-run    print what would be killed, kill nothing
+  --version    print the version and where this copy is installed
+  -h, --help
+
+WHY IT EXISTS
+  `pkill -f "tail -f -n +1 <logfile>"` is the right command and does not exist
+  under Git Bash on Windows, where msys ships no pkill and no pgrep. This picks
+  the form the host can actually answer and says which one it used.
+
+  A watcher is a `tail` in FOLLOW mode whose command line names the log. A
+  `tail -30` somebody is reading with is not a watcher and is left alone. The
+  `grep` downstream of the pipe is not matched and does not need to be: it
+  reaches EOF when the tail dies and exits on its own.
+
+WHAT IT CANNOT DO
+  Match a single log where the process table does not print ARGUMENTS. msys's
+  `ps -W` lists Windows processes and their command but not their arguments, so
+  there the only available answer is "every tail", which is coarser than asked
+  for and will take a concurrent run's watcher with it. It says so before doing
+  it, and --dry-run shows you the list first.
+EOF
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --all)       ALL=1; shift;;
+    --dry-run|-n) DRY_RUN=1; shift;;
+    --version)   pipeline_version; exit 0;;
+    -h|--help)   usage; exit 0;;
+    -*)          die_usage "unknown option: $1";;
+    *)           LOGS="${LOGS:+$LOGS
+}$1"; shift;;
+  esac
+done
+
+[ "$ALL" -eq 1 ] || [ -n "$LOGS" ] || \
+  die_usage "no logfile given" "spec-reap <logfile>, or spec-reap --all"
+[ "$ALL" -eq 1 ] && [ -n "$LOGS" ] && \
+  die_usage "--all takes no logfile" "it reaps every watcher on a .runs/ log"
+
+# ------------------------------------------------------------ which table -----
+# Established ONCE, and by asking about our OWN pid — a question that certainly
+# has an answer, so a blank reply is the table refusing rather than the watcher
+# being gone. Probing for the `ps` binary would succeed and tell us nothing:
+# inside Claude Code's Bash sandbox `ps` exists and is refused ("operation not
+# permitted"), which is why the probe has to be the query.
+TABLE=none
+if [ -n "$(ps -o pid=,args= -p $$ 2>/dev/null)" ]; then
+  TABLE=args
+elif [ -n "$(ps -W 2>/dev/null)" ]; then
+  TABLE=coarse
+fi
+
+if [ "$TABLE" = none ]; then
+  err "the process table cannot be read here, so no watcher can be found"
+  say "  Neither 'ps -o args=' nor 'ps -W' answered for this shell's own pid."
+  say "  That is not the same as 'nothing is running' — it is not knowing, and"
+  say "  a leaked watcher survives for days looking exactly like a clean reap."
+  say ""
+  say "  Reap it from a shell that can read the table:"
+  if [ "$ALL" -eq 1 ]; then
+    say "    pkill -f 'tail -f .*/.runs/'"
+  else
+    printf '%s\n' "$LOGS" | while IFS= read -r l; do
+      [ -n "$l" ] && say "    pkill -f 'tail -f -n +1 $l'"
+    done
+  fi
+  exit 1
+fi
+
+# ------------------------------------------------------------- the matching ----
+# A watcher is a tail in FOLLOW mode naming the needle. Each clause earns its
+# place: without the basename test an argument containing the word "tail"
+# matches; without the follow test a human's `tail -200 run.log` is killed while
+# they are reading it; without the self test the `spec-reap <logfile>` command
+# line names the log and this script reaps itself.
+_watchers_args() { # _watchers_args <needle>
+  ps -eo pid=,args= 2>/dev/null | awk -v needle="$1" -v self="$$" '
+    {
+      pid = $1
+      if (pid == self) next
+      if (index($0, needle) == 0) next
+      cmd = $2
+      sub(/.*[\/\\]/, "", cmd); sub(/\.exe$/, "", cmd)
+      if (cmd != "tail") next
+      for (i = 3; i <= NF; i++)
+        if ($i == "--follow" || ($i ~ /^-[A-Za-z]+$/ && $i ~ /f/)) { print pid; next }
+    }'
+}
+
+# No arguments in this table, so no needle can be applied: every tail, or none.
+# The pid is the first column and the command the last, which is the shape
+# `ps -W` prints under msys and the shape the bug report observed.
+_watchers_coarse() {
+  ps -W 2>/dev/null | awk -v self="$$" '
+    $1 ~ /^[0-9]+$/ && $1 != self && $NF ~ /(^|[\/\\])tail(\.exe)?$/ { print $1 }'
+}
+
+# ------------------------------------------------------------------ select -----
+# Every pid is collected BEFORE anything is killed, in one list, deliberately.
+# The obvious shape — a loop that finds and kills per logfile — puts the counters
+# inside a pipeline's subshell, where every increment is discarded and the summary
+# reports 0 killed over a reap that worked. This suite has been bitten by exactly
+# that (see t_pass in tests/run.sh), and a reaper whose report cannot be trusted
+# is the tool least worth having.
+PIDS=""
+COARSE_USED=0
+
+_add() { PIDS="${PIDS:+$PIDS
+}$1"; }
+
+if [ "$TABLE" = coarse ]; then
+  # No arguments in the table, so the needle cannot be applied at all and the
+  # only available answer is "every tail". Say it before doing it: this takes a
+  # concurrent run's watcher too, and that is the msys limitation rather than a
+  # choice made here.
+  COARSE_USED=1
+  info "watchers on this host  $(dim_s "(table: coarse)")"
+  warn "this host's process table prints no ARGUMENTS ('ps -W'), so a per-log"
+  say  "  match is not available. Reaping every tail on the host instead —"
+  say  "  including any a concurrent run or another tool is using."
+  say  "  Check it first with --dry-run if that matters."
+  _add "$(_watchers_coarse)"
+elif [ "$ALL" -eq 1 ]; then
+  info "watchers following any .runs/ log  $(dim_s "(table: $TABLE)")"
+  _add "$(_watchers_args '/.runs/')"
+else
+  while IFS= read -r log; do
+    [ -n "$log" ] || continue
+    info "watchers of $log  $(dim_s "(table: $TABLE)")"
+    # The watcher's argv holds whatever the front-end passed, which may be
+    # relative where this was called with an absolute path or the other way
+    # round. Widen in order, and SAY which form matched: a basename match is a
+    # weaker claim than a path match, and the reader is owed the difference.
+    _abs="$log"; case "$_abs" in /*) ;; *) _abs="$(pwd)/$log";; esac
+    _p=$(_watchers_args "$_abs")
+    [ -n "$_p" ] || _p=$(_watchers_args "$log")
+    if [ -z "$_p" ]; then
+      _p=$(_watchers_args "$(basename "$log")")
+      [ -n "$_p" ] && \
+        warn "matched on the BASENAME only — a watcher of a same-named log elsewhere would match too"
+    fi
+    [ -n "$_p" ] || say "  none"
+    _add "$_p"
+  done <<EOF
+$LOGS
+EOF
+fi
+
+# Deduplicate: --all and a coarse match can both name the same pid, and killing
+# one twice turns "already gone" into a reported failure.
+PIDS=$(printf '%s\n' "$PIDS" | grep -E '^[0-9]+$' | sort -u)
+found=$(printf '%s\n' "$PIDS" | grep -c . || true)
+
+# ------------------------------------------------------------------ reap -------
+say ""
+if [ "${found:-0}" -eq 0 ]; then
+  ok "nothing to reap — no watcher matched"
+  exit 0
+fi
+
+for p in $PIDS; do say "  pid $p"; done
+
+if [ "$DRY_RUN" -eq 1 ]; then
+  say ""
+  ok "--dry-run: $found watcher(s) matched, nothing was killed"
+  exit 0
+fi
+
+killed=0; missed=0
+for p in $PIDS; do
+  if kill "$p" 2>/dev/null; then
+    killed=$((killed + 1))
+  else
+    # Already gone is the common case and is fine; refused is not, and `kill`
+    # cannot tell them apart by exit status. So neither is counted as a kill —
+    # claiming one would be the same lie the unreadable-table case exits 1 over.
+    missed=$((missed + 1))
+  fi
+done
+
+say ""
+ok "$killed of $found watcher(s) signalled${missed:+, $missed already gone or not ours to signal}"
+[ "$COARSE_USED" -eq 1 ] && \
+  say "  (coarse match: this host could not narrow it to one log)"
+say "  The downstream grep needs no reaping — it sees EOF when its tail dies."
+exit 0

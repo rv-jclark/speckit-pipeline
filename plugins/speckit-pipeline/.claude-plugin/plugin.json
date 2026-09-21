@@ -1,7 +1,7 @@
 {
   "name": "speckit-pipeline",
   "description": "Run the spec-kit phases as isolated claude processes \u2014 one model, effort level, tool allowance and turn ceiling per phase \u2014 and drive roadmaps of specs that ship in order.",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "author": {
     "name": "Jamie Clark"
   },

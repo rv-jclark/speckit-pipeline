@@ -122,9 +122,11 @@ if command -v shellcheck >/dev/null 2>&1; then
   out=$(shellcheck --version | awk '/^version:/{print $2}')
   t_note "shellcheck $out"
   files=("$SPEC_RUN" "$SPEC_BOOTSTRAP" "$PKG/bin/spec-status" "$PKG/bin/spec-roadmap" "$PKG/bin/spec-upgrade"
+         "$PKG/bin/spec-reap"
          "$PKG/lib/common.sh" "$PKG/lib/verify.sh" "$PKG/lib/roadmap.sh"
          "$ROOT/bin/spec-run" "$ROOT/bin/spec-bootstrap" "$ROOT/bin/spec-status"
-         "$ROOT/bin/spec-roadmap" "$ROOT/bin/spec-upgrade" "$ROOT/tests/run.sh")
+         "$ROOT/bin/spec-roadmap" "$ROOT/bin/spec-upgrade" "$ROOT/bin/spec-reap"
+         "$ROOT/tests/run.sh")
   if sc=$(shellcheck -x -S warning "${files[@]}" 2>&1); then
     t_pass "all scripts clean at -S warning"
   else
@@ -717,6 +719,80 @@ out=$("$SPEC_BOOTSTRAP" --force "$BS" 2>&1)
 assert_not_contains "$(cat "$BS/.specify/templates/spec-template.md")" "drifted" \
   "--force replaces it"
 
+# ---------------------------------------- --force is PER FILE, not per directory
+# The defect this guards (issue #5): copy_asset took whole DIRECTORIES and, under
+# --force, ran `rm -rf "$dst"` before recopying. Everything the bundle does not
+# ship under that directory was collateral — and the most valuable thing there is
+# templates/overrides/, which spec-upgrade writes to preserve a project's
+# customised templates. So --force undid the one mechanism protecting the user's
+# edits, immediately after the tool that created it said it had protected them.
+#
+# Mutation check: restore `rm -rf "$dst"; cp -R` over whole directories and all
+# four of these fail. The staged files are deliberately of both kinds — one the
+# scaffold's own tree (overrides/) and one a project-authored path in a directory
+# the bundle also populates — because a fix that special-cased overrides/ alone
+# would pass the first two and fail the rest.
+mkdir -p "$BS/.specify/templates/overrides"
+printf 'MY OVERRIDE\n' > "$BS/.specify/templates/overrides/plan-template.md"
+mkdir -p "$BS/.specify/extensions/git/scripts/bash"
+printf 'project-side script\n' > "$BS/.specify/extensions/git/scripts/bash/retired-by-upstream.sh"
+printf 'mine\n' > "$BS/.claude/skills/speckit-specify/PROJECT-NOTES.md"
+printf 'drifted again\n' >> "$BS/.specify/templates/spec-template.md"
+out=$("$SPEC_BOOTSTRAP" --force "$BS" 2>&1)
+assert_eq "$(cat "$BS/.specify/templates/overrides/plan-template.md" 2>/dev/null)" "MY OVERRIDE" \
+  "--force NEVER deletes templates/overrides/ — spec-upgrade's own preservation mechanism"
+assert_eq "$(cat "$BS/.specify/extensions/git/scripts/bash/retired-by-upstream.sh" 2>/dev/null)" "project-side script" \
+  "nor a project-side script in a directory the bundle also populates"
+assert_eq "$(cat "$BS/.claude/skills/speckit-specify/PROJECT-NOTES.md" 2>/dev/null)" "mine" \
+  "nor a file the project added inside a vendored skill"
+assert_not_contains "$(cat "$BS/.specify/templates/spec-template.md")" "drifted again" \
+  "while still replacing the vendored file that actually drifted"
+# And the sacred list is stated, not emergent: overrides/ must be skipped even if
+# a future bundle ships one.
+assert_contains "$(cat "$SPEC_BOOTSTRAP")" ".specify/templates/overrides/" \
+  "spec-bootstrap names overrides/ as sacred, the same list spec-upgrade carries"
+
+# ------------------------------------------------ the workflows/ scaffold (issue #6)
+# spec-upgrade walked every file under assets/specify/ and therefore classified
+# workflows/ like any other scaffold; bootstrap had no line for it. So a
+# bootstrapped project was born one directory short of an upgraded one, and
+# `spec-upgrade` reported these two files as `new` forever while
+# `spec-bootstrap --force` could not put them back — nothing here looked for them.
+[ -f "$BS/.specify/workflows/workflow-registry.json" ] && \
+  t_pass "bootstrap installs .specify/workflows/ too" || \
+  t_fail "bootstrap installs .specify/workflows/ too" "the registry is missing"
+[ -f "$BS/.specify/workflows/speckit/workflow.yml" ] && \
+  t_pass "including the speckit workflow itself" || \
+  t_fail "including the speckit workflow itself"
+# The sharper version of the same claim: after a bootstrap, spec-upgrade must have
+# NOTHING new to install. Anything the bundle ships and bootstrap skips shows up
+# here, whatever it is called next time.
+git -C "$BS" add -A >/dev/null 2>&1; git -C "$BS" commit -qm scaffold >/dev/null 2>&1
+upo=$("$SPEC_UPGRADE" --repo "$BS" --dry-run 2>&1)
+assert_contains "$upo" "new        0 file(s)" \
+  "and a freshly bootstrapped project has NO files the vendored bundle adds"
+
+# ------------------------------- a formatter hook makes byte-drift permanent (#6)
+# spec-upgrade compares bytes, so a commit hook reformatting the scaffold is
+# indistinguishable from a project customising it. Measured on a real project:
+# lint-staged's `prettier --write` over *.{md,json,yml,yaml} rewrote 30 of 35
+# scaffold files right after a clean upgrade, so every later --check read
+# "30 file(s) differ" — and the next upgrade would have filed that formatting into
+# overrides/ as if it were intent. Diagnosed at bootstrap, before the drift.
+FMT="$WORK/formatted"; mkdir -p "$FMT"; git -C "$FMT" init -q
+printf '{"name":"x","lint-staged":{"*.md":["prettier --write"]}}\n' > "$FMT/package.json"
+out=$("$SPEC_BOOTSTRAP" "$FMT" 2>&1)
+assert_contains "$out" "runs a formatter" "a lint-staged config in package.json is detected"
+assert_contains "$out" ".prettierignore" "and the ignore entries are printed"
+assert_contains "$out" "Not written for you" \
+  "but not written — the project's formatter config is the project's"
+# Mutation: drop the grep over .prettierignore and this fails — the warning would
+# nag a project that has already dealt with it.
+printf '.specify\n' > "$FMT/.prettierignore"
+out=$("$SPEC_BOOTSTRAP" "$FMT" 2>&1)
+assert_not_contains "$out" "runs a formatter" \
+  "and it goes quiet once .prettierignore covers the scaffold"
+
 # ------------------------------------------------- spec-kit's own write targets
 printf '\nagent context scope\n'
 # The agent context file (CLAUDE.md and friends) is written by spec-kit's own
@@ -1007,7 +1083,62 @@ out=$(SPEC_TEST_ARTIFACT="$DN/specs/001-x/plan.md" \
       "$SPEC_RUN" --repo "$DN" --feature-dir "$DN/specs/001-x" \
         --only plan --claude-bin claude-denied 2>&1)
 assert_contains "$out" "3 tool call(s) were DENIED" "denied tool calls are counted and reported"
-assert_contains "$out" "Bash, Write" "and the tools are named, de-duplicated"
+assert_contains "$out" "Bash; Write" "and the tools are named, de-duplicated"
+# A denial carrying no recognisable argument must degrade to the bare tool name.
+# The separator is `;` and not `,` on purpose — a command contains commas, and
+# this note now carries commands.
+assert_not_contains "$out" "Bash(null)" "a denial with no tool_input does not print 'null'"
+
+# ------------------------------------- the COMMAND, not just the tool (issue #8)
+# "(Bash, Write)" says a rule fired and nothing about which rule or over what, so
+# the reader opened .pipeline/<id>.result.json every time. Measured: an implement
+# pass spent most of 21 turns on `curl` against `Bash(curl:*)`, and "Bash was
+# denied three times" would not have told anyone that. The command was in the
+# envelope all along.
+cat > "$FAKE/claude-denied-cmd" <<'FAKEEOF'
+#!/usr/bin/env bash
+[ "${1:-}" = "--help" ] && exit 0
+printf 'touched by the phase\n' >> "$SPEC_TEST_ARTIFACT"
+cat <<'J'
+{"total_cost_usd":0.03,"num_turns":5,"duration_ms":50,"result":"STATUS: ok",
+ "permission_denials":[
+  {"tool_name":"Bash","tool_input":{"command":"cd /x && (PORT=3003 ./node_modules/.bin/next dev > /tmp/d.log 2>&1 </dev/null &) && sleep 8 && curl -s http://localhost:3003/lists"}},
+  {"tool_name":"Bash","tool_input":{"command":"curl -s http://localhost:3003/lists"}},
+  {"tool_name":"Bash","tool_input":{"command":"curl -s http://localhost:3003/lists"}},
+  {"tool_name":"WebFetch","tool_input":{"url":"https://example.invalid/x"}}]}
+J
+FAKEEOF
+chmod +x "$FAKE/claude-denied-cmd"
+# 🛑 Its OWN repo, not $DN. A phase that already recorded `ok` is SKIPPED on the
+# next run — `plan — already ok, skipping (use --force to re-run)` — so reusing
+# $DN here ran no phase at all and produced no denial note. Every assertion
+# below then failed, and the two assert_not_contains ones PASSED vacuously,
+# which is the shape that hides a broken test rather than showing one.
+DNC="$WORK/denied-cmd"; mkdir -p "$DNC"; git -C "$DNC" init -q
+git -C "$DNC" config user.email t@t.invalid; git -C "$DNC" config user.name t
+"$SPEC_BOOTSTRAP" "$DNC" >/dev/null 2>&1
+git -C "$DNC" add -A >/dev/null 2>&1; git -C "$DNC" commit -qm scaffold >/dev/null 2>&1
+mkdir -p "$DNC/specs/001-x"
+{ printf '# Plan\n'; for i in $(seq 1 40); do printf 'plan line %s\n' "$i"; done; } > "$DNC/specs/001-x/plan.md"
+out=$(SPEC_TEST_ARTIFACT="$DNC/specs/001-x/plan.md" \
+      "$SPEC_RUN" --repo "$DNC" --feature-dir "$DNC/specs/001-x" \
+        --only plan --claude-bin claude-denied-cmd 2>&1)
+assert_contains "$out" "4 tool call(s) were DENIED" "every denial is counted"
+assert_contains "$out" "Bash(curl -s http://localhost:3003/lists)" \
+  "and the refused COMMAND is shown, not just the tool that was refused"
+assert_contains "$out" "WebFetch(https://example.invalid/x)" \
+  "a non-Bash denial shows its own argument (url, file_path, path)"
+# Truncated at 80 characters, so one long command cannot take the line over.
+assert_contains "$out" "…" "a command over 80 characters is truncated"
+assert_not_contains "$out" "sleep 8 && curl" \
+  "the tail of a long command is dropped rather than wrapped into the summary"
+# De-duplicated to the first three DISTINCT calls: a phase that retried the same
+# refused command eight times would otherwise print it eight times, and the note
+# is one line of a summary. The full list stays on disk, and is named.
+assert_contains "$out" "plan.result.json" "the note names where the full list is kept"
+n_curl=$(printf '%s' "$out" | grep -o 'curl -s http://localhost:3003/lists' | grep -c . || true)
+[ "${n_curl:-0}" -le 2 ] && t_pass "a command retried three times is not printed three times" \
+  || t_fail "a repeated denial is de-duplicated" "printed $n_curl times"
 # The CLI reports its own refusals, so what a phase was blocked from doing is
 # MEASURED rather than inferred from a thin artifact. An empty spec and "17
 # denials" are the same artifact with completely different remedies.
@@ -1435,6 +1566,53 @@ assert_contains "$contract_impl" "27,706,579" \
   "and given the measurement, so the next reader can check the reasoning"
 assert_contains "$contract_impl" "tail -30" \
   "and a concrete truncation to use rather than a vague instruction to be brief"
+
+# ------------------------- headless means no browser and no egress (issue #8) ---
+# The phase knew it was headless and did not know what that cost it. Measured: a
+# pass ran `(PORT=3003 next dev &) && sleep 8 && curl -s http://localhost:3003/…`
+# against `Bash(curl:*)`, retried the curl twice, and ticked 1 task of 18. The
+# denial is a rule and does not go away on the third attempt.
+assert_contains "$contract_impl" "NO BROWSER AND NO NETWORK EGRESS" \
+  "implement is told it has no browser and no egress, not merely that it is headless"
+assert_contains "$contract_impl" "curl" \
+  "naming the tools that are withheld, so a refusal reads as a rule"
+assert_contains "$contract_impl" "OWED, NOT APPROXIMATED" \
+  "and that a task it cannot perform is owed rather than approximated"
+# 🛑 The marker's SPELLING, which is the whole fix. verify.sh has greped for
+# `🛑 BLOCKED` since a roadmap where every entry stopped at a gate over
+# post-deploy tasks — and nothing told any phase how to write one, so the only
+# way to produce it was to read verify.sh. A format undocumented to its own
+# producers is never produced.
+assert_contains "$contract_impl" "🛑 BLOCKED:" \
+  "implement is given the exact marker verify.sh reads for human-only work"
+assert_contains "$contract_impl" "READ the CI config" \
+  "and told not to tick by deferring to a CI run it has not checked"
+# Mutation: change the marker in the prompt to plain "BLOCKED" and the next
+# assertion holds while the mechanism silently stops working, so assert the two
+# spellings are the SAME one. This is the join the bug lived in.
+assert_contains "$(cat "$PKG/lib/verify.sh")" "🛑[[:space:]]*BLOCKED" \
+  "and verify.sh greps for that same spelling"
+
+# tasks runs BEFORE implement, so it is where an unperformable task is cheapest to
+# not write. Measured: three "manually verify via yarn dev at 390×844 …" tasks
+# went into an 18-task list; review ended up redoing the verification with a
+# Playwright script at 52% of the run's total cost.
+argv_tasks=$("$SPEC_RUN" --repo "$BS" --feature-dir "$BS/specs/001-t" --only tasks --dry-run 2>&1)
+contract_tasks=$(unquote "$argv_tasks")
+assert_contains "$contract_tasks" "CAN ACTUALLY PERFORM" \
+  "tasks is told who executes the list it writes"
+assert_contains "$contract_tasks" "Playwright" \
+  "and given the executable form to ask for instead of a manual viewport check"
+assert_contains "$contract_tasks" "🛑 BLOCKED:" \
+  "and the same marker, so human-only work is written as such from the start"
+assert_contains "$contract_tasks" "YOU ARE HEADLESS" \
+  "while still getting the shared contract"
+# And the addition is phase-scoped, not smeared across every phase: a specify
+# phase told how to write task markers is prompt bloat paid for on every turn.
+assert_not_contains "$contract" "🛑 BLOCKED:" \
+  "specify gets neither addition — it writes no tasks"
+assert_not_contains "$contract_tasks" "TICK EACH TASK" \
+  "and tasks is not told to tick anything — implement does that"
 
 # 🛑 Cost within a pass grows with roughly the SQUARE of its length, because every
 # turn re-reads everything before it. So two short passes beat one long pass over
@@ -1972,6 +2150,170 @@ out=$("$SPEC_UPGRADE" --help 2>&1); assert_eq "$?" "0" "--help exits 0"
 out=$("$SPEC_UPGRADE" --nonsense 2>&1); assert_eq "$?" "3" "an unknown option exits 3"
 out=$("$SPEC_UPGRADE" --scan "$WORK/does-not-exist" 2>&1); rc=$?
 assert_eq "$rc" "1" "--scan on a missing directory fails"
+
+# ------------------------------------ a confirmation nobody can answer (issue #7)
+# `read -r reply </dev/tty 2>/dev/null || reply=""` left the reply EMPTY on a host
+# with no controlling terminal, and the `*)` branch called that "no": the plan
+# printed, `nothing changed`, exit 1. From CI or an agent that is indistinguishable
+# from a refusal the tool chose for a reason — and identical to what a refused
+# dirty tree exits. Reported from Git Bash on Windows, where the /dev/tty error
+# also leaked past its own 2>/dev/null because redirections apply left to right.
+UPT="$WORK/upgrade-notty"; mkbare "$UPT" main
+"$SPEC_BOOTSTRAP" "$UPT" >/dev/null 2>&1
+printf '{"integration":"claude","version":"0.0.1"}\n' > "$UPT/.specify/integration.json"
+git -C "$UPT" add -A >/dev/null 2>&1; git -C "$UPT" commit -qm scaffold >/dev/null 2>&1
+# There must be REAL work to do, and the tree must be clean, or the prompt is
+# never reached: an already-identical project exits 0 at "nothing to do" and a
+# dirty one is refused at exit 1, and either would pass a test of the wrong
+# branch. So retire a vendored file and commit that, giving one `new` file over
+# a clean tree.
+rm -f "$UPT/.specify/templates/checklist-template.md"
+git -C "$UPT" add -A >/dev/null 2>&1; git -C "$UPT" commit -qm 'drop a template' >/dev/null 2>&1
+# 🛑 Gated on whether a terminal can be OPENED, and the probe is the open rather
+# than `[ -r /dev/tty ]` — `test -r` asks access(2) about permission bits and the
+# device node is world-readable, so it answers yes on a host where the open fails
+# with ENXIO. Run from an interactive shell this path cannot be reached at all:
+# the prompt would appear and BLOCK, and redirecting the command's stdin does not
+# help, because /dev/tty is the controlling terminal and not stdin.
+if { : </dev/tty; } 2>/dev/null; then
+  t_skip "spec-upgrade refuses to no-op when it cannot ask" \
+         "this shell HAS a terminal, so the prompt would block rather than fail"
+  PLATFORM_GATED_ASSERTIONS=$((${PLATFORM_GATED_ASSERTIONS:-0} + 3))
+else
+  out=$("$SPEC_UPGRADE" --repo "$UPT" </dev/null 2>&1); rc=$?
+  assert_eq "$rc" "3" "no terminal and no --yes is a USAGE error, not a silent no-op"
+  assert_contains "$out" "no terminal to confirm on" "saying so in those words"
+  assert_contains "$out" "--yes" "and naming the flag that works non-interactively"
+  # Mutation: restore the old `read … || reply=""` and rc is 1 with `nothing
+  # changed` — which is what the reporter saw and could not distinguish from a
+  # deliberate refusal.
+fi
+# --yes is unaffected, which is the other half of the claim: the guard must not
+# have made the non-interactive path harder than it was.
+out=$("$SPEC_UPGRADE" --repo "$UPT" --yes </dev/null 2>&1); rc=$?
+assert_eq "$rc" "0" "--yes still upgrades with no terminal anywhere in sight"
+out=$("$SPEC_UPGRADE" --repo "$UPT" --check </dev/null 2>&1); rc=$?
+assert_eq "$rc" "0" "and the result is clean afterwards"
+# And nothing else in the pipeline prompts, so nothing else needs this guard.
+# Stated as an assertion because the answer is what makes issue #7 closable for
+# spec-bootstrap and spec-roadmap rather than merely unreported.
+tty_readers=$(grep -l '/dev/tty' "$PKG/bin"/* 2>/dev/null | xargs -n1 basename 2>/dev/null | tr '\n' ' ')
+assert_eq "$tty_readers" "spec-upgrade " "spec-upgrade is the ONLY command that prompts"
+
+# =================================================================== spec-reap ==
+printf '\nspec-reap\n'
+SPEC_REAP="$PKG/bin/spec-reap"
+# commands/spec-run.md told the front-end to reap its log watcher with
+#   pkill -f "tail -f -n +1 <logfile>"
+# which is correct on macOS and Linux and absent under Git Bash: msys ships
+# neither pkill nor pgrep, so the reap failed with `command not found` (rc 127)
+# and leaked the watcher the instruction existed to kill (issue #9).
+out=$("$SPEC_REAP" --help 2>&1); assert_eq "$?" "0" "--help exits 0"
+"$SPEC_REAP" >/dev/null 2>&1;            assert_eq "$?" "3" "no logfile is a usage error"
+"$SPEC_REAP" --nonsense >/dev/null 2>&1; assert_eq "$?" "3" "an unknown option exits 3"
+"$SPEC_REAP" --all x.log >/dev/null 2>&1
+assert_eq "$?" "3" "--all with a logfile is a usage error, not a guess at which was meant"
+
+# The matching, driven through a FAKE `ps`. A stub is what makes this hermetic and
+# deterministic: the real table differs per host, is refused outright inside
+# Claude Code's Bash sandbox, and cannot be made to contain a chosen row.
+REAPBIN="$WORK/reapbin"; mkdir -p "$REAPBIN"
+REAP_TABLE="$WORK/ps-table.txt"
+cat > "$REAPBIN/ps" <<'PSEOF'
+#!/usr/bin/env bash
+# `-eo` is the full listing; `-p` is spec-reap's capability probe about its own
+# pid. Neither string can match the other, so the order here is for the reader.
+case "$*" in
+  *-eo*) cat "$REAP_TABLE";;
+  *-p*)  printf '  %s ps-self-probe\n' "$$";;
+  *)     exit 1;;
+esac
+PSEOF
+chmod +x "$REAPBIN/ps"
+cat > "$REAP_TABLE" <<'TABLEEOF'
+  111 tail -f -n +1 /home/u/.runs/a.log
+  222 /usr/bin/tail --follow /home/u/.runs/a.log
+  333 tail -200 /home/u/.runs/a.log
+  444 grep -E --line-buffered ^done:
+  555 vim /home/u/.runs/a.log
+  666 tail -f /home/u/.runs/OTHER.log
+  777 node build.js --tail /home/u/.runs/a.log
+  888 tail -fn 50 /home/u/.runs/a.log
+TABLEEOF
+export REAP_TABLE
+rp=$(PATH="$REAPBIN:$PATH" "$SPEC_REAP" --dry-run /home/u/.runs/a.log 2>&1)
+assert_contains "$rp" "table: args" "a table that prints arguments is used for a per-log match"
+assert_contains "$rp" "pid 111" "the documented watcher shape is found"
+assert_contains "$rp" "pid 222" "and the long-flag spelling"
+assert_contains "$rp" "pid 888" "and a combined flag like -fn"
+# Each exclusion is a separate failure mode, and every one of them was reachable:
+assert_not_contains "$rp" "pid 333" \
+  "a tail that is NOT following is left alone — somebody is reading with it"
+assert_not_contains "$rp" "pid 444" "the downstream grep is not matched (it exits on EOF anyway)"
+assert_not_contains "$rp" "pid 555" "an editor holding the log open is not a watcher"
+assert_not_contains "$rp" "pid 666" \
+  "a CONCURRENT run's watcher survives — this is why the match is on the full path"
+assert_not_contains "$rp" "pid 777" \
+  "and a process whose ARGUMENT merely contains the word tail is not a tail"
+assert_contains "$rp" "nothing was killed" "--dry-run kills nothing"
+
+# --all keys on /.runs/ rather than one log, so it takes 666 as well.
+rp=$(PATH="$REAPBIN:$PATH" "$SPEC_REAP" --dry-run --all 2>&1)
+assert_contains "$rp" "pid 666" "--all reaps watchers of every .runs/ log"
+assert_contains "$rp" "pid 111" "including this run's"
+
+# A log nobody is following is `nothing to reap`, and exits 0. Distinguishing that
+# from the unreadable-table case below is the whole point of this script.
+rp=$(PATH="$REAPBIN:$PATH" "$SPEC_REAP" --dry-run /home/u/.runs/never-watched.log 2>&1); rc=$?
+assert_eq "$rc" "0" "a log with no watcher exits 0"
+assert_contains "$rp" "nothing to reap" "and says so, rather than reporting a kill"
+
+# 🛑 An unreadable table is NOT an empty one. `ps` is refused outright inside some
+# sandboxes, and a refused `ps` answers "nothing is running" to every question —
+# which is exactly how a watcher survived five days looking like a clean reap.
+# Same lesson _runner_alive() learned against a live runner, and the reason the
+# capability probe asks about this shell's OWN pid.
+cat > "$REAPBIN/ps" <<'PSEOF'
+#!/usr/bin/env bash
+printf 'ps: operation not permitted\n' >&2; exit 1
+PSEOF
+chmod +x "$REAPBIN/ps"
+rp=$(PATH="$REAPBIN:$PATH" "$SPEC_REAP" /home/u/.runs/a.log 2>&1); rc=$?
+assert_eq "$rc" "1" "an unreadable process table exits 1 — nothing is KNOWN"
+assert_contains "$rp" "not the same as" "and says why that is not a clean reap"
+assert_contains "$rp" "pkill -f" "printing the manual command for a shell that can read it"
+# Mutation: make that branch exit 0 and this suite still passes every other
+# assertion here, which is precisely how the original leak hid.
+
+# Where the table prints no ARGUMENTS — msys's `ps -W` — a per-log match is not
+# available at all, so the only answer is "every tail". That is coarser than
+# asked for, and the cost has to be stated before it is paid.
+cat > "$REAPBIN/ps" <<'PSEOF'
+#!/usr/bin/env bash
+case "$*" in
+  *-W*) printf '%s\n' \
+          "      PID    PPID    PGID     WINPID  TTY   UID    STIME COMMAND" \
+          "     4321    4300    4321       9001  pty0 1001 10:00:00 /usr/bin/tail" \
+          "     4322    4321    4321       9002  pty0 1001 10:00:00 /usr/bin/grep";;
+  *) exit 1;;
+esac
+PSEOF
+chmod +x "$REAPBIN/ps"
+rp=$(PATH="$REAPBIN:$PATH" "$SPEC_REAP" --dry-run /home/u/.runs/a.log 2>&1)
+assert_contains "$rp" "table: coarse" "msys's argument-less ps -W is recognised as a fallback"
+assert_contains "$rp" "pid 4321" "the tail is found by its command column"
+assert_not_contains "$rp" "pid 4322" "the grep is not"
+assert_contains "$rp" "per-log" "and the loss of per-log precision is stated, not hidden"
+unset REAP_TABLE
+
+# The command doc must not send the front-end back to bare pkill: that instruction
+# is the bug, and a doc is the only place it can be fixed.
+RUNMD="$PKG/commands/spec-run.md"
+assert_contains "$(cat "$RUNMD")" "bin/spec-reap" "spec-run.md reaps through spec-reap"
+assert_not_contains "$(cat "$RUNMD")" 'pkill -f "tail' \
+  "and no longer hands the agent a bare pkill to run"
+# It still has to SAY why, or the next editor puts the one-liner back.
+assert_contains "$(cat "$RUNMD")" "Git Bash" "naming the platform the one-liner does not work on"
 
 # ------------------------------------------------------- the progress filter ----
 printf '\nstream_progress\n'

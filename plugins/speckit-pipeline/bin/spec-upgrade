@@ -354,8 +354,36 @@ if [ -n "$DIRTY" ]; then
 fi
 
 if [ "$ASSUME_YES" -eq 0 ]; then
-  printf '  Proceed? [y/N] '
-  read -r reply </dev/tty 2>/dev/null || reply=""
+  # A confirmation nobody can answer is not a confirmation, and must not be read
+  # as a decline. This used to be `read -r reply </dev/tty 2>/dev/null ||
+  # reply=""`, so on a host with no controlling terminal — CI, a Claude Code Bash
+  # call, Git Bash driven by an agent — the open failed, `reply` stayed empty, and
+  # the `*)` branch below called that "no". Reported from Git Bash on Windows:
+  #
+  #     Proceed? [y/N] .../bin/spec-upgrade: line 358: /dev/tty: No such device
+  #     nothing changed
+  #
+  # The error leaks past `2>/dev/null` because redirections are applied left to
+  # right: `</dev/tty` fails before stderr has been redirected. And the plan had
+  # already printed, so from a caller the no-op was indistinguishable from a
+  # refusal this tool had chosen for a reason (issue #7). It exited 1, not 0 as
+  # reported — but 1 is also what a refused dirty tree exits, so a caller could
+  # not tell those apart either.
+  #
+  # ⚠️ `[ -r /dev/tty ]` is NOT the probe. `test -r` asks access(2) about the
+  # permission bits, and the device node is world-readable; it is the open(2)
+  # that fails (ENXIO) when there is no controlling terminal. So open it.
+  if { : </dev/tty; } 2>/dev/null; then
+    printf '  Proceed? [y/N] '
+    read -r reply </dev/tty || reply=""
+  elif [ -t 0 ]; then
+    printf '  Proceed? [y/N] '
+    read -r reply || reply=""
+  else
+    die_usage "no terminal to confirm on, and --yes was not passed" \
+      "run it non-interactively: spec-upgrade --repo $REPO --yes
+  or see the plan without applying it: spec-upgrade --repo $REPO --dry-run"
+  fi
   case "$reply" in y|Y|yes|YES) ;; *) say "  nothing changed"; exit 1;; esac
 fi
 

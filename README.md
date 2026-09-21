@@ -52,21 +52,37 @@ claude --version    # or your wrapper — see "Using a different runner" below
 `spec-run` checks all of these before the first phase is billed for anything, and
 names whichever one is missing rather than failing later and vaguely.
 
+**On Windows, the shell is Git Bash** (msys) and `jq` is the piece that is not
+already there:
+
+```bash
+winget install jqlang.jq
+```
+
+⚠️ **Then restart the shell.** winget installs the binary behind a `Links` shim
+directory that is not on Git Bash's `PATH` in an already-open session, so
+`spec-run` goes on reporting `jq` missing until you open a new shell — or add the
+package directory to `PATH` yourself. Everything else in the pipeline runs under
+Git Bash once `jq` resolves.
+
+`pkill` and `pgrep` are the other msys gap, and they are not yours to install:
+nothing here calls them directly any more (see [`spec-reap`](#reaping-the-log-watchers)).
+
 ### Step 1 — get the tool
 
 **Either** clone it:
 
 ```bash
 git clone git@github.com:rv-jclark/speckit-pipeline.git ~/code/speckit-pipeline
-for c in spec-run spec-roadmap spec-status spec-bootstrap spec-upgrade; do
+for c in spec-run spec-roadmap spec-status spec-bootstrap spec-upgrade spec-reap; do
   sudo ln -sf ~/code/speckit-pipeline/bin/$c /usr/local/bin/$c
 done
 spec-run --version   # the plugin version and the spec-kit version it vendors
 spec-run --list      # the six phases and their models
 ```
 
-The symlinks are the five commands: `spec-run`, `spec-roadmap`, `spec-status`,
-`spec-bootstrap`, `spec-upgrade`.
+The symlinks are the six commands: `spec-run`, `spec-roadmap`, `spec-status`,
+`spec-bootstrap`, `spec-upgrade`, `spec-reap`.
 
 **Or** install it as a Claude Code plugin, for `/spec-run`, `/spec-roadmap`,
 `/spec-status` and `/spec-upgrade` in a session:
@@ -119,7 +135,7 @@ That copies in, without overwriting anything you have authored:
 | Path | What it is |
 |---|---|
 | `.claude/skills/speckit-*` | the 14 spec-kit skills the phases invoke |
-| `.specify/scripts/`, `templates/`, `extensions/` | the scaffold those skills execute |
+| `.specify/scripts/`, `templates/`, `extensions/`, `workflows/` | the scaffold those skills execute |
 | `.specify/memory/constitution.md` | seeded from the template **only if absent** |
 | `specs/` | where features land |
 
@@ -127,6 +143,41 @@ It is idempotent — run it again any time; a second run reports `0 installed`. 
 vendored file already exists and differs, it says so and **leaves yours alone**
 unless you pass `--force`. A difference is not necessarily wrong: you may have
 customised a template deliberately.
+
+`--force` works **per file**: it only ever writes paths the bundle ships, so
+anything else living under `.specify/` or `.claude/skills/` stays where it is.
+That distinction was once a real defect — `--force` took whole directories and
+`rm -rf`'d them before recopying, which deleted the
+`.specify/templates/overrides/` files `spec-upgrade` had just written to protect
+a project's customised templates, plus project-side extension scripts from an
+older scaffold. `.specify/memory/`, `.specify/feature.json`,
+`.specify/integration.json` and `.specify/templates/overrides/` are never
+written at all.
+
+#### If your project formats files on commit
+
+A formatter that rewrites the vendored scaffold makes drift **permanent**.
+`spec-upgrade` compares bytes (`cmp -s`), which is the honest comparison and the
+one that cannot be argued out of a real difference — and the cost is that a
+`prettier --write` over `*.{md,json,yml,yaml}` is indistinguishable from you
+customising the files. Measured on a real project: lint-staged reformatted 30 of
+the 35 scaffold files immediately after a clean upgrade, so every later
+`spec-upgrade --check` reported `30 file(s) differ`, and the next `spec-upgrade`
+would have counted the templates as customised (2 commits each) and filed pure
+formatting noise into `overrides/` as if it were intent.
+
+So exclude the scaffold from the formatter:
+
+```
+# .prettierignore
+.specify
+.claude/skills/speckit-*
+```
+
+`spec-bootstrap` detects a prettier or lint-staged config and prints this, once,
+when the ignore is not already in place. It does not write the file: your
+formatter config is yours, the same way it will not create a `.gitignore` that is
+not there.
 
 ### Step 3 — write your constitution
 
@@ -343,6 +394,21 @@ it.
   called out as superseded and left for you.
 - **Revoke your extensions.** Extensions the project has that the bundle lacks
   stay.
+- **Treat an unanswerable prompt as a "no".** Without `--yes`, the confirmation
+  needs a terminal, and a host with no controlling terminal — CI, a Claude Code
+  `Bash` call, Git Bash driven by an agent — cannot supply one. That used to fail
+  the `read`, leave the reply empty, print `nothing changed` and exit 1: from a
+  caller, indistinguishable from a refusal chosen for a reason, and identical to
+  what a refused dirty tree exits. It is now a **usage error (exit 3)** naming
+  `--yes` and `--dry-run`. `spec-bootstrap` and `spec-roadmap` never prompt, so
+  they have nothing to fix here.
+
+  ⚠️ `[ -r /dev/tty ]` is not the test, in case this ever needs rewriting.
+  `test -r` asks `access(2)` about permission bits and the device node is
+  world-readable; it is the `open(2)` that fails with `ENXIO` when there is no
+  controlling terminal. The probe has to actually open it. (Relatedly, the
+  original error leaked past its own `2>/dev/null`, because redirections apply
+  left to right and `</dev/tty` failed before stderr had been redirected.)
 
 It updates `.specify/integration.json`'s `version` field rather than replacing the
 file — that record is the project's, and it *must* be updated or `--check`
@@ -465,6 +531,51 @@ input. Every later `jq` then received the entire stream, `permission_denials |
 length` produced one `0` per event, and an integer comparison against
 `"0\n0\n0…"` failed. It now slurps and takes the last object, which answers the
 question that was actually being asked.
+
+### Reaping the log watchers
+
+A front-end session following `commands/spec-run.md` backgrounds the run, logs to
+`.runs/<name>.log`, and attaches a `Monitor` to a `tail -f` of it. That `tail`
+**outlives the Monitor that started it** — `timeout_ms` bounds the Monitor, not
+the pipeline it launched — and nothing else reaps it. Measured once on the
+author's machine: 17 orphaned watchers, each a `tail` plus a `grep`, the oldest
+following a log last written five days earlier and already reparented to
+`ppid=1`, on a host at load average 338 with swap 97% consumed.
+
+```bash
+spec-reap ~/code/speckit-pipeline/.runs/my-run.log   # one run's watchers
+spec-reap --all                                      # every watcher on a .runs/ log
+spec-reap --dry-run --all                            # look first
+```
+
+The instruction used to be one line of prose — `pkill -f "tail -f -n +1 <log>"` —
+which is right on macOS and Linux and **does not exist on Windows**: Git for
+Windows' msys ships neither `pkill` nor `pgrep`, so under Git Bash the reap
+failed with `command not found` (rc 127) and leaked the watcher it was meant to
+kill. A doc offering a preferred form and two platform fallbacks is a doc whose
+fallback gets used wrong, and the failure is invisible by construction.
+
+What the script adds over the one-liner:
+
+| | |
+|---|---|
+| picks the query the host can answer | `ps -o args=` where arguments are printed, msys `ps -W` where they are not |
+| matches the **full log path** | a concurrent run's watcher survives; `--all` keys on `/.runs/` |
+| only kills a **follow** | a `tail -200 run.log` somebody is reading with is left alone |
+| exits `1` on an unreadable table | **not** `0` — see below |
+| ignores the `grep` | it sees EOF when its `tail` dies and exits on its own |
+
+🛑 **An unreadable process table is not an empty one.** `ps` is refused outright
+inside some sandboxes, and a refused `ps` answers "nothing is running" to every
+question — which is exactly how the five-day-old orphan went unnoticed. So the
+probe is a query about this shell's *own* pid, which certainly has an answer, and
+a blank reply exits `1` naming the table it could not read and printing the
+manual command. The same lesson `_runner_alive()` learned against a live runner.
+
+Under msys the per-log match is **not available at all**: `ps -W` lists Windows
+processes and their command but not their arguments. There the only answer is
+"every tail on the host", which will take a concurrent run's watcher with it. It
+says so before doing it, and `--dry-run` shows the list first.
 
 ### Reading code that lives elsewhere
 
@@ -768,11 +879,24 @@ ordinary shell the phases need to do their job. The scope check still runs
 afterwards. If your organisation's policy blocks `bypassPermissions`, `auto` also
 allows the env-prefixed form — it just substitutes a classifier for a rule.
 
-Denied tool calls are **counted and named**, not inferred. The CLI reports its own
-refusals in the result (`permission_denials`), so a phase's note reads
-`3 tool call(s) were DENIED to this phase (Bash, Write)` rather than leaving you
-to guess from a thin artifact. An empty spec and "17 denials" are the same
-artifact with completely different remedies.
+Denied tool calls are **counted and named, with the command**, not inferred. The
+CLI reports its own refusals in the result (`permission_denials`), so a phase's
+note reads
+
+```
+3 tool call(s) were DENIED to this phase: Bash(curl -s http://localhost:3003/lists)
+  (all of them in .pipeline/implement.result.json)
+```
+
+rather than leaving you to guess from a thin artifact. An empty spec and "17
+denials" are the same artifact with completely different remedies.
+
+It used to print the tool names alone — `(Bash, Write)` — which says a rule fired
+and nothing about which rule or over what, so the reader opened the result
+envelope every time. The command is already in that envelope; it just was not
+being shown. Truncated to 80 characters and to the first three **distinct** calls,
+because a phase that retried the same refused command eight times would otherwise
+print it eight times, and the full list is on disk at the path named in the note.
 
 Worth trying before reaching for a wrapper: the CLI accepts `dontAsk` and
 `bypassPermissions` as well as `acceptEdits`, and that is one line of data in
@@ -837,6 +961,44 @@ verifier looks for *evidence of reading*: a `review.md` citing no `path:line`
 anywhere is recorded `failed`, checked before its findings count, because a
 review that cannot show it looked has a worthless verdict — and a worthless
 clean verdict is the most expensive thing this file could wave through.
+
+### Work that cannot be done here: the `🛑 BLOCKED` marker
+
+Some tasks genuinely need a human — a real device, a visual judgement, a
+post-deploy read against a live dashboard. Leaving those unchecked stops the run
+at a gate with nothing to decide; ticking them is a lie. So there is a third
+answer. An **unchecked** task whose text opens with `🛑 BLOCKED:` is counted
+separately:
+
+```markdown
+- [ ] T018 [US2] 🛑 BLOCKED: needs a real device — the sheet's drag handle on iOS Safari
+```
+
+| Remaining tasks | Verdict |
+|---|---|
+| all of them marked | `ok` — *"owed, not missing"*, and the note says how many |
+| some marked, some not | `needs_input`, reporting both counts so nobody has to go and tally |
+| none marked | `needs_input` |
+
+The marker must open the task text, after any `T0NN` and `[TAG]` prefixes, and the
+box must be left unchecked. A task that merely *mentions* the word does not
+qualify, deliberately — otherwise the marker becomes a place to hide unfinished
+work.
+
+⚠️ **This existed for a while as an unreachable mechanism.** `verify.sh` read the
+marker and nothing told any phase how to write one, so the only way to produce it
+was to read `verify.sh` — and a format undocumented to its own producers never
+gets produced. The `tasks` and `implement` phases are now told the spelling in
+their handoff prompts, which is also where they are told that implementation is
+headless: no display, no browser, and `curl`/`wget`/`WebFetch` withheld by rule.
+Measured before that (issue #8): `tasks` emitted three *"manually verify via
+`yarn dev` at 390×844, 640×900, 1280×800"* tasks, the first `implement` pass
+spent most of its 21 turns trying to start a dev server and `curl` it — three
+denials — and ticked 1 of 18. Later passes ticked those tasks by deferring to a
+CI run that does not execute them; `review` caught the false premise and redid
+the verification itself with a Playwright script, at 52% of the whole run's cost.
+The lesson is in both prompts now: ask for the executable form up front, and
+where a check truly needs a human, mark it rather than approximate it.
 
 Then a **scope check**: whatever the phase touched is compared against its
 declared `write_scope`. A specify phase that writes source code is reported and
@@ -977,6 +1139,18 @@ guarantee is bigger than it is.
   want isolation, make the worktree yourself and point `--repo` at it.
 - **`--bare` is deliberately unused.** It would trim the phase's context, but it
   forces `ANTHROPIC_API_KEY`-only auth and never reads OAuth or the keychain.
+- **Scaffold drift is a BYTE comparison, and stays one.** `spec-upgrade` cannot
+  tell a formatter's rewrite from your edit, and normalising whitespace before
+  comparing was considered and rejected: a byte compare is the only one that
+  cannot be argued out of a real difference, and a tool that quietly forgave some
+  differences would be wrong about the one thing it exists to measure. The
+  remedy is to keep the formatter off the scaffold — see
+  [formatter hooks](#if-your-project-formats-files-on-commit), which
+  `spec-bootstrap` now warns about up front.
+- **`spec-reap` cannot narrow to one log under msys.** `ps -W` prints commands
+  without arguments, so on Git Bash the only available answer is "every `tail` on
+  the host". It says so and `--dry-run` shows the list, but the precision is not
+  recoverable there.
 
 ## Licence
 
