@@ -1875,12 +1875,22 @@ assert_contains "$(cat "$SPEC_RUN")" "kill_descendants \$\$" \
 for _cmd_doc in "$PKG/commands/spec-run.md" "$PKG/commands/spec-roadmap.md"; do
   _doc_flat="$(tr -s '[:space:]' ' ' < "$_cmd_doc")"
   _doc_name="$(basename "$_cmd_doc")"
-  assert_contains "$_doc_flat" 'pkill -f "tail -f -n +1 <logfile>"' \
+  # The instruction used to BE `pkill -f "tail -f -n +1 <logfile>"`, and this
+  # assertion pinned that exact string — which is how it caught the half-done fix
+  # for issue #9: spec-run.md had moved to spec-reap and THIS doc had not, so the
+  # loop passed here and failed there. Both now name the script, and the bare
+  # pkill must be gone from both, or Git Bash keeps leaking watchers through
+  # whichever doc was forgotten.
+  assert_contains "$_doc_flat" 'bin/spec-reap" <logfile>' \
     "$_doc_name tells the agent how to reap its watcher"
+  assert_not_contains "$_doc_flat" 'pkill -f "tail' \
+    "$_doc_name does not hand the agent a bare pkill (absent under msys)"
   assert_contains "$_doc_flat" "Reap the watcher when the run ends" \
     "$_doc_name names reaping as a required step"
   assert_contains "$_doc_flat" "full logfile path" \
-    "$_doc_name warns against a broad pkill that hits a concurrent run's watcher"
+    "$_doc_name warns against a broad match that hits a concurrent run's watcher"
+  assert_contains "$_doc_flat" "Git Bash" \
+    "$_doc_name says which platform the one-liner does not work on"
 done
 
 argv=$("$SPEC_RUN" --repo "$BS" --feature-dir "$BS/specs/001-t" --only tasks --dry-run 2>&1)
@@ -2306,14 +2316,10 @@ assert_not_contains "$rp" "pid 4322" "the grep is not"
 assert_contains "$rp" "per-log" "and the loss of per-log precision is stated, not hidden"
 unset REAP_TABLE
 
-# The command doc must not send the front-end back to bare pkill: that instruction
-# is the bug, and a doc is the only place it can be fixed.
-RUNMD="$PKG/commands/spec-run.md"
-assert_contains "$(cat "$RUNMD")" "bin/spec-reap" "spec-run.md reaps through spec-reap"
-assert_not_contains "$(cat "$RUNMD")" 'pkill -f "tail' \
-  "and no longer hands the agent a bare pkill to run"
-# It still has to SAY why, or the next editor puts the one-liner back.
-assert_contains "$(cat "$RUNMD")" "Git Bash" "naming the platform the one-liner does not work on"
+# The command docs are asserted in the watcher-reaping block above — over BOTH
+# spec-run.md and spec-roadmap.md, which is the coverage that matters and the
+# coverage this fix originally missed. Not repeated here: two homes for one claim
+# is how they drift apart, and the loop is the one that checks both docs.
 
 # ------------------------------------------------------- the progress filter ----
 printf '\nstream_progress\n'

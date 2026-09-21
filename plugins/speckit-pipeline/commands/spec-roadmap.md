@@ -51,18 +51,28 @@ So do these two things, in this order, every time:
    the filter must match failure states too; one that greps only for success is
    silent through a crash, and silence is indistinguishable from progress.
 3. 🛑 **Reap the watcher when the run ends — on EVERY exit path, including failure
-   and abandonment**, matching on the full logfile path so a concurrent roadmap's
-   watcher is left alone:
+   and abandonment:**
 
    ```
-   pkill -f "tail -f -n +1 <logfile>"
+   "${CLAUDE_PLUGIN_ROOT}/bin/spec-reap" <logfile>
    ```
+
+   Use that, not `pkill` directly. It matches on the **full logfile path** so a
+   concurrent roadmap's watcher is left alone, ignores a `tail -200` somebody is
+   reading with, and picks a process-table query the host can actually answer —
+   **`pkill` and `pgrep` do not exist under Git Bash on Windows**, where msys
+   ships neither, so the bare `pkill` form failed with `command not found` and
+   leaked the watcher it was supposed to reap. Exit `1` means the process table
+   could not be read and **nothing is known**, which is not a clean reap; it
+   prints the manual command to run from a shell that can.
 
    A roadmap runs many entries and so spawns many watchers, which makes this worse
    here than in `spec-run`: measured 2026-09-01, **17** orphaned `tail`+`grep` pairs
    were following logs from finished runs, the oldest **five days** stale. See
    `spec-run.md` for the full measurement — `timeout_ms` bounds the Monitor, not the
-   pipeline it launched, so the watcher outlives it by days.
+   pipeline it launched, so the watcher outlives it by days. `spec-reap --all`
+   reaps every watcher on a `.runs/` log, which is the one to reach for once a
+   roadmap has left a pile of them.
 
 Pass `--stream` so there is per-step output to filter in the first place.
 
