@@ -466,10 +466,60 @@ and, if needs_input, the specific questions a human must answer.
 EOF
 }
 
-# Phase-specific additions. Kept here rather than in the vendored skill so an
-# upgrade cannot silently drop them.
+# What the tasks phase has to know that its skill does not: who executes the
+# list it is writing. It runs before implement and therefore before anything can
+# discover, expensively, that a task cannot be performed.
+#
+# 🛑 The `🛑 BLOCKED` marker below is not advice, it is the SPELLING verify.sh
+# greps for (_tasks_blocked, lib/verify.sh). That machinery has existed since a
+# roadmap where every entry stopped at a gate over post-deploy tasks — and
+# NOTHING told any phase how to write the marker, so the only way to produce one
+# was to read verify.sh. A mechanism whose input format is undocumented to its
+# own producers is a mechanism that never fires. This is where it gets said.
+_handoff_tasks() {
+  cat <<'EOF'
+
+WRITE TASKS THE PHASE THAT EXECUTES THEM CAN ACTUALLY PERFORM. Implementation
+runs as a headless `claude -p` process: no terminal, no browser, no display, no
+human, and `curl`, `wget`, `http`, `httpie` and `WebFetch` withheld from it by
+rule. So a task of the shape "manually verify via `yarn dev` at 390×844, 640×900
+and 1280×800" is not a task there — it is a turn sink.
+
+Measured (issue #8): three tasks of exactly that shape went into an 18-task list.
+The first implement pass spent most of its 21 turns trying to start a dev server
+and probe it — three denied `curl` calls — and ticked 1 of 18. Later passes
+ticked the verify tasks with notes deferring to a CI run that does not execute
+them. The review phase caught the false premise and redid the verification itself
+with a Playwright script, which came to 52% of the entire run's cost.
+
+So write the EXECUTABLE form, and name the tool in the task:
+  * a Playwright/Puppeteer spec that sets the viewport and asserts, or screenshots
+    to a path — this is what review ends up writing anyway, so ask for it up front
+  * a unit or component test, a `-k` selection, a fixture
+  * `tsc --noEmit`, a lint rule, a build
+
+AND WHERE A CHECK GENUINELY NEEDS A HUMAN, SAY SO IN THE MARKER THE PIPELINE
+READS. Still write the task — work nobody can do is not work nobody owes — but
+open its text with `🛑 BLOCKED:` and one line of why:
+
+  - [ ] T018 [US2] 🛑 BLOCKED: needs a real device — confirm the sheet's drag
+        handle on iOS Safari
+
+Verification treats a remainder of tasks that are ALL marked this way as `ok`
+("owed, not missing") instead of stopping the run at a gate with nothing to
+decide. The marker must open the task text, after any `T0NN` and `[TAG]`
+prefixes, and the box must be left unchecked. A task that merely mentions the
+word does not count, deliberately — otherwise the marker becomes a place to hide
+unfinished work.
+EOF
+}
+
 handoff_extra() { # handoff_extra <phase_id> <chunked>
-  [ "$1" = implement ] || return 0
+  case "$1" in
+    tasks) _handoff_tasks; return 0;;
+    implement) ;;
+    *) return 0;;
+  esac
   if [ "${2:-}" = true ]; then
     cat <<'EOF'
 
@@ -511,6 +561,38 @@ EOF
     tasks_digest "${FEATURE_DIR:-}"
   fi
   cat <<'EOF'
+
+YOU HAVE NO BROWSER AND NO NETWORK EGRESS. There is no display here, and `curl`,
+`wget`, `http`, `httpie` and `WebFetch` are withheld from this phase by rule. So
+do NOT start a dev server and probe it over HTTP. Measured (issue #8): a pass ran
+`(PORT=3003 next dev &) && sleep 8 && curl -s http://localhost:3003/...`, got a
+permission denial, retried the curl twice, and ticked 1 task of 18. The refusal
+is a rule, not a malfunction, and it will not go away on the third attempt.
+
+A TASK YOU CANNOT PERFORM IS OWED, NOT APPROXIMATED — and above all not ticked.
+When a task asks for a manual check at a set of viewport widths, a visual
+judgement, a real device, or anything else needing a human or a browser:
+
+  1. Write the EXECUTABLE equivalent if one exists. A Playwright spec that sets
+     the viewport and screenshots to a path is within reach, needs no egress, and
+     is what the review phase writes for you at a higher model and effort if you
+     do not. Then it is an ordinary task and you tick it.
+  2. Otherwise leave the box UNCHECKED and edit the task's text to open with
+     `🛑 BLOCKED:` and one line of why:
+
+       - [ ] T005 [US1] 🛑 BLOCKED: needs a human eye — poster flush left at 390px
+
+     Verification reads that marker (_tasks_blocked in lib/verify.sh). A
+     remainder that is ALL marked this way passes as `ok`, "owed not missing",
+     so recording the truth does not stall the run. The marker must open the
+     task text, after any `T0NN` and `[TAG]` prefixes.
+
+🛑 NEVER tick a task by deferring it to CI unless you have READ the CI config and
+confirmed it runs that exact check. Measured: a pass ticked three verification
+tasks "deferring full green confirmation to CI's fresh-DB run"; review checked
+the workflow, found CI did not run those specs at all, and logged it as a false
+premise. The tick cost more than the honest unchecked box would have, because it
+bought a wrong belief that something downstream then had to disprove.
 
 TICK EACH TASK IN tasks.md THE MOMENT YOU FINISH IT, before starting the next one.
 Do not batch the updates and do not leave them to the end. tasks.md is not a
@@ -976,9 +1058,35 @@ run_phase() { # run_phase <phase_json>
     # spec and "17 denials" are the same artifact with very different remedies.
     denials=$(jq -r '(.permission_denials // []) | length' <<<"$json" 2>/dev/null || echo 0)
     if [ "${denials:-0}" -gt 0 ]; then
-      denied_tools=$(jq -r '[(.permission_denials // [])[] | (.tool_name // .tool // "?")]
-                            | unique | join(", ")' <<<"$json" 2>/dev/null || true)
-      denial_note="$denials tool call(s) were DENIED to this phase (${denied_tools:-unknown})"
+      # The COMMAND, not just the tool name. A note reading "(Bash, Write)" says
+      # a rule fired and nothing about which rule or over what, so the reader
+      # opens .pipeline/<id>.result.json to find out — every time. Reported in
+      # issue #8, where an implement pass spent most of 21 turns on
+      #   (PORT=3003 next dev &) && sleep 8 && curl -s http://localhost:3003/lists
+      # against `Bash(curl:*)`. "Bash was denied twice" would not have told
+      # anyone that; the command tells them immediately, and it is already in
+      # the envelope.
+      #
+      # Truncated to 80 characters and to the first three DISTINCT calls: the
+      # note is one line in a summary, and a phase that retried the same refused
+      # command eight times would otherwise print it eight times. The full list
+      # stays in the result envelope on disk, which is named below.
+      #
+      # `// ""` all the way down because tool_input's shape is per-tool and not
+      # guaranteed: a denial carrying no recognisable argument must degrade to
+      # the bare tool name rather than to the string "null".
+      denied_tools=$(jq -r '
+        [ (.permission_denials // [])[]
+          | (.tool_name // .tool // "?") as $t
+          | (((.tool_input // {}) | (.command // .file_path // .url // .path // ""))
+              | tostring | gsub("[[:space:]]+"; " ")) as $c
+          | if ($c | length) > 80 then "\($t)(\($c[0:80])…)"
+            elif ($c | length) > 0  then "\($t)(\($c))"
+            else $t end ]
+        | unique | .[0:3] | join("; ")' <<<"$json" 2>/dev/null || true)
+      denial_note="$denials tool call(s) were DENIED to this phase: ${denied_tools:-unknown}"
+      [ -n "${FEATURE_DIR:-}" ] && \
+        denial_note="$denial_note (all of them in .pipeline/$id.result.json)"
     fi
   else
     # The check failed, not necessarily the phase. Say which, and leave the

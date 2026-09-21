@@ -55,11 +55,20 @@ So do these two things, in this order, every time:
    nothing else reaps it:
 
    ```
-   pkill -f "tail -f -n +1 <logfile>"
+   "${CLAUDE_PLUGIN_ROOT}/bin/spec-reap" <logfile>
    ```
 
-   Match on the **full logfile path**, never a bare `pkill tail` — a concurrent run
-   is following its own log and a broad pattern kills that one too.
+   Use that, not `pkill` directly. It matches on the **full logfile path** so a
+   concurrent run's watcher survives, ignores a `tail -200` somebody is reading
+   with, and picks a process-table query the host can actually answer — **`pkill`
+   and `pgrep` do not exist under Git Bash on Windows**, where msys ships
+   neither, so the bare `pkill` form failed with `command not found` and leaked
+   the watcher it was supposed to reap. Exit `1` means the process table could
+   not be read and **nothing is known**, which is not the same as a clean reap;
+   it prints the manual command to run from a shell that can.
+
+   `spec-reap --all` reaps every watcher on a `.runs/` log, which is the one to
+   reach for when they have already accumulated.
 
    ⚠️ Measured 2026-09-01 on the author's machine: **17 orphaned watchers**, each a
    `tail` plus a `grep`, the oldest following a log last written **five days**
