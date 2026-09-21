@@ -1583,8 +1583,20 @@ assert_contains "$contract_impl" "OWED, NOT APPROXIMATED" \
 # post-deploy tasks — and nothing told any phase how to write one, so the only
 # way to produce it was to read verify.sh. A format undocumented to its own
 # producers is never produced.
-assert_contains "$contract_impl" "🛑 BLOCKED:" \
-  "implement is given the exact marker verify.sh reads for human-only work"
+# ⚠️ Matched on the ASCII `BLOCKED:` and NOT on the emoji, because this haystack
+# came through `printf %q`. Under bash 3.2 — macOS's shell, and this repo's stated
+# floor — %q escapes a multi-byte UTF-8 character to `$'\360\237\233\221'`, and
+# unquote() then strips the backslashes and leaves `$'360237233221'`. So an
+# assertion on "🛑 BLOCKED:" PASSES on Linux/bash 5 and FAILS on macOS over a
+# prompt that is byte-identical on both. Measured: CI green at 612/0 while the
+# same tree ran 4 failures locally.
+#
+# The emoji is still pinned, against the SOURCE rather than the %q dump — see the
+# two file-level assertions below. The real invocation never goes through %q
+# (spec-run uses it only to DISPLAY a --dry-run argv), so the phase receives the
+# marker intact everywhere; this is a limitation of the test's extraction alone.
+assert_contains "$contract_impl" "BLOCKED:" \
+  "implement is given the marker verify.sh reads for human-only work"
 assert_contains "$contract_impl" "READ the CI config" \
   "and told not to tick by deferring to a CI run it has not checked"
 # Mutation: change the marker in the prompt to plain "BLOCKED" and the next
@@ -1592,6 +1604,13 @@ assert_contains "$contract_impl" "READ the CI config" \
 # spellings are the SAME one. This is the join the bug lived in.
 assert_contains "$(cat "$PKG/lib/verify.sh")" "🛑[[:space:]]*BLOCKED" \
   "and verify.sh greps for that same spelling"
+# Read off DISK, so the emoji is compared byte-for-byte on every platform. This
+# is the assertion that actually pins the spelling; the two argv checks above can
+# only see the ASCII tail of it. Without this pair, the prompt could drift to a
+# plain "BLOCKED" and verify.sh would silently stop matching — which is the exact
+# join issue #8 turned out to be about.
+assert_contains "$(cat "$SPEC_RUN")" "🛑 BLOCKED:" \
+  "the prompt's marker is the emoji spelling, not a plain word"
 
 # tasks runs BEFORE implement, so it is where an unperformable task is cheapest to
 # not write. Measured: three "manually verify via yarn dev at 390×844 …" tasks
@@ -1603,13 +1622,16 @@ assert_contains "$contract_tasks" "CAN ACTUALLY PERFORM" \
   "tasks is told who executes the list it writes"
 assert_contains "$contract_tasks" "Playwright" \
   "and given the executable form to ask for instead of a manual viewport check"
-assert_contains "$contract_tasks" "🛑 BLOCKED:" \
+assert_contains "$contract_tasks" "BLOCKED:" \
   "and the same marker, so human-only work is written as such from the start"
 assert_contains "$contract_tasks" "YOU ARE HEADLESS" \
   "while still getting the shared contract"
 # And the addition is phase-scoped, not smeared across every phase: a specify
 # phase told how to write task markers is prompt bloat paid for on every turn.
-assert_not_contains "$contract" "🛑 BLOCKED:" \
+# ASCII here too, and for a sharper reason than the two above: on macOS the emoji
+# can never appear in a %q dump at all, so an assert_not_contains on it would pass
+# VACUOUSLY — green even if specify were handed the whole tasks addition.
+assert_not_contains "$contract" "BLOCKED:" \
   "specify gets neither addition — it writes no tasks"
 assert_not_contains "$contract_tasks" "TICK EACH TASK" \
   "and tasks is not told to tick anything — implement does that"
