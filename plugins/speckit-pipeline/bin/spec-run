@@ -640,6 +640,24 @@ tasks_unchecked() { # tasks_unchecked <feature_dir>
   printf '%s\n' "${c:-0}"
 }
 
+# Unchecked tasks a pass can actually DO: unchecked minus those marked 🛑 BLOCKED.
+# This, not tasks_unchecked, is what the chunk loop runs on.
+#
+# 🛑 Counting blocked tasks as open made review UNREACHABLE. Measured 2026-09-24
+# across every cost.log on the author's machine: 41 features, 0 review phases.
+# A post-deploy task marked BLOCKED is by definition one no pass can tick, so the
+# loop spent one more pass on it (3-5 turns, ~95k tokens of cold-start cache
+# writes), that pass ticked nothing, the loop returned 2, and the phase after
+# implement never ran. `--resume` repeated the same stall, so it stayed
+# unreachable however many times it was asked for. verify.sh already called that
+# remainder "owed, not missing"; the loop disagreed with it.
+tasks_open() { # tasks_open <feature_dir>
+  local u b
+  u=$(tasks_unchecked "${1:-}")
+  b=$(_tasks_blocked "${1:-}")
+  printf '%s\n' $(( ${u:-0} - ${b:-0} ))
+}
+
 # Where the next pass should start, computed HERE and handed over in the prompt.
 #
 # The runner already knows this — tasks_unchecked() above reads the same file —
@@ -677,6 +695,9 @@ tasks_digest() { # tasks_digest <feature_dir>
       g = (group == "" ? "(no group)" : group)
       if (!seen[g]) { order[++ng] = g; seen[g] = 1; first[g] = NR }
       total[g]++; tot++
+      # A BLOCKED task is owed, not open (see tasks_open): pointing a pass at a
+      # group whose only remainder is blocked sends it to work it cannot do.
+      if ($0 ~ /^[[:space:]]*[-*][[:space:]]*\[[[:space:]]\][[:space:]]*(T[0-9]+[[:space:]]+)?(\[[A-Z0-9]+\][[:space:]]*)*🛑[[:space:]]*BLOCKED/) next
       if ($0 ~ /^[[:space:]]*[-*][[:space:]]*\[[[:space:]]\]/) {
         un[g]++; unt++
         # The task id, when there is one: `- [ ] T045 [P] do the thing`.
@@ -751,13 +772,24 @@ run_phase_chunked() { # run_phase_chunked <phase_json>
 
   FORCE=1
   while :; do
-    before=$(tasks_unchecked "${FEATURE_DIR:-}")
-    if [ "${before:-0}" -eq 0 ]; then
+    before=$(tasks_open "${FEATURE_DIR:-}")
+    if [ "${before:-0}" -le 0 ]; then
       FORCE="$saved_force"
+      local owed
+      owed=$(_tasks_blocked "${FEATURE_DIR:-}")
+      owed=${owed:-0}
       if [ "$pass" -eq 0 ]; then
-        dim "  · $id — no unchecked tasks; nothing to do"
+        if [ "$owed" -gt 0 ]; then
+          dim "  · $id — no open tasks; $owed marked BLOCKED (owed, not missing)"
+        else
+          dim "  · $id — no unchecked tasks; nothing to do"
+        fi
       else
-        ok "$id — task list clear after $pass pass(es)"
+        if [ "$owed" -gt 0 ]; then
+          ok "$id — task list clear after $pass pass(es), $owed marked BLOCKED (owed, not missing)"
+        else
+          ok "$id — task list clear after $pass pass(es)"
+        fi
         if [ -n "$STATE" ] && [ "$DRY_RUN" -eq 0 ]; then
           state_phase_set_totals "$STATE" "$id" "$tot_cost" "$tot_turns" "$pass"
           state_phase_set_usage  "$STATE" "$id" "$tot_read" "$tot_write" "$tot_in" "$tot_out"
@@ -769,7 +801,7 @@ run_phase_chunked() { # run_phase_chunked <phase_json>
     pass=$((pass + 1))
     if [ "$pass" -gt "$max_passes" ]; then
       FORCE="$saved_force"
-      err "$id — $max_passes passes used with $before task(s) still unchecked"
+      err "$id — $max_passes passes used with $before open task(s) left"
       say  "  Raise max_passes only if each pass was making real progress; if it"
       say  "  was not, the task list is asking for something it cannot finish."
       return 1
@@ -778,7 +810,7 @@ run_phase_chunked() { # run_phase_chunked <phase_json>
     # Deliberately NOT info(): its `→` marker means "a phase is starting", and a
     # pass is not a phase. Emitting it here made implement announce itself twice
     # and broke the count that proves no phase was silently skipped.
-    say "  pass $pass/$max_passes — $before task(s) unchecked"
+    say "  pass $pass/$max_passes — $before task(s) open"
     run_phase "$pj"; rc=$?
     if [ "$rc" -ne 0 ]; then FORCE="$saved_force"; return "$rc"; fi
 
@@ -793,7 +825,9 @@ run_phase_chunked() { # run_phase_chunked <phase_json>
       u=$(state_phase_get "$STATE" "$id" 'usage.output_tokens'      0); tot_out=$((tot_out     + ${u:-0}))
     fi
 
-    after=$(tasks_unchecked "${FEATURE_DIR:-}")
+    # Open, not unchecked: a pass that marks an undoable task BLOCKED has made
+    # the progress available to it, and must not read as one that ticked nothing.
+    after=$(tasks_open "${FEATURE_DIR:-}")
     if [ "${after:-0}" -ge "${before:-0}" ]; then
       FORCE="$saved_force"
       # A stalled loop is WAITING ON YOU, not broken — exit 2, not 1. The two are
@@ -806,14 +840,17 @@ run_phase_chunked() { # run_phase_chunked <phase_json>
       # describes it wrongly — nothing failed, the remainder simply is not the
       # phase's to do. The guard still stops the loop, which is its whole point;
       # it just stops calling this a failure.
-      warn "$id — pass $pass ticked nothing ($before → $after unchecked); stopping the loop"
+      warn "$id — pass $pass ticked nothing ($before → $after open); stopping the loop"
       say  "  Looping again would spend without progressing. Either the remaining"
       say  "  task(s) need a human — a browser check, a judgement call, a decision"
       say  "  — or the phase is stuck. They are distinguishable only by reading"
       say  "  them, so read them:"
       grep -n '^[[:space:]]*-[[:space:]]*\[[[:space:]]\]' "${FEATURE_DIR:-}/tasks.md" 2>/dev/null |
-        head -5 | cut -c1-160 | sed 's/^/    /'
+        grep -v '🛑[[:space:]]*BLOCKED' | head -5 | cut -c1-160 | sed 's/^/    /'
       say  "  and the phase's own account: ${FEATURE_DIR:-<feature>}/.pipeline/$id.result.json"
+      say  "  If a remaining task is post-deploy or human-only, open its text with"
+      say  "  '🛑 BLOCKED: <why>' and run spec-run --resume — the loop then treats it as"
+      say  "  owed, and the phases after $id (review) run."
       if [ -n "$STATE" ] && [ "$DRY_RUN" -eq 0 ]; then
         state_phase_set_totals "$STATE" "$id" "$tot_cost" "$tot_turns" "$pass"
         state_phase_set_usage  "$STATE" "$id" "$tot_read" "$tot_write" "$tot_in" "$tot_out"

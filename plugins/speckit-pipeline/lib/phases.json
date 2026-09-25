@@ -169,6 +169,8 @@
       "Task",
       "Agent",
       "ScheduleWakeup",
+      "Monitor",
+      "TaskOutput",
       "ListAgents",
       "SendMessage",
       "Bash(curl:*)",
@@ -179,6 +181,14 @@
       "WebFetch"
     ],
     "_deny_tools_note": [
+      "Monitor and TaskOutput are withheld for the same reason as ScheduleWakeup:",
+      "a headless phase has nobody to wait for. Measured 2026-09-24: 121 of 1,442",
+      "phase sessions backgrounded work and then watched or polled it despite the",
+      "handoff telling them to run synchronously. One implement pass (wt-hub-membership",
+      "349) wrote its STATUS line, and a Monitor it had armed on a background pytest",
+      "then woke it for two more segments at a ~450k-token context. Prose had already",
+      "been tried; removing the tool is the structural fix.",
+      "",
       "deny_tools is a CHEAP EARLY REFUSAL, not the security boundary. Measured",
       "2026-08-24 against the real CLI:",
       "  * 'Bash(curl:*)' and 'Bash(source *.env*)' DO refuse the conventional",

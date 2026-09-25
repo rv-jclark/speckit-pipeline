@@ -507,27 +507,42 @@ extract_json() { # extract_json <text>
 # and reads as an error. Never put an emptiness test over a jq sequence.
 #
 # The LAST envelope is the right one by definition — it is the attempt that
-# actually ended the invocation. So slurp and take it.
-# ⚠️ Stated bound: `total_cost_usd` looks cumulative across the invocation but
-# `num_turns` is per-segment, so a retried phase's recorded turns describe the
-# FINAL segment only (6, against ~200 really executed in that run). A lower
-# bound, not a measurement.
+# actually ended the invocation. So slurp and take it: its verdict, its result
+# text and its `total_cost_usd`, which is cumulative across the invocation.
+#
+# But `num_turns`, `duration_ms` and `usage` are PER-SEGMENT, so those are summed
+# over every envelope rather than read off the last. Taking them from the last
+# alone once recorded a pass as "$12.80, 2 turns, 0.9M cache reads" whose
+# transcript held 158 API calls and 51M cache reads (wt-hub-membership 349,
+# 2026-09-22): the phase had reported, then a Monitor event it had armed woke it
+# for two more segments. The dollar figure was right and the token profile —
+# the thing the log exists to show — understated it 56x.
+_RESULT_MERGE='map(select(type == "object"
+                          and (.type == "result" or has("total_cost_usd")))) as $e
+  | if ($e | length) == 0 then empty
+    elif ($e | length) == 1 then $e[0]
+    else $e[-1] + {
+      num_turns:   ([$e[].num_turns   // 0] | add),
+      duration_ms: ([$e[].duration_ms // 0] | add),
+      usage: (if ([$e[] | select(.usage != null)] | length) == 0 then $e[-1].usage
+              else ($e[-1].usage // {}) + {
+                cache_read_input_tokens:     ([$e[].usage.cache_read_input_tokens     // 0] | add),
+                cache_creation_input_tokens: ([$e[].usage.cache_creation_input_tokens // 0] | add),
+                input_tokens:                ([$e[].usage.input_tokens                // 0] | add),
+                output_tokens:               ([$e[].usage.output_tokens               // 0] | add) }
+              end),
+      segments: ($e | length) }
+    end'
 extract_result_json() { # extract_result_json <text>
   local text="$1" whole out
   # Non-stream --output-format json: the whole output is one (possibly
   # pretty-printed) value, which the line-wise pass below would miss.
-  whole=$(printf '%s' "$text" \
-          | jq -c -s 'map(select(type == "object"
-                                 and (.type == "result" or has("total_cost_usd"))))
-                      | last // empty' \
-            2>/dev/null) || whole=""
+  whole=$(printf '%s' "$text" | jq -c -s "$_RESULT_MERGE" 2>/dev/null) || whole=""
   if [ -n "$whole" ] && [ "$whole" != null ]; then printf '%s' "$whole"; return 0; fi
   # Streamed: one object per line. Filter to object-shaped lines first — a
   # truncated tail line is not valid JSON and would fail the whole slurp.
   out=$(printf '%s\n' "$text" | grep -E '^\{.*\}$' 2>/dev/null \
-        | jq -c -s 'map(select(type == "object"
-                               and (.type == "result" or has("total_cost_usd"))))
-                    | last // empty' 2>/dev/null) || out=""
+        | jq -c -s "$_RESULT_MERGE" 2>/dev/null) || out=""
   if [ -n "$out" ] && [ "$out" != null ]; then printf '%s' "$out"; return 0; fi
   return 1
 }

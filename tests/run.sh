@@ -1264,8 +1264,8 @@ cat > "$FAKE/claude-two-results" <<'FAKEEOF'
 printf '{"type":"system","subtype":"init","session_id":"s1"}\n'
 # Attempt one, abandoned mid-flight; then the retry that finished the work.
 # Figures differ so the test can say WHICH envelope was read.
-printf '{"type":"result","subtype":"error_during_execution","is_error":true,"num_turns":194,"total_cost_usd":21.8689346,"duration_ms":900000,"permission_denials":[],"result":"API Error: No response from API"}\n'
-printf '{"type":"result","subtype":"success","is_error":false,"num_turns":6,"total_cost_usd":22.6441566,"duration_ms":40000,"permission_denials":[],"result":"STATUS: ok the retry finished the pass"}\n'
+printf '{"type":"result","subtype":"error_during_execution","is_error":true,"num_turns":194,"total_cost_usd":21.8689346,"duration_ms":900000,"usage":{"cache_read_input_tokens":50000000,"cache_creation_input_tokens":400000,"input_tokens":300,"output_tokens":80000},"permission_denials":[],"result":"API Error: No response from API"}\n'
+printf '{"type":"result","subtype":"success","is_error":false,"num_turns":6,"total_cost_usd":22.6441566,"duration_ms":40000,"usage":{"cache_read_input_tokens":900000,"cache_creation_input_tokens":700,"input_tokens":4,"output_tokens":700},"permission_denials":[],"result":"STATUS: ok the retry finished the pass"}\n'
 exit 0
 FAKEEOF
 chmod +x "$FAKE/claude-two-results"
@@ -1284,13 +1284,21 @@ case "$out" in
   *"the runner reported failure"*) t_fail "the ABANDONED attempt's error does not outvote the retry" "found 'the runner reported failure'";;
   *) t_pass "the ABANDONED attempt's error does not outvote the retry";;
 esac
-# And it reads the LAST envelope, not the first: the retry is the one that
-# describes how the invocation actually ended.
-assert_contains "$out" "6 turns" "the LAST envelope's turn count is the one recorded"
+# The VERDICT and COST come from the last envelope — the retry describes how the
+# invocation ended, and total_cost_usd is cumulative. But num_turns is
+# per-segment, so the turns recorded are BOTH segments': 194 + 6. Reading the
+# last alone recorded 6 turns for ~200 executed, and the same shape understated
+# a real pass's cache reads 56x.
+assert_contains "$out" "200 turns" "turns are summed across segments, not read off the last"
+assert_contains "$out" '$22.64' "while cost is the last envelope's cumulative figure"
 case "$out" in
-  *194*) t_fail "the superseded first envelope is not reported" "found '194' from the first attempt";;
-  *) t_pass "the superseded first envelope is not reported";;
+  *'$21.86'*|*'$44.5'*) t_fail "the first envelope's cost is neither reported nor added" "found a superseded or double-counted cost";;
+  *) t_pass "the first envelope's cost is neither reported nor added";;
 esac
+# The token split sums the same way. This is the column the log exists for, and
+# the one a last-envelope read got wrong by the widest margin.
+assert_eq "$(awk -F'\t' '$2=="plan"{print $8"/"$9"/"$11}' "$KL/specs/004-x/.pipeline/cost.log" | tail -1)" \
+  "50900000/400700/80700" "cost.log's cache read, cache write and output are summed across segments"
 
 # The template check stands on its own, independent of how the phase exited.
 printf '\nan unfilled template is not an artifact\n'
@@ -1817,6 +1825,42 @@ assert_eq "$rc" "2" "a pass that ticks nothing stops the loop as needs-a-human, 
 assert_contains "$out" "ticked nothing" "naming the reason"
 assert_contains "$out" "need a human" "and saying what to look for"
 assert_not_contains "$out" "pass 2/" "and does NOT try a second pass"
+
+# 🛑 A task marked BLOCKED is owed, not open, and the LOOP must agree with
+# verify.sh about that. When it did not, the loop spent one more pass on a task no
+# pass can tick, that pass ticked nothing, and implement returned 2 — so review,
+# the phase after it, was unreachable. Measured: 41 features, 0 review phases.
+{ printf '# Tasks\n'; pad_c
+  printf -- '- [ ] T001 a\n- [ ] T002 🛑 BLOCKED: needs the deployed app\n'; } > "$CH/specs/001-c/tasks.md"
+rm -rf "$CH/specs/001-c/.pipeline"
+out=$(SPEC_RUN_CLAUDE_BIN=claude-ticks-one "$SPEC_RUN" --repo "$CH" \
+        --feature-dir "$CH/specs/001-c" --only implement 2>&1); rc=$?
+assert_eq "$rc" "0" "a remainder that is all BLOCKED ends the loop as done, so later phases run"
+assert_contains "$out" "1 marked BLOCKED" "saying what is still owed"
+assert_not_contains "$out" "pass 2/" "and spends no pass on a task no pass can tick"
+
+# The same on --resume, where every remainder is already blocked: no pass at all.
+out=$(SPEC_RUN_CLAUDE_BIN=claude-ticks-none "$SPEC_RUN" --repo "$CH" \
+        --feature-dir "$CH/specs/001-c" --only implement 2>&1); rc=$?
+assert_eq "$rc" "0" "resuming over an all-BLOCKED remainder is not a stall"
+assert_not_contains "$out" "pass 1/" "and starts no pass"
+
+# Marking a task BLOCKED is the progress a pass CAN make on a post-deploy task,
+# so it must not read as a pass that ticked nothing.
+cat > "$FAKE/claude-blocks-one" <<'FAKEEOF'
+#!/usr/bin/env bash
+for a in "$@"; do [ "$a" = "--help" ] && exit 0; done
+f="$(pwd)/specs/001-c/tasks.md"
+awk 'BEGIN{done=0} /^- \[ \] T[0-9]+ [^🛑]/ && !done {sub(/\] /,"] 🛑 BLOCKED: post-deploy "); done=1} {print}' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+echo '{"total_cost_usd":0.02,"num_turns":3,"duration_ms":5,"result":"STATUS: ok"}'
+FAKEEOF
+chmod +x "$FAKE/claude-blocks-one"
+{ printf '# Tasks\n'; pad_c; printf -- '- [ ] T001 check on the deployed app\n'; } > "$CH/specs/001-c/tasks.md"
+rm -rf "$CH/specs/001-c/.pipeline"
+out=$(SPEC_RUN_CLAUDE_BIN=claude-blocks-one "$SPEC_RUN" --repo "$CH" \
+        --feature-dir "$CH/specs/001-c" --only implement 2>&1); rc=$?
+assert_eq "$rc" "0" "a pass that marks its last task BLOCKED has progressed"
+assert_not_contains "$out" "ticked nothing" "and is not reported as a stall"
 
 # An ABSENT task list is not a finished one — chunking has nothing to measure, so
 # it must run once rather than skip, which would be a silent no-op.
@@ -2424,7 +2468,7 @@ for t in 'Bash(curl:*)' 'Bash(wget:*)' 'Bash(http:*)' 'Bash(source *.env*)' 'Web
   assert_eq "$n" "1" "a phase cannot reach the network or read credentials via $t"
 done
 
-for t in Task Agent ScheduleWakeup ListAgents SendMessage; do
+for t in Task Agent ScheduleWakeup Monitor TaskOutput ListAgents SendMessage; do
   n=$(jq -r --arg t "$t" '[.defaults.deny_tools[] | select(. == $t)] | length' \
       "$PKG/lib/phases.json")
   assert_eq "$n" "1" "a phase cannot call $t — it has no way to wait for one"

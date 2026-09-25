@@ -39,17 +39,32 @@ So do these two things, in this order, every time:
 
    ```
    Monitor({
-     command: "tail -f -n +1 <logfile> | grep -E --line-buffered '^→|^✓|^✗|^!|· (Write|Edit|MultiEdit)|done:|Traceback|Error|FAILED'",
+     command: "tail -f -n +1 <logfile> | grep -E --line-buffered '^→|^✓|^✗|^!|^Traceback|: line [0-9]+: '",
      description: "<what is running>",
      timeout_ms: 3000000
    })
    ```
 
-   Filter deliberately: phase markers, file writes, and failure signatures. Piping
-   every tool call is a firehose, and Monitor stops itself when flooded — which
-   leaves the user with *less* visibility, not more. And per Monitor's own rule,
-   the filter must match failure states too; one that greps only for success is
-   silent through a crash, and silence is indistinguishable from progress.
+   Filter to **phase markers and failure signatures only** — `→` a phase starts,
+   `✓` one finished, `✗` one failed, `!` a warning or a stall, and a shell or
+   Python crash. Per Monitor's own rule the filter must match failure states too;
+   one that greps only for success is silent through a crash. The run's END needs
+   no pattern: the backgrounded command's own exit notification reports it.
+
+   🛑 **Every event re-reads this whole conversation, on this conversation's
+   model.** Measured 2026-09-24 across 108 sessions that supervised a run: 3,773
+   Monitor events led to ~30,000 follow-up calls and **18.2B tokens** — 45% of
+   everything those sessions spent, and more than half the cost of every headless
+   phase combined. The filter used to include `· (Write|Edit|MultiEdit)` and a bare
+   `Error`; those alone were 1,072 events, each one waking a context of 400k–966k
+   tokens to learn that a file had been written. So:
+
+   - On a `→` or `✓` event, **reply in one line and make no tool calls.** Do not
+     run `spec-status`, tail the log or open an artifact to confirm what the event
+     already said.
+   - Investigate only on `✗`, `!`, a crash line, or the run exiting.
+   - When the Monitor **expires**, do not re-arm it. The backgrounded run still
+     notifies you when it exits; a re-armed watcher is one more source of wakes.
 3. 🛑 **Reap the watcher when the run ends — on EVERY exit path, including failure
    and abandonment:**
 
@@ -78,7 +93,8 @@ Pass `--stream` so there is per-step output to filter in the first place.
 
 If the user wants to watch closely, offer to let them launch it themselves —
 `! spec-roadmap run --stream` puts the output natively in their view and sidesteps
-all of the above.
+all of the above. It is also the cheapest way to run one: no event reaches this
+conversation at all, so nothing here is re-read while the phases work.
 
 ## Reading the exit code
 
