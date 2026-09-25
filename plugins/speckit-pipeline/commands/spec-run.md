@@ -32,8 +32,23 @@ is instructions, not an executor.
 So do these two things, in this order, every time:
 
 1. **Launch it in the background, logging to a path the user can follow.** Use
-   `~/code/speckit-pipeline/.runs/<name>.log` (create the directory if needed), not
-   a random `/tmp` name only you know. Tell them the `tail -f` command.
+   `~/code/speckit-pipeline/.runs/<name>.log`, not a random `/tmp` name only you
+   know, and tell them the `tail -f` command. Use exactly this shape, as a `Bash`
+   call with `run_in_background: true`:
+
+   ```bash
+   mkdir -p ~/code/speckit-pipeline/.runs
+   "${CLAUDE_PLUGIN_ROOT}/bin/spec-run" --stream $ARGUMENTS > ~/code/speckit-pipeline/.runs/<name>.log 2>&1
+   ```
+
+   🛑 **`2>&1` is not optional.** The engine writes `✗` (a phase failed) and `!`
+   (a stall, a phase that needs input) to STDERR. Redirect stdout alone and the
+   log shows phases starting and then nothing — no filter can match a failure
+   line that never reached the file. Measured 2026-09-24: 75 of 424 launches in
+   the author's transcripts redirected stdout only, and every one of them could
+   fail silently. `run_in_background: true` is the other half: the exit
+   notification arrives whatever the log contains, so the end of the run is
+   never something you have to notice.
 2. **Attach a `Monitor` to that log**, so progress reaches the conversation as it
    happens instead of when you next check:
 
@@ -139,3 +154,6 @@ a bad plan. Fix the named cause first.
 - Never pass `--gate none` to get past a gate the user has not seen.
 - Never merge a pull request or trigger a deploy as part of this command. Those
   tools are withheld from the phases deliberately, and that applies to you here.
+  When a feature is one entry of a roadmap, merging it is `spec-roadmap`'s job:
+  its runner merges an entry whose review is clean and whose checks are green,
+  and says why when it will not. Run that rather than merging by hand.

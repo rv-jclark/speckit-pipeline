@@ -1,5 +1,5 @@
 ---
-description: Plan or execute a roadmap — a series of specs that must ship in order, one merge at a time
+description: Plan or execute a roadmap — a series of specs that ship in order, each merged by the runner before the next begins
 argument-hint: "plan \"<the larger goal>\" | show | run"
 allowed-tools: Bash, Read, Edit, Glob, Grep
 ---
@@ -13,13 +13,22 @@ Roadmap operation: **$ARGUMENTS**
 ```
 
 A roadmap is a series of specs that ship **in order**, each as its own branch and
-pull request, each merged before the next begins. The runner takes one entry
-through the full pipeline and then stops — because the next entry has to plan
-against the code the previous one actually landed.
+pull request, each merged before the next begins — because the next entry has to
+plan against the code the previous one actually landed.
 
-**Do not run any phase yourself, and do not merge anything.** You are the front
-end: launch the runner, read what it reports, help with the parts that need a
-human. Merging is the user's act, and no phase here is given the tools for it.
+**The runner merges each entry itself**, by default: once `review.md` is clean
+and every check on the pull request is green, it commits, pushes, opens (or
+reuses) the PR and merges it, then starts the next entry. It stops at the merge
+gate only when one of those conditions fails, and says which.
+
+**Do not run any phase yourself, and do not merge by hand to get past the gate.**
+You are the front end: launch the runner, read what it reports, and help with
+what it stopped on. When it stops at the merge gate, the fix is the reason it
+printed — a failing check, a review finding, a branch-protection refusal — and
+then re-running `spec-roadmap run`, which retries the merge. Merging around that
+reason with `gh pr merge` skips exactly the check that stopped it. The user can
+merge by hand; that is their call, not yours. If they want every merge to be
+theirs, `--no-auto-merge` or `"auto_merge": false` in the roadmap file does it.
 
 ## Make the run visible to the user
 
@@ -32,8 +41,23 @@ is instructions, not an executor.
 So do these two things, in this order, every time:
 
 1. **Launch it in the background, logging to a path the user can follow.** Use
-   `~/code/speckit-pipeline/.runs/<name>.log` (create the directory if needed), not
-   a random `/tmp` name only you know. Tell them the `tail -f` command.
+   `~/code/speckit-pipeline/.runs/<name>.log`, not a random `/tmp` name only you
+   know, and tell them the `tail -f` command. Use exactly this shape, as a `Bash`
+   call with `run_in_background: true`:
+
+   ```bash
+   mkdir -p ~/code/speckit-pipeline/.runs
+   "${CLAUDE_PLUGIN_ROOT}/bin/spec-roadmap" run --stream > ~/code/speckit-pipeline/.runs/<name>.log 2>&1
+   ```
+
+   🛑 **`2>&1` is not optional.** The engine writes `✗` (a phase failed) and `!`
+   (a stall, a phase that needs input) to STDERR. Redirect stdout alone and the
+   log shows phases starting and then nothing — no filter can match a failure
+   line that never reached the file. Measured 2026-09-24: 75 of 424 launches in
+   the author's transcripts redirected stdout only, and every one of them could
+   fail silently. `run_in_background: true` is the other half: the exit
+   notification arrives whatever the log contains, so the end of the run is
+   never something you have to notice.
 2. **Attach a `Monitor` to that log**, so progress reaches the conversation as it
    happens instead of when you next check:
 
@@ -109,10 +133,13 @@ conversation at all, so nothing here is re-read while the phases work.
 
 Read what it printed; it distinguishes three situations and so should you.
 
-**An entry's pipeline finished and is waiting to be merged.** Offer to help
-review it: read the branch's diff and the entry's `spec.md`/`tasks.md`, and say
-whether the work matches what the roadmap entry asked for. Then let the user open
-and merge the PR themselves. When they have, `spec-roadmap run` continues.
+**An entry's pipeline finished but the runner did not merge it.** It printed
+`not merged automatically: <reason>`. Work on that reason: read the failing
+check's log, the unresolved finding in `review.md`, or the protection rule gh
+quoted. Fixing code means resuming the entry (`spec-run --resume` re-enters
+implement on the tasks review appended); then `spec-roadmap run` retries the
+merge. If auto-merge is off for this roadmap, offer to review the diff against
+the entry's `spec.md`, and let the user merge it.
 
 **A phase inside the entry needs input.** That is a `spec-run` gate, not a
 roadmap one. Surface the questions here, in conversation, and continue with

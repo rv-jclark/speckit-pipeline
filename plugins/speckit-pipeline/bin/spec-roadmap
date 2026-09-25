@@ -3,10 +3,12 @@
 # spec-roadmap — plan and execute a series of specs that must ship in order.
 #
 # A roadmap is one authored JSON file listing entries. `run` takes each entry
-# through the full spec-run pipeline, then STOPS: the entry's work has to be
-# reviewed and merged before the next entry starts, because the next entry plans
-# against the code the previous one landed. Merging is yours — no phase here can
-# do it, and this runner cannot either.
+# through the full spec-run pipeline, and the entry's work has to be merged
+# before the next entry starts, because the next entry plans against the code the
+# previous one landed. The RUNNER merges it — never a phase, never the agent
+# watching — once review.md is clean and the PR's checks are green; anything
+# else stops at the merge gate for you. --no-auto-merge, or "auto_merge": false
+# in the roadmap file, makes every merge yours.
 #
 # Exit codes:  0 the roadmap is complete
 #              1 an entry failed, or a prerequisite is missing
@@ -44,6 +46,10 @@ OPTIONS
                       file. Checked before each entry starts, so it bounds how
                       many entries run rather than what one entry spends — the
                       per-phase ceilings do that
+  --no-auto-merge     stop at every merge gate for a human, instead of merging an
+                      entry whose review is clean and whose PR checks are green.
+                      Also settable per roadmap: "auto_merge": false
+  --auto-merge        override "auto_merge": false for this run
   --dry-run           print what would happen, run nothing
   --model <p>=<m>     passed through to spec-run  (repeatable)
   --effort <p>=<e>    passed through to spec-run  (repeatable)
@@ -58,9 +64,12 @@ OPTIONS
   -h, --help
 
 HOW IT RUNS
-  Each entry goes through specify → plan → tasks → implement, then the roadmap
-  stops and hands you the branch. You review and merge; `spec-roadmap run` picks
-  up the next entry from the updated base. An entry is treated as landed when its
+  Each entry goes through specify → plan → tasks → implement → review. Then the
+  runner commits what the pipeline left, pushes the branch, opens (or reuses) a
+  pull request, waits for its checks, and merges it — but only if review.md is
+  clean AND every check is green. Otherwise it stops and says which condition
+  failed; fix it and re-run, or merge it yourself. Either way `spec-roadmap run`
+  picks up the next entry from the updated base. An entry is treated as landed when its
   branch is an ancestor of the base OR its tasks.md is present there — the second
   check is what makes this work in a repository that squash-merges, where a
   merged branch is never an ancestor of anything.
@@ -77,6 +86,7 @@ case "$CMD" in
 esac
 
 REPO=""; BASE=""; BASE_HOW=""; SLUG=""; GOAL=""; BUDGET=""; DRY_RUN=0; FROM_DOC=""
+AUTO_MERGE_FLAG=""
 declare -a ADD_DIRS=()
 declare -a PASSTHROUGH=()
 while [ $# -gt 0 ]; do
@@ -87,6 +97,8 @@ while [ $# -gt 0 ]; do
     --from-doc)    FROM_DOC="${2:-}"; shift 2 || exit 3;;
     --budget)      BUDGET="${2:-}"; shift 2 || exit 3;;
     --dry-run)     DRY_RUN=1; shift;;
+    --auto-merge)    AUTO_MERGE_FLAG=1; shift;;
+    --no-auto-merge) AUTO_MERGE_FLAG=0; shift;;
     --model|--effort)      PASSTHROUGH+=("$1" "${2:-}"); shift 2 || exit 3;;
     --add-dir)             PASSTHROUGH+=("$1" "${2:-}"); ADD_DIRS+=("${2:-}"); shift 2 || exit 3;;
     --stop-after|--with)   PASSTHROUGH+=("$1" "${2:-}"); shift 2 || exit 3;;
@@ -361,6 +373,10 @@ BASE=$(jqd "$RM" '.base' "$BASE")
 # dislike. So the roadmap file may declare `budget_usd`; --budget overrides it
 # for a single run.
 [ -z "$BUDGET" ] && BUDGET=$(jqd "$RM" '.budget_usd' "")
+# On unless switched off. Read with an explicit `== false`, not jqd: jq's `//`
+# treats false as missing, so `"auto_merge": false` would read as the default.
+AUTO_MERGE=$(jq -r 'if .auto_merge == false then "0" else "1" end' "$RM" 2>/dev/null) || AUTO_MERGE=1
+[ -n "$AUTO_MERGE_FLAG" ] && AUTO_MERGE="$AUTO_MERGE_FLAG"
 roadmap_state_init "$ST" "${RM#"$REPO"/}" "$SLUG" "$BASE"
 
 if [ "$CMD" = show ]; then
@@ -445,6 +461,32 @@ for other in "$RMDIR"/*.state.json; do
   fi
 done
 
+if [ "$AUTO_MERGE" = 1 ]; then
+  dim "         auto-merge on: an entry merges itself when review is clean and CI is green"
+else
+  dim "         auto-merge off: every entry stops for you to merge it"
+fi
+
+# Try the engine's merge for one entry. 0 = merged and landed (the loop moves
+# on); 2 = stopped at the gate, the reason already printed.
+try_auto_merge() { # <slug> <feature_dir> <branch> <title>
+  local slug="$1" fdir="$2" branch="$3" title="$4" landed how
+  if auto_merge_entry "$REPO" "$BASE" "$fdir" "$branch" "$slug" "$title"; then
+    roadmap_fetch_base "$REPO" "$BASE"; fresh=$?
+    IFS=$'\t' read -r landed how < <(entry_landed "$REPO" "$BASE" "$fdir" "$branch" "$fresh" "$slug")
+    if [ "$landed" = "done" ]; then
+      roadmap_entry_set "$ST" "$slug" '{"status":"done"}'
+      ok "$slug — merged and landed on $BASE"
+      dim "    $how"
+      return 0
+    fi
+    AUTO_MERGE_WHY="merged${AUTO_MERGE_PR:+ #$AUTO_MERGE_PR}, but $BASE does not show it yet ($how)"
+  fi
+  roadmap_entry_set "$ST" "$slug" "$(jq -n --arg w "$AUTO_MERGE_WHY" '{note:("not auto-merged: " + $w)}')"
+  warn "$slug — not merged automatically: $AUTO_MERGE_WHY"
+  return 2
+}
+
 rc_final=0
 # By index, for the same reason spec-run iterates by index: the loop body runs
 # spec-run, which runs a process that reads stdin, and a stream-fed loop hands it
@@ -509,8 +551,12 @@ while [ "$ei" -lt "$n_entries" ]; do
     exit 2
   fi
 
-  # The merge gate. This is for an entry whose pipeline FINISHED and now needs a
-  # human to merge it — the one thing no phase here is given the tools to do.
+  # The merge gate, for an entry whose pipeline FINISHED. With auto-merge on the
+  # runner retries its own merge first — the usual reason to re-run is that the
+  # thing it stopped on (red CI, a review finding) has since been fixed.
+  if [ "$status" = awaiting_merge ] && [ "$AUTO_MERGE" = 1 ] && [ "$DRY_RUN" -eq 0 ]; then
+    if try_auto_merge "$slug" "$fdir" "$branch" "$title"; then continue; fi
+  fi
   if [ "$status" = awaiting_merge ]; then
     warn "$slug — waiting on you"
     say ""
@@ -519,8 +565,13 @@ while [ "$ei" -lt "$n_entries" ]; do
     [ -n "$branch" ] && say "  branch: $branch"
     [ -n "$fdir" ]   && say "  specs:  $fdir"
     say ""
-    say "  Review and merge it, then: spec-roadmap run $SLUG"
-    say "  (merging is yours — no phase here is given the tools to do it)"
+    if [ "$AUTO_MERGE" = 1 ]; then
+      say "  Review and merge it yourself, or fix what stopped the merge and re-run:"
+      say "    spec-roadmap run $SLUG   (the runner retries the merge)"
+    else
+      say "  Review and merge it, then: spec-roadmap run $SLUG"
+      say "  (auto-merge is off for this roadmap)"
+    fi
     say ""
     exit 2
   fi
@@ -858,6 +909,13 @@ while [ "$ei" -lt "$n_entries" ]; do
        ok "$slug — pipeline complete"
        say "  branch: $newbranch"
        say "  specs:  $newdir"
+       if [ "$AUTO_MERGE" = 1 ]; then
+         say ""
+         if try_auto_merge "$slug" "$newdir" "$newbranch" "$title"; then
+           say ""
+           continue
+         fi
+       fi
        say ""
        say "  Open a pull request, review it, and merge. Then: spec-roadmap run $SLUG"
        say "  The next entry is cut from $BASE, so it plans against your merged code."

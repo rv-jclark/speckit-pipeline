@@ -594,19 +594,49 @@ flag — otherwise the phase runs and produces a spec grounded in nothing.
 ### How a run proceeds
 
 ```
-main ──┬── 001-first ──► PR ──► you merge
-       │                          │
-       └──────────────────────────┴── 002-second ──► PR ──► you merge
-                                                       │
-                                                       └── 003-third
+main ──┬── 001-first ──► PR ──► CI green + review clean ──► merged by the runner
+       │                                                      │
+       └──────────────────────────────────────────────────────┴── 002-second ──► …
 ```
 
-Each entry is cut from the base (`origin/main` by default), taken through
-specify → plan → tasks → implement, and then **the roadmap stops** and hands you
-the branch. You review and merge; `spec-roadmap run` picks up the next entry from
-the updated base, so it plans against your merged code rather than a guess at it.
+Each entry is cut from the base (`origin/main` by default) and taken through
+specify → plan → tasks → implement → review. Then **the runner merges it itself**:
+it commits what the pipeline left uncommitted (never its own `.pipeline/` or
+roadmap bookkeeping), pushes the branch, opens a pull request or reuses the one
+already open, waits for the PR's checks, and merges. The next entry is then cut
+from the updated base, so it plans against merged code rather than a guess at it.
 
-Merging is yours. No phase is given the tools for it, and neither is the runner.
+It merges only when **both** hold:
+
+- **review.md passed verification.** The review phase ran, cited code, and left
+  no unresolved BLOCKER or MAJOR finding. `verify.sh` decides, not the phase.
+- **Every check on the PR finished green.** Pending past
+  `SPEC_ROADMAP_CHECKS_TIMEOUT` (default 1 hour) is not green, and **a PR with no
+  checks at all is not green either**: "CI passed" cannot be established, so it
+  stops rather than assume.
+
+Anything else stops at the merge gate, exit `2`, with the reason:
+`not merged automatically: checks failed on pull request #41: test`. Fix that
+and re-run `spec-roadmap run`; the merge is retried. It never passes `--admin`,
+so branch protection that requires a human approval still requires one, and
+gh's refusal is the reason printed.
+
+**Why the runner and not an agent.** Every entry used to stop for a human merge,
+and the agent supervising the run — told "do not merge anything" — correctly
+refused to be that human, so a roadmap could not advance unattended. Deleting
+that sentence would have left the merge to the agent's judgement, with no fixed
+conditions: the failure this tool was built against (an agent told in prose to
+stop merged two pull requests and deployed them). So the conditions are code,
+and the phases still have no merge of their own.
+
+**To keep every merge yours:** `spec-roadmap run --no-auto-merge`, or
+`"auto_merge": false` in the roadmap file so it survives every run. Merging is
+then yours as before; the runner stops at each entry with manual instructions.
+
+⚠️ **One repository per entry.** The runner pushes and merges the branch of the
+repository the roadmap runs in. An entry whose work spans several repositories
+(a workspace of nested service repos) gets its outer branch merged and nothing
+else; merge the service PRs yourself, or keep auto-merge off for that roadmap.
 
 ### How it knows an entry has landed
 
@@ -636,7 +666,7 @@ There is a third answer, and it is not a synonym for "no":
 | Answer | Meaning | What happens |
 |---|---|---|
 | landed | the work is on the base | continue to the next entry |
-| not landed | it is not, and the base ref is fresh enough to say so | stop; you merge |
+| not landed | it is not, and the base ref is fresh enough to say so | the runner tries to merge it; if it cannot, stop |
 | **unknown** | the question could not be answered | **stop** — it does not guess |
 
 `unknown` covers a base ref that does not exist and a fetch that failed. Treating
@@ -654,7 +684,7 @@ treat them alike:
 |---|---|
 | 0 | every entry has landed on the base |
 | 1 | an entry failed, or a prerequisite is missing |
-| 2 | waiting on you — a merge, a gate, or a question |
+| 2 | waiting on you — a merge the runner declined, a gate, or a question |
 | 3 | usage error |
 
 A `2` is the normal resting state of a healthy roadmap: it means the runner has
@@ -1238,7 +1268,7 @@ reports success over a directory the rest of the pipeline cannot find.
 ## Tests
 
 ```bash
-./tests/run.sh          # shellcheck + 626 fixture assertions
+./tests/run.sh          # shellcheck + 656 fixture assertions
 ```
 
 **The suite is hermetic.** A stub runner shadows the real `claude` for the whole
@@ -1361,7 +1391,7 @@ the one thing it exists to measure.
 ## Tests, and what they cost to run
 
 ```bash
-./tests/run.sh          # shellcheck + 626 assertions, ~3.5 minutes
+./tests/run.sh          # shellcheck + 656 assertions, ~3.5 minutes
 ```
 
 Hermetic: a stub runner shadows the real `claude` for the whole run, so nothing

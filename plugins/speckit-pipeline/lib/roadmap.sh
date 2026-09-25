@@ -391,3 +391,184 @@ EOF
   # Trim the trailing zeroes printf leaves, so the figure reads like money.
   awk -v t="$total" 'BEGIN{ printf "%g", t }'
 }
+
+# ------------------------------------------------------------- auto-merge ------
+# The merge gate, taken by the ENGINE rather than by whoever is watching it.
+#
+# Why here and not in prose: a roadmap only works if entry N+1 is cut from a base
+# that already holds entry N, so every entry used to stop for a human merge — and
+# the agent supervising the run, told "do not merge anything", correctly refused
+# to be that human. Deleting the sentence would have left the merge to that
+# agent's judgement, in a ~900k-token window, with no fixed conditions: the
+# failure the gate was written against (an agent told in prose to stop merged
+# two pull requests and deployed them). So the conditions live in code, and the
+# phases and the supervising agent still have no merge of their own.
+#
+# It merges only when BOTH hold, and otherwise stops at the gate exactly as the
+# manual flow did, saying which one failed:
+#   * review.md passed verification — the review phase ran, cited code, and left
+#     no unresolved BLOCKER or MAJOR finding (verify.sh decides, not the phase);
+#   * every check on the pull request finished green. A PR with NO checks is not
+#     green: "CI passed" cannot be established, so it stops.
+# It never passes --admin, so branch protection that wants a human approval
+# still wants one, and gh's refusal is reported as the reason.
+#
+# Sets AUTO_MERGE_WHY to the reason whenever it declines. Returns 0 when the PR
+# is merged (or was already), 2 when it stopped at the gate.
+#
+# Timings are overridable for the test suite; the defaults are for real CI.
+AUTO_MERGE_WHY=""
+AUTO_MERGE_PR=""
+: "${SPEC_ROADMAP_CHECKS_POLL:=30}"      # seconds between looks at the checks
+: "${SPEC_ROADMAP_CHECKS_GRACE:=180}"    # how long "no checks yet" may last
+: "${SPEC_ROADMAP_CHECKS_TIMEOUT:=3600}" # how long checks may stay pending
+
+_am_decline() { AUTO_MERGE_WHY="$1"; return 2; }
+
+# Every path the entry changed, tracked or new, minus our own bookkeeping.
+_am_changed_paths() { # <repo>
+  local l p
+  {
+    tracked_changes "$1" | while IFS= read -r l; do
+      p=${l:3}
+      case "$p" in (*" -> "*) p=${p##* -> };; esac
+      p=${p%\"}; p=${p#\"}
+      printf '%s\n' "$p"
+    done
+    untracked_files "$1"
+  } | sort -u
+}
+
+# auto_merge_remote <repo> <base>  -> prints "<remote>\t<branch>", or nothing
+auto_merge_remote() {
+  local repo="$1" base="$2"
+  case "$base" in
+    */*) git -C "$repo" remote 2>/dev/null | grep -qx "${base%%/*}" && \
+           printf '%s\t%s\n' "${base%%/*}" "${base#*/}"; return 0;;
+  esac
+  git -C "$repo" remote 2>/dev/null | grep -qx origin && printf 'origin\t%s\n' "$base"
+  return 0
+}
+
+# auto_merge_entry <repo> <base> <feature_dir_rel> <branch> <slug> <title>
+auto_merge_entry() {
+  local repo="$1" base="$2" fdir="$3" branch="$4" slug="$5" title="$6"
+  local st review remote base_branch info method out n paths
+  # shellcheck disable=SC2034 # read by bin/spec-roadmap
+  AUTO_MERGE_WHY=""; AUTO_MERGE_PR=""
+
+  # 1. The review. Checked first because it costs nothing and needs no network.
+  st="$repo/$fdir/.pipeline/state.json"
+  review=$(jq -r '.phases.review.status // "absent"' "$st" 2>/dev/null) || review=absent
+  case "$review" in
+    ok) ;;
+    absent) _am_decline "the review phase has not run for this entry"; return 2;;
+    needs_input) _am_decline "review.md has unresolved BLOCKER or MAJOR findings"; return 2;;
+    *) _am_decline "the review phase did not pass (status: $review)"; return 2;;
+  esac
+
+  # 2. Everything that can refuse WITHOUT changing anything, before the commit:
+  #    a declined merge must leave the tree exactly as the pipeline left it.
+  [ -n "$branch" ] && [ "$branch" != HEAD ] || { _am_decline "the entry has no branch recorded"; return 2; }
+  IFS=$'\t' read -r remote base_branch < <(auto_merge_remote "$repo" "$base")
+  [ -n "$remote" ] || { _am_decline "no git remote to push $branch to"; return 2; }
+  [ "$branch" != "$base_branch" ] || { _am_decline "the entry is on $base_branch itself, not a branch of its own"; return 2; }
+  command -v gh >/dev/null 2>&1 || { _am_decline "the GitHub CLI (gh) is not installed"; return 2; }
+  info=$(cd "$repo" && gh repo view --json squashMergeAllowed,mergeCommitAllowed,rebaseMergeAllowed 2>&1) || {
+    _am_decline "gh cannot read this repository: $(printf '%s' "$info" | head -1)"; return 2; }
+  method=$(jq -r 'if .squashMergeAllowed then "squash" elif .mergeCommitAllowed then "merge"
+                  elif .rebaseMergeAllowed then "rebase" else "" end' <<<"$info" 2>/dev/null)
+  [ -n "$method" ] || { _am_decline "the repository allows no merge method gh can use"; return 2; }
+
+  # 3. Commit what the pipeline left uncommitted. Implement commits only
+  #    sometimes, so without this nearly every entry would reach the push with
+  #    its work still in the tree. Our own bookkeeping (.pipeline/, roadmap
+  #    state, feature.json) is never swept in — it changes after this commit.
+  paths=$(_am_changed_paths "$repo")
+  if [ -n "$paths" ]; then
+    n=$(printf '%s\n' "$paths" | grep -c .)
+    # shellcheck disable=SC2086 # one path per line; word-splitting is wanted, globbing is not
+    ( set -f; IFS=$'\n'; git -C "$repo" add -A -- $paths ) >/dev/null 2>&1 &&
+    git -C "$repo" commit -q -m "feat($slug): ${title:-$slug}" \
+        -m "Committed by spec-roadmap auto-merge: the pipeline's uncommitted output ($n path(s))." \
+        >/dev/null 2>&1 || { _am_decline "could not commit the entry's $n uncommitted path(s)"; return 2; }
+    say "    committed $n path(s) the pipeline left uncommitted"
+    printf '%s\n' "$paths" | head -8 | sed 's/^/      /'
+    [ "$n" -gt 8 ] && dim "      … and $((n - 8)) more"
+  fi
+
+  # 4. Push. Never forced: a rejected push means the remote branch has work this
+  #    one does not, and that is for a human to reconcile.
+  out=$(git -C "$repo" push --quiet -u "$remote" "$branch" 2>&1) || {
+    _am_decline "git push was refused: $(printf '%s' "$out" | tail -1)"; return 2; }
+
+  # 5. The PR — reusing one a phase or a human already opened.
+  n=$(cd "$repo" && gh pr list --head "$branch" --base "$base_branch" --state open \
+        --json number --jq '.[0].number // empty' 2>/dev/null)
+  if [ -z "$n" ]; then
+    if [ -n "$(cd "$repo" && gh pr list --head "$branch" --base "$base_branch" --state merged \
+                 --json number --jq '.[0].number // empty' 2>/dev/null)" ]; then
+      say "    its pull request is already merged"
+      return 0
+    fi
+    out=$(cd "$repo" && gh pr create --base "$base_branch" --head "$branch" \
+            --title "${title:-$slug}" \
+            --body "Roadmap entry \`$slug\`, built by spec-roadmap.
+
+- spec: \`$fdir/spec.md\`
+- review: \`$fdir/review.md\` (passed: no unresolved BLOCKER or MAJOR findings)
+
+Merged automatically once every check is green (\`--no-auto-merge\` turns this off)." 2>&1) || {
+      _am_decline "gh pr create failed: $(printf '%s' "$out" | tail -1)"; return 2; }
+    n=$(printf '%s' "$out" | grep -oE '/pull/[0-9]+' | tail -1 | tr -dc 0-9)
+    [ -n "$n" ] || { _am_decline "gh pr create did not report a pull request number"; return 2; }
+    say "    opened pull request #$n"
+  else
+    say "    reusing its pull request #$n"
+  fi
+  # shellcheck disable=SC2034 # read by bin/spec-roadmap
+  AUTO_MERGE_PR="$n"
+  say "    waiting for the checks on #$n"
+
+  # 6. CI. Polled rather than `--watch`ed so "no checks at all" and "checks not
+  #    registered yet" can be told apart: a fresh push often has none for a
+  #    minute, and a repo without CI has none forever.
+  local waited=0 checks pending failed total
+  while :; do
+    checks=$(cd "$repo" && gh pr checks "$n" --json name,bucket 2>/dev/null) || true
+    total=$(jq -r 'length' <<<"${checks:-[]}" 2>/dev/null) || total=0
+    if [ "${total:-0}" -eq 0 ]; then
+      if [ "$waited" -ge "$SPEC_ROADMAP_CHECKS_GRACE" ]; then
+        _am_decline "pull request #$n has no CI checks, so CI green cannot be established"; return 2
+      fi
+    else
+      failed=$(jq -r '[.[] | select(.bucket == "fail" or .bucket == "cancel") | .name] | join(", ")' <<<"$checks")
+      [ -z "$failed" ] || { _am_decline "checks failed on pull request #$n: $failed"; return 2; }
+      pending=$(jq -r '[.[] | select(.bucket == "pending")] | length' <<<"$checks")
+      [ "${pending:-0}" -eq 0 ] && break
+      if [ "$waited" -ge "$SPEC_ROADMAP_CHECKS_TIMEOUT" ]; then
+        _am_decline "checks on pull request #$n were still pending after ${waited}s"; return 2
+      fi
+    fi
+    sleep "$SPEC_ROADMAP_CHECKS_POLL"
+    waited=$((waited + SPEC_ROADMAP_CHECKS_POLL))
+  done
+  say "    all $total check(s) green"
+
+  # 7. Merge. No --admin, no --delete-branch: protection rules still apply, and
+  #    the branch is left for anyone who wants to read it later.
+  out=$(cd "$repo" && gh pr merge "$n" "--$method" 2>&1) || {
+    _am_decline "gh pr merge #$n was refused: $(printf '%s' "$out" | tail -1)"; return 2; }
+  say "    merged #$n ($method)"
+
+  # 8. Bring the base up to date so the landed check — and the NEXT entry, which
+  #    is cut from it — see the merge. A local base (`--base main`) is not moved
+  #    by a remote merge, so it is fast-forwarded explicitly.
+  git -C "$repo" fetch --quiet "$remote" 2>/dev/null || true
+  case "$base" in
+    */*) ;;
+    *) git -C "$repo" fetch --quiet "$remote" "$base_branch:$base_branch" 2>/dev/null || \
+         warn "    could not fast-forward local $base_branch; the landed check may not see the merge yet";;
+  esac
+  return 0
+}

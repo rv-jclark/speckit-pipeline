@@ -3545,6 +3545,165 @@ else
 fi
 
 # ------------------------------------------------ spend is read, not remembered --
+# ------------------------------------------------------ roadmap: auto-merge ----
+# The runner, not a phase and not the agent watching, merges an entry — and only
+# when review.md passed AND every PR check is green. Everything else stops at the
+# gate it always had. A fake `gh` keeps its PR state in a directory and performs
+# a REAL squash merge into a bare remote, so "landed" is judged by the same
+# entry_landed check production uses rather than by the fake's say-so.
+printf '\nroadmap: auto-merge\n'
+cat > "$FAKE/gh" <<'FAKEEOF'
+#!/usr/bin/env bash
+S="${GH_FAKE_STATE:?}"
+case "$1 $2" in
+  "repo view")
+    [ -n "${GH_FAKE_REPO_FAIL:-}" ] && { echo "HTTP 401: Bad credentials" >&2; exit 1; }
+    echo '{"squashMergeAllowed":true,"mergeCommitAllowed":true,"rebaseMergeAllowed":false}';;
+  "pr list")
+    state=open; head=""
+    while [ $# -gt 0 ]; do case "$1" in --state) state="$2"; shift;; --head) head="$2"; shift;; esac; shift; done
+    [ -f "$S/pr.$head" ] || exit 0
+    n=$(cat "$S/pr.$head")
+    if [ -f "$S/merged.$n" ]; then [ "$state" = merged ] && echo "$n"
+    else [ "$state" = open ] && echo "$n"; fi
+    exit 0;;
+  "pr create")
+    head=""; while [ $# -gt 0 ]; do case "$1" in --head) head="$2"; shift;; esac; shift; done
+    n=$(( $(cat "$S/next" 2>/dev/null || echo 6) + 1 )); echo "$n" > "$S/next"
+    echo "$n" > "$S/pr.$head"; echo "$head" > "$S/branch.$n"
+    echo "https://github.com/o/r/pull/$n";;
+  "pr checks")
+    cat "${GH_FAKE_CHECKS:-/dev/null}" 2>/dev/null || echo '[]';;
+  "pr merge")
+    n="$3"
+    [ -n "${GH_FAKE_MERGE_FAIL:-}" ] && { echo "GraphQL: Pull request is not mergeable: review required" >&2; exit 1; }
+    echo "$3 $4" >> "$S/merges"
+    b=$(cat "$S/branch.$n"); w="$S/merge-wt.$n"; rm -rf "$w"
+    git clone -q "$GH_FAKE_REMOTE" "$w" && git -C "$w" config user.email t@t.invalid && git -C "$w" config user.name t &&
+      git -C "$w" merge --squash -q "origin/$b" >/dev/null && git -C "$w" commit -qm "$b (#$n)" &&
+      git -C "$w" push -q origin main || { echo "fake merge failed" >&2; exit 1; }
+    touch "$S/merged.$n";;
+  *) echo "fake gh: unhandled: $*" >&2; exit 1;;
+esac
+FAKEEOF
+chmod +x "$FAKE/gh"
+
+# A clone with a bare origin: the one shape auto-merge needs.
+am_fixture() { # am_fixture <name>  -> sets AM (clone) and AMR (bare remote)
+  AMR="$WORK/$1.git"; AM="$WORK/$1"
+  local seed="$WORK/$1.seed"
+  mkbare "$seed" main
+  "$SPEC_BOOTSTRAP" "$seed" >/dev/null 2>&1
+  git -C "$seed" add -A >/dev/null 2>&1; git -C "$seed" commit -qm bootstrap
+  git clone -q --bare "$seed" "$AMR"
+  git clone -q "$AMR" "$AM"
+  git -C "$AM" config user.email t@t.invalid; git -C "$AM" config user.name t
+  mkdir -p "$AM/.specify/roadmaps"
+  cat > "$AM/.specify/roadmaps/rm.json" <<'RMEOF'
+{"goal":"g","base":"main","entries":[
+ {"slug":"one","title":"first","description":"do one"},
+ {"slug":"two","title":"second","description":"do two"}]}
+RMEOF
+  GH_FAKE_STATE="$WORK/$1.gh"; mkdir -p "$GH_FAKE_STATE"
+  export GH_FAKE_STATE GH_FAKE_REMOTE="$AMR"
+}
+export SPEC_ROADMAP_CHECKS_POLL=0 SPEC_ROADMAP_CHECKS_GRACE=0 SPEC_ROADMAP_CHECKS_TIMEOUT=0
+GREEN="$WORK/checks-green.json"; RED="$WORK/checks-red.json"; PENDING="$WORK/checks-pending.json"
+echo '[{"name":"test","bucket":"pass"},{"name":"lint","bucket":"skipping"}]' > "$GREEN"
+echo '[{"name":"test","bucket":"fail"},{"name":"lint","bucket":"pass"}]' > "$RED"
+echo '[{"name":"test","bucket":"pending"}]' > "$PENDING"
+
+# --- the whole roadmap, unattended: clean review + green CI merges every entry
+am_fixture am-green
+out=$(GH_FAKE_CHECKS="$GREEN" SPEC_RUN_CLAUDE_BIN=claude-pipeline \
+      "$SPEC_ROADMAP" run --repo "$AM" --slug rm --base origin/main 2>&1); rc=$?
+AMST="$AM/.specify/roadmaps/rm.state.json"
+assert_eq "$rc" "0" "with review clean and CI green, the roadmap runs to the end without a human"
+assert_eq "$(jq -r '.entries.one.status + "/" + .entries.two.status' "$AMST")" "done/done" \
+  "and both entries are recorded done"
+# "on main", not "on origin/main": the roadmap file's `base` wins over --base, so
+# this is the LOCAL-base path — which also proves local main was fast-forwarded,
+# since entry_landed reads it.
+assert_contains "$out" "merged and landed on main" "each one saying it merged and landed"
+assert_eq "$(grep -c -- '--squash' "$GH_FAKE_STATE/merges")" "2" "through one squash merge per entry"
+git -C "$AMR" cat-file -e "main:$(jq -r '.entries.one.feature_dir' "$AMST")/tasks.md" 2>/dev/null \
+  && t_pass "entry one's work is on the remote base" || t_fail "entry one's work is on the remote base"
+# The point of the ordering: entry two must be cut from a base that HOLDS entry one.
+git -C "$AMR" cat-file -e "main:$(jq -r '.entries.one.feature_dir' "$AMST")/spec.md" 2>/dev/null &&
+git -C "$AMR" cat-file -e "main:$(jq -r '.entries.two.feature_dir' "$AMST")/spec.md" 2>/dev/null \
+  && t_pass "and entry two landed on top of it" || t_fail "and entry two landed on top of it"
+assert_eq "$(git -C "$AMR" ls-tree -r --name-only main | grep -c '/.pipeline/' || true)" "0" \
+  "the pipeline's own bookkeeping is never committed with the work"
+
+# --- red CI stops at the gate, and a re-run after the fix merges and continues
+am_fixture am-red
+out=$(GH_FAKE_CHECKS="$RED" SPEC_RUN_CLAUDE_BIN=claude-pipeline \
+      "$SPEC_ROADMAP" run --repo "$AM" --slug rm --base origin/main 2>&1); rc=$?
+AMST="$AM/.specify/roadmaps/rm.state.json"
+assert_eq "$rc" "2" "a failing check stops the roadmap at the merge gate"
+assert_contains "$out" "checks failed on pull request #7: test" "naming the check that failed"
+assert_eq "$(jq -r '.entries.one.status' "$AMST")" "awaiting_merge" "leaving the entry awaiting its merge"
+[ -f "$GH_FAKE_STATE/merges" ] && t_fail "nothing is merged over red CI" "a merge was attempted" \
+  || t_pass "nothing is merged over red CI"
+out=$(GH_FAKE_CHECKS="$GREEN" SPEC_RUN_CLAUDE_BIN=claude-pipeline \
+      "$SPEC_ROADMAP" run --repo "$AM" --slug rm --base origin/main 2>&1); rc=$?
+assert_eq "$rc" "0" "once CI is green, re-running retries the merge and finishes the roadmap"
+assert_contains "$out" "its pull request" "reusing the PR it already opened rather than opening another"
+assert_eq "$(ls "$GH_FAKE_STATE"/pr.* | wc -l | tr -d ' ')" "2" "one pull request per entry, not per attempt"
+
+# --- pending and absent CI are not green
+am_fixture am-pending
+out=$(GH_FAKE_CHECKS="$PENDING" SPEC_RUN_CLAUDE_BIN=claude-pipeline \
+      "$SPEC_ROADMAP" run --repo "$AM" --slug rm --base origin/main 2>&1); rc=$?
+assert_eq "$rc" "2" "checks still pending at the timeout stop at the gate"
+assert_contains "$out" "still pending" "and say so"
+am_fixture am-nochecks
+out=$(SPEC_RUN_CLAUDE_BIN=claude-pipeline \
+      "$SPEC_ROADMAP" run --repo "$AM" --slug rm --base origin/main 2>&1); rc=$?
+assert_eq "$rc" "2" "a PR with no checks at all is not treated as green"
+assert_contains "$out" "has no CI checks" "because CI green cannot be established"
+
+# --- protection that wants a human still gets one: no --admin
+am_fixture am-protected
+out=$(GH_FAKE_CHECKS="$GREEN" GH_FAKE_MERGE_FAIL=1 SPEC_RUN_CLAUDE_BIN=claude-pipeline \
+      "$SPEC_ROADMAP" run --repo "$AM" --slug rm --base origin/main 2>&1); rc=$?
+assert_eq "$rc" "2" "a merge refused by branch protection stops at the gate"
+assert_contains "$out" "review required" "reporting gh's own reason"
+assert_eq "$(grep -E '^[^#]*gh pr merge' "$PKG/lib/roadmap.sh" | grep -c -- '--admin' || true)" "0" \
+  "and the runner never reaches for --admin"
+
+# --- switched off, per run or per roadmap: nothing is pushed
+am_fixture am-off
+out=$(GH_FAKE_CHECKS="$GREEN" SPEC_RUN_CLAUDE_BIN=claude-pipeline \
+      "$SPEC_ROADMAP" run --repo "$AM" --slug rm --base origin/main --no-auto-merge 2>&1); rc=$?
+assert_eq "$rc" "2" "--no-auto-merge stops at the gate for a human"
+assert_contains "$out" "Open a pull request" "with the manual instructions"
+assert_eq "$(git -C "$AMR" branch --list '0*' | wc -l | tr -d ' ')" "0" "and nothing was pushed"
+am_fixture am-off-file
+jq '. + {auto_merge:false}' "$AM/.specify/roadmaps/rm.json" > "$WORK/rm.tmp" && mv "$WORK/rm.tmp" "$AM/.specify/roadmaps/rm.json"
+out=$(GH_FAKE_CHECKS="$GREEN" SPEC_RUN_CLAUDE_BIN=claude-pipeline \
+      "$SPEC_ROADMAP" run --repo "$AM" --slug rm --base origin/main 2>&1); rc=$?
+assert_eq "$rc" "2" "\"auto_merge\": false in the roadmap file is honoured, not read as the default"
+assert_contains "$out" "auto-merge off" "and the run says which way it went"
+
+# --- the review condition, directly: nothing leaves the machine without it
+am_fixture am-unit
+mkdir -p "$AM/specs/009-x/.pipeline"
+printf '{"phases":{"implement":{"status":"ok"}}}\n' > "$AM/specs/009-x/.pipeline/state.json"
+git -C "$AM" checkout -q -b 009-x
+printf 'new work\n' > "$AM/work.txt"
+auto_merge_entry "$AM" origin/main specs/009-x 009-x x x >/dev/null 2>&1; rc=$?
+assert_eq "$rc" "2" "an entry whose review never ran is not merged"
+assert_contains "$AUTO_MERGE_WHY" "review phase has not run" "and the reason is the review"
+printf '{"phases":{"review":{"status":"needs_input"}}}\n' > "$AM/specs/009-x/.pipeline/state.json"
+auto_merge_entry "$AM" origin/main specs/009-x 009-x x x >/dev/null 2>&1
+assert_contains "$AUTO_MERGE_WHY" "unresolved BLOCKER or MAJOR" "an entry with open review findings is not merged"
+# A decline changes nothing: the work is neither committed nor pushed.
+[ -n "$(git -C "$AM" status --porcelain work.txt)" ] && t_pass "a declined merge leaves the entry's work uncommitted" \
+  || t_fail "a declined merge leaves the entry's work uncommitted" "it was committed"
+git -C "$AM" checkout -q main 2>/dev/null; rm -f "$AM/work.txt"
+unset GH_FAKE_STATE GH_FAKE_REMOTE SPEC_ROADMAP_CHECKS_POLL SPEC_ROADMAP_CHECKS_GRACE SPEC_ROADMAP_CHECKS_TIMEOUT
+
 printf '\nroadmap spend\n'
 # An entry's cost_usd is only written when the entry FINISHES, so an in-progress
 # entry contributes a figure frozen at its first phase. Measured live: the entry
