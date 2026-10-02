@@ -201,6 +201,38 @@ Every task MUST strictly follow this format:
    - Foundational/blocking tasks → Foundational phase (Phase 2)
    - Story-specific setup → within that story's phase
 
+### Human-Owned Verification Tasks (a phase has NO browser and NO network)
+
+No pipeline phase is given a browser, a signed-in session, or the network. So any acceptance
+criterion that can only be read from a **deployed** surface becomes a task a human runs — and how
+those tasks are shaped decides whether they get done or rot.
+
+1. **ONE survey task, never one per surface.** A criterion covering N surfaces gets a single task
+   that reads **all N and reports the population with its denominator** — not N tasks. A human
+   verifying one surface per deploy pays a full CI + deploy + read cycle for each (measured on one
+   platform: ~40 minutes each, 80% of it the unit suite), and discovers the next finding only after
+   shipping the last fix. One survey enumerates every producer before anything is fixed.
+
+2. **🛑 NEVER emit a BEFORE/AFTER pair that straddles a deploy.** A task asking for the "before"
+   reading of a surface the same spec is about to change is unachievable the moment that change
+   deploys — the pre-change state no longer exists anywhere to be read. If a before/after
+   comparison is genuinely wanted, the "before" task must be a **prerequisite of the
+   implementation phase**, not a sibling of the verification phase. Otherwise write the criterion
+   as an ABSOLUTE measurement ("0 occurrences", not "fewer than before"), which is verifiable at
+   any time.
+
+3. **Name what the task needs, and make it blocking-with-a-reason.** `needs a signed-in browser
+   session`, `needs a production CSV export`, `needs CloudWatch`. A human-owned task that does not
+   say what it is waiting for reads as ordinary open work forever.
+
+4. **A task that becomes unachievable must be recordable as such.** When the window for a task has
+   closed, it is neither done nor open: mark it and state why. An owed-list that outlives its work
+   reads as a settled account on every later look.
+
+5. **Prefer a check that needs no deploy.** Before writing a deployed-surface task, ask whether the
+   criterion is really data-dependent. A hardcoded literal, a wrong render, or a missing format is
+   findable against a local dev server; only figures that depend on production data need production.
+
 ### Phase Structure
 
 - **Phase 1**: Setup (project initialization)
