@@ -2,4 +2,14 @@
 # Wrapper for the clone-and-run install path. The engine lives inside the plugin
 # directory so that both install modes — git clone, and /plugin install — get a
 # complete copy.
-exec "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../plugins/speckit-pipeline/bin" && pwd)/spec-run" "$@"
+# Follow symlinks first. install.sh links these into a bin directory, and
+# BASH_SOURCE is then the LINK's path, so ../plugins resolved against the link's
+# directory and the command died with "No such file or directory". readlink -f
+# is missing from older macOS, hence the loop.
+src="${BASH_SOURCE[0]}"
+while [ -L "$src" ]; do
+  dir=$(cd -P -- "$(dirname -- "$src")" && pwd)
+  src=$(readlink "$src")
+  case "$src" in /*) ;; *) src="$dir/$src";; esac
+done
+exec "$(cd -P -- "$(dirname -- "$src")/../plugins/speckit-pipeline/bin" && pwd)/spec-run" "$@"
