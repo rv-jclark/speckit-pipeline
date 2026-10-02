@@ -74,15 +74,22 @@ nothing here calls them directly any more (see [`spec-reap`](#reaping-the-log-wa
 
 ```bash
 git clone git@github.com:rv-jclark/speckit-pipeline.git ~/code/speckit-pipeline
-for c in spec-run spec-roadmap spec-status spec-bootstrap spec-upgrade spec-reap; do
-  sudo ln -sf ~/code/speckit-pipeline/bin/$c /usr/local/bin/$c
-done
+~/code/speckit-pipeline/install.sh
 spec-run --version   # the plugin version and the spec-kit version it vendors
 spec-run --list      # the six phases and their models
 ```
 
-The symlinks are the six commands: `spec-run`, `spec-roadmap`, `spec-status`,
-`spec-bootstrap`, `spec-upgrade`, `spec-reap`.
+`install.sh` links every command in `bin/` (`spec-run`, `spec-roadmap`,
+`spec-status`, `spec-bootstrap`, `spec-upgrade`, `spec-reap`, `spec-dashboard`)
+into the first writable directory among `~/.local/bin`, `/opt/homebrew/bin` and
+`/usr/local/bin`. It never uses sudo. It checks the prerequisites, runs the
+installed `spec-run` to prove the link works, and prints the `export PATH=…`
+line if that directory is not on your `PATH`.
+
+- They are links, so `git pull` upgrades them.
+- Re-running is safe: it never overwrites a file it did not make.
+- `--bin-dir DIR` installs somewhere else.
+- `--uninstall` removes only its own links.
 
 **Or** install it as a Claude Code plugin, for `/spec-run`, `/spec-roadmap`,
 `/spec-status` and `/spec-upgrade` in a session:
@@ -347,6 +354,72 @@ specs/NNN-my-feature/
 ```bash
 echo 'specs/*/.pipeline/' >> .gitignore
 ```
+
+## The dashboard — every pipeline, in every project
+
+`spec-status` reports on one feature in one repo. `spec-dashboard` reports on all
+of them at once. It serves a page on loopback that refreshes every five seconds
+and groups pipelines and roadmaps by project:
+
+With nothing installed, run it straight from the clone:
+
+```bash
+~/code/speckit-pipeline/dashboard.sh      # serves ~/code and opens the browser
+```
+
+Once `install.sh` has put it on your `PATH`:
+
+```bash
+spec-dashboard --open                     # http://127.0.0.1:8788, reading ~/code
+spec-dashboard --root ~/code --root ~/work
+spec-dashboard --json                     # the same data once, for scripting
+```
+
+`spec-dashboard --open` is safe to type any time. If a dashboard is already
+running on that port, it opens the page and exits instead of failing on the
+port. `dashboard.sh` behaves the same way and passes any option through, for
+example `./dashboard.sh --root ~/work`.
+
+It reads every repository up to two levels under each root, plus every
+worktree those repositories have, wherever it is on disk. A worktree's pipelines
+are grouped under the main checkout's project. Set `SPEC_DASHBOARD_ROOTS`
+(colon-separated) to change the default roots.
+
+**Completed work is hidden by default.** A pipeline is complete when implement
+passed **and** no task in `tasks.md` is still open. An implement pass records
+`ok` even when it leaves tasks for the next pass, so the status alone would
+overcount. Open tasks marked `🛑 BLOCKED` are owed to a human and do not count,
+the same rule `spec-run` uses. A roadmap is complete when every entry in its
+roadmap file is `done`. The **Show completed** tick brings everything back, and
+the filter box matches project, feature, branch and roadmap.
+
+| Status | Meaning |
+|---|---|
+| `running` | a phase is `running` and its `spec-run` process is alive |
+| `crashed` | a phase is `running` but its runner is gone: killed, rebooted, OOM |
+| `needs input` | the latest phase stopped to ask a question |
+| `failed` / `interrupted` | the latest phase failed, or exited without an outcome |
+| `paused` | nothing is wrong, but it stopped short: a gate, `--stop-after`, or tasks left open |
+| `unknown` | the server cannot read the process table (a sandbox), so running and crashed look the same |
+| `complete` | see above |
+
+Every unfinished row has copy buttons:
+
+- **Copy restart** copies `cd <repo> && spec-run --resume --feature-dir specs/…`.
+  If the pipeline is a roadmap's current entry, it copies
+  `spec-roadmap run <slug>` instead, so the roadmap's merge gate still runs.
+- **Copy session resume** copies `claude --resume <id>` for a phase that stopped
+  to ask you something or failed. This opens the phase's own conversation.
+- **Copy prompt** copies a prompt for Claude Code. It explains why the run
+  stopped, asks Claude to find and fix the cause, resume the run, and watch it
+  to the end.
+
+It is **read-only**. Unlike `spec-status`, it never rewrites a crashed `running`
+phase to `interrupted`. The next `spec-run` or `spec-status` in that repository
+does that. It binds `127.0.0.1` only and rejects requests whose `Host` header is
+not that address. Without the check, any web page could use DNS rebinding to
+read your repository paths and spec descriptions. It needs `python3`, which
+comes with the Xcode command line tools.
 
 ## Upgrading a project's spec-kit
 
@@ -1268,7 +1341,7 @@ reports success over a directory the rest of the pipeline cannot find.
 ## Tests
 
 ```bash
-./tests/run.sh          # shellcheck + 656 fixture assertions
+./tests/run.sh          # shellcheck + 680 fixture assertions
 ```
 
 **The suite is hermetic.** A stub runner shadows the real `claude` for the whole
@@ -1391,7 +1464,7 @@ the one thing it exists to measure.
 ## Tests, and what they cost to run
 
 ```bash
-./tests/run.sh          # shellcheck + 656 assertions, ~3.5 minutes
+./tests/run.sh          # shellcheck + 680 assertions, ~3.5 minutes
 ```
 
 Hermetic: a stub runner shadows the real `claude` for the whole run, so nothing

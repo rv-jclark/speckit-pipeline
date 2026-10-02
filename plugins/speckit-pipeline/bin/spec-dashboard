@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+#
+# spec-dashboard — every pipeline and roadmap on this machine, grouped by
+# project, in a browser page that refreshes itself.
+#
+# spec-status answers for one feature in one repo. This answers "what is
+# running, and what did I leave half-done" across all of them. Read-only: it
+# never reconciles or rewrites a state file. It reports what it finds, and the
+# copy buttons hand you the command to act on it.
+#
+# The collector and the server are Python (lib/dashboard.py) because serving
+# HTTP from bash means a dependency nobody has. python3 comes with the Xcode
+# command line tools, the same as git.
+
+set -uo pipefail
+
+SPECKIT_PIPELINE_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+export SPECKIT_PIPELINE_ROOT
+# shellcheck source=../lib/common.sh
+. "$SPECKIT_PIPELINE_ROOT/lib/common.sh"
+
+usage() {
+  cat <<'EOF'
+spec-dashboard — pipelines and roadmaps across every project, in a browser
+
+USAGE
+  spec-dashboard [--root <dir>]... [--port N] [--open]
+  spec-dashboard --json [--root <dir>]...
+
+OPTIONS
+  --root <dir>   where to look for repositories (repeatable; default ~/code,
+                 or $SPEC_DASHBOARD_ROOTS, colon-separated). Each repo up to two
+                 levels down is read, plus every worktree git knows it has
+  --port N       default 8788. Binds 127.0.0.1 only
+  --open         open the page once the server is up
+  --json         print the collected data once and exit, without a server
+
+Completed pipelines are hidden by default. A tick on the page shows them.
+Each unfinished pipeline or roadmap has buttons that copy the command to
+restart it, or a prompt to hand to Claude.
+EOF
+}
+
+ARGS=()
+have_root=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --root)    [ -n "${2:-}" ] || die "--root needs a directory"; ARGS+=(--root "$2"); have_root=1; shift 2;;
+    --port)    [ -n "${2:-}" ] || die "--port needs a number"; ARGS+=(--port "$2"); shift 2;;
+    --open)    ARGS+=(--open); shift;;
+    --json)    ARGS+=(--json); shift;;
+    -h|--help) usage; exit 0;;
+    --version) pipeline_version ""; exit 0;;
+    *)         err "unknown option: $1"; usage >&2; exit 3;;
+  esac
+done
+
+if [ "$have_root" -eq 0 ] && [ -n "${SPEC_DASHBOARD_ROOTS:-}" ]; then
+  IFS=: read -r -a _roots <<<"$SPEC_DASHBOARD_ROOTS"
+  for r in "${_roots[@]}"; do [ -n "$r" ] && ARGS+=(--root "$r"); done
+fi
+
+command -v python3 >/dev/null 2>&1 || die "python3 not on PATH" \
+  "macOS: xcode-select --install  ·  Linux: your package manager's python3"
+
+exec python3 "$SPECKIT_PIPELINE_ROOT/lib/dashboard.py" ${ARGS[@]+"${ARGS[@]}"}

@@ -1,0 +1,483 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pipelines</title>
+<!--
+  spec-dashboard's page. It draws /api/pipelines and decides nothing: every
+  verdict (running, crashed, complete…) comes from lib/dashboard.py. If a status
+  looks wrong here, the fix belongs there, not in a second opinion in this file.
+-->
+<style>
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --panel-2: #f1f3f6; --line: #e2e5ea;
+  --text: #1b1f24; --muted: #5f6b7a; --faint: #8a94a3;
+  --run: #2563eb; --run-bg: #e6eefc;
+  --need: #b45309; --need-bg: #fdf1e1;
+  --bad: #c2410c; --bad-bg: #fde9e1;
+  --crash: #b91c1c; --crash-bg: #fde4e4;
+  --pause: #6b5b95; --pause-bg: #efebf7;
+  --ok: #15803d; --ok-bg: #e3f4e8;
+  --unk: #64748b; --unk-bg: #eceff3;
+  --pend: #cbd2db;
+  --focus: #2563eb;
+  --shadow: 0 1px 2px rgba(16,24,40,.05), 0 1px 3px rgba(16,24,40,.06);
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f1216; --panel: #171b21; --panel-2: #1d232b; --line: #2a313b;
+    --text: #e6e9ee; --muted: #9aa5b4; --faint: #6b7584;
+    --run: #6b9cff; --run-bg: #1a2742;
+    --need: #f0a74a; --need-bg: #35260f;
+    --bad: #f08a5d; --bad-bg: #3a2016;
+    --crash: #f87171; --crash-bg: #3b1717;
+    --pause: #b3a4e0; --pause-bg: #2a2440;
+    --ok: #4ade80; --ok-bg: #12301d;
+    --unk: #94a3b8; --unk-bg: #222a35;
+    --pend: #3a434f;
+    --focus: #6b9cff;
+    --shadow: none;
+    color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  background: var(--bg); color: var(--text);
+  font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; }
+button { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 4px; }
+
+header {
+  position: sticky; top: 0; z-index: 5;
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--line);
+}
+.bar { max-width: 1280px; margin: 0 auto; padding: 12px 20px; display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; }
+h1 { font-size: 17px; margin: 0; letter-spacing: -.01em; }
+.counts { display: flex; gap: 6px; flex-wrap: wrap; }
+.count { display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px; border-radius: 999px; background: var(--panel); border: 1px solid var(--line); font-size: 12.5px; color: var(--muted); }
+.count b { color: var(--text); font-variant-numeric: tabular-nums; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor !important; display: inline-block; }
+.controls { margin-left: auto; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+.search { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; width: 220px; color: var(--text); font: inherit; }
+.toggle { display: inline-flex; gap: 6px; align-items: center; color: var(--muted); cursor: pointer; user-select: none; font-size: 13px; }
+.live { display: inline-flex; align-items: center; gap: 6px; color: var(--faint); font-size: 12.5px; font-variant-numeric: tabular-nums; min-width: 5.5ch; }
+.live i { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); display: inline-block; }
+.live.stale i { background: var(--crash); }
+
+main { max-width: 1280px; margin: 0 auto; padding: 16px 20px 60px; }
+.notice { background: var(--unk-bg); color: var(--muted); border: 1px solid var(--line); border-radius: 10px; padding: 9px 12px; margin-bottom: 14px; font-size: 13px; }
+.notice.err { background: var(--crash-bg); color: var(--crash); }
+
+.project { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; margin-bottom: 14px; box-shadow: var(--shadow); overflow: hidden; }
+.phead { display: flex; align-items: baseline; gap: 10px; padding: 11px 16px; border-bottom: 1px solid var(--line); background: var(--panel-2); flex-wrap: wrap; }
+.phead h2 { margin: 0; font-size: 15px; }
+.phead .path { color: var(--faint); }
+.phead .tally { margin-left: auto; display: flex; gap: 10px; color: var(--muted); font-size: 12.5px; }
+.phead .tally span b { color: var(--text); font-variant-numeric: tabular-nums; }
+.phead .tally { flex-wrap: wrap; }
+.phead .tally span { white-space: nowrap; }
+
+.pill { display: inline-flex; align-items: center; gap: 6px; padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 600; white-space: nowrap; }
+.pill > span { overflow: hidden; text-overflow: ellipsis; }
+.pill::before { flex: none; }
+/* Every pill that heads a row is the same width, so the text after it starts at
+   the same place on every row. They were sized to their label inside a 116px
+   column, so "interrupted" overflowed into the text and "running" left a gap. */
+:root { --pillw: 128px; }
+.pill.lead { width: var(--pillw); }
+.pill::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.s-running { color: var(--run); background: var(--run-bg); }
+.s-running::before { animation: pulse 1.4s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: .25; } }
+.s-needs_input { color: var(--need); background: var(--need-bg); }
+.s-failed, .s-blocked, .s-interrupted { color: var(--bad); background: var(--bad-bg); }
+.s-crashed { color: var(--crash); background: var(--crash-bg); }
+.s-paused, .s-stopped, .s-awaiting_merge, .s-in_progress, .s-pending { color: var(--pause); background: var(--pause-bg); }
+.s-complete, .s-done { color: var(--ok); background: var(--ok-bg); }
+.s-unknown { color: var(--unk); background: var(--unk-bg); }
+
+/* One column grid per project, shared by every row through subgrid. Each row
+   used to be its own grid, so its `auto` button column took whatever width
+   that row's buttons needed and pushed the other columns sideways. */
+/* The first track carries the row's 16px left padding as well as the pill:
+   in a subgrid, the row's padding is taken out of its edge tracks, so a
+   pill-wide first track left the pill 16px too wide for it and running into
+   the feature name. The three button columns are separate so restart, session
+   and prompt each sit in the same place on every row, with or without the
+   others. */
+.items { display: grid; grid-template-columns: calc(var(--pillw) + 16px) minmax(0, 1fr) 150px max-content max-content max-content max-content max-content max-content; column-gap: 14px; }
+.items > * { grid-column: 1 / -1; }
+.row { display: grid; grid-template-columns: subgrid; align-items: center; padding: 10px 16px; border-top: 1px solid var(--line); }
+.items > :first-child { border-top: 0; }
+.row:hover { background: color-mix(in srgb, var(--panel-2) 60%, transparent); }
+.feat { min-width: 0; }
+.feat .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.feat .sub { color: var(--muted); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.feat .sub .tag { color: var(--pause); }
+.num { text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); font-size: 12.5px; }
+.ago { color: var(--faint); }
+
+.phases { display: flex; gap: 2px; }
+.ph { flex: 1; height: 8px; border-radius: 2px; background: var(--pend); }
+.ph.ok, .ph.unevaluated, .ph.skipped { background: var(--ok); opacity: .75; }
+.ph.running { background: var(--run); animation: pulse 1.4s ease-in-out infinite; }
+.ph.needs_input { background: var(--need); }
+.ph.failed, .ph.interrupted, .ph.blocked { background: var(--bad); }
+.ph.crashed { background: var(--crash); }
+.phlabel { display: flex; justify-content: space-between; color: var(--faint); font-size: 11px; margin-top: 3px; }
+
+.tasks { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.meter { height: 5px; background: var(--pend); border-radius: 3px; overflow: hidden; margin-top: 4px; }
+.meter i { display: block; height: 100%; background: var(--ok); }
+
+.acts { display: flex; gap: 6px; justify-content: flex-end; align-items: center; }
+.roadmap > .acts { align-self: start; }
+.btn { display: inline-flex; align-items: center; gap: 5px; border: 1px solid var(--line); background: var(--panel); border-radius: 7px; padding: 4px 9px; font-size: 12.5px; cursor: pointer; white-space: nowrap; color: var(--text); }
+.btn:hover { border-color: var(--faint); }
+.btn svg { width: 13px; height: 13px; }
+.btn.off { opacity: .45; cursor: default; text-decoration: line-through; }
+.btn.primary { background: var(--text); color: var(--panel); border-color: var(--text); }
+
+.roadmap { padding: 12px 16px; border-top: 1px solid var(--line); display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 16px; }
+.roadmap .title { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
+.roadmap .title strong { font-size: 14px; }
+.roadmap .goal { grid-column: 1 / -1; color: var(--muted); font-size: 12.5px; display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical; overflow: hidden; }
+.track { grid-column: 1 / -1; display: flex; gap: 3px; }
+.seg { flex: 1; height: 10px; border-radius: 3px; background: var(--pend); position: relative; }
+.seg.done { background: var(--ok); opacity: .75; }
+.seg.in_progress, .seg.awaiting_merge { background: var(--pause); }
+.seg.blocked, .seg.failed { background: var(--bad); }
+.seg.cur { outline: 2px solid var(--text); outline-offset: 1px; }
+.seg.running { background: var(--run); animation: pulse 1.4s ease-in-out infinite; }
+.seg.crashed { background: var(--crash); }
+.cur-entry { grid-column: 1 / -1; font-size: 12.5px; color: var(--muted); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.cur-entry b { color: var(--text); font-weight: 600; }
+
+.quiet { color: var(--faint); font-size: 13px; padding: 4px 4px 0; }
+.quiet button { background: none; border: 0; color: var(--run); cursor: pointer; padding: 0; text-decoration: underline; }
+.empty { text-align: center; color: var(--muted); padding: 60px 20px; }
+.empty b { display: block; color: var(--text); font-size: 16px; margin-bottom: 4px; }
+
+.toast { position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%) translateY(20px); background: var(--text); color: var(--panel); padding: 9px 14px; border-radius: 9px; font-size: 13px; opacity: 0; transition: .18s; pointer-events: none; max-width: min(640px, calc(100vw - 32px)); }
+.toast.on { opacity: 1; transform: translateX(-50%) translateY(0); }
+.toast code { color: inherit; opacity: .8; display: block; margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+@media (max-width: 1000px) {
+  /* Still one shared grid, with the hidden columns gone and the button cells
+     placed explicitly, so they don't slide left into the gaps. */
+  .items { grid-template-columns: calc(var(--pillw) + 16px) minmax(0, 1fr) max-content max-content max-content; column-gap: 8px; }
+  .row .phcol, .row .taskcol, .row .num { display: none; }
+  .row .a1 { grid-column: 3; } .row .a2 { grid-column: 4; } .row .a3 { grid-column: 5; }
+}
+@media (max-width: 640px) {
+  .bar, main { padding-left: 16px; padding-right: 16px; }
+  .controls { margin-left: 0; width: 100%; }
+  .search { flex: 1; width: auto; }
+  .items { display: block; }
+  /* A wrapping line rather than a grid. As a grid, the no-wrap feature name
+     spanned every column and forced them wider than the screen. */
+  .row { display: flex; flex-wrap: wrap; gap: 6px; }
+  .row > :first-child, .row > .feat { flex: 0 0 100%; }
+  /* min-width: 0 is what lets these shrink at all. A flex or grid item
+     defaults to its content's width, so overflow-wrap alone never applied. */
+  .roadmap > *, .roadmap .title > * { min-width: 0; }
+  .roadmap .title strong { overflow-wrap: anywhere; }
+  .phead > :not(.tally) { min-width: 0; overflow-wrap: anywhere; }
+  /* One column for everything, and the buttons wrap instead of pushing the
+     page sideways. At this width nothing lines up across rows anyway, so
+     empty button cells are dropped rather than holding a slot open. */
+  .row .acts:empty { display: none; }
+  .roadmap { grid-template-columns: minmax(0, 1fr); }
+  .acts { flex-wrap: wrap; justify-content: flex-start; }
+  .bar > *, .counts { min-width: 0; }
+  .acts { justify-content: flex-start; flex-wrap: wrap; }
+  .phead .tally { margin-left: 0; width: 100%; }
+}
+</style>
+</head>
+<body>
+<header>
+  <div class="bar">
+    <h1>Pipelines</h1>
+    <div class="counts" id="counts"></div>
+    <div class="controls">
+      <input class="search" id="q" type="search" placeholder="Filter by project, feature, roadmap…" aria-label="Filter">
+      <label class="toggle"><input type="checkbox" id="showDone"> Show completed</label>
+      <span class="live" id="live" title="Time since the last update"><i></i><span id="liveText">--:--</span></span>
+    </div>
+  </div>
+</header>
+<main id="main"><div class="empty"><b>Loading…</b>Reading every state file under the configured roots.</div></main>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script>
+"use strict";
+const REFRESH_MS = 5000;
+// Statuses that mean "nobody needs to do anything": hidden unless asked for.
+const DONE = new Set(["complete"]);
+// The sort order, for rows within a project and for the projects themselves
+// (a project sorts by its highest row). Running work goes first because this
+// page is mostly watched for progress. Then whatever needs a human, most
+// urgent first. `unknown` sits next to running because it usually IS running:
+// the server just couldn't read the process table to prove it.
+const RANK = { running: 0, unknown: 1, needs_input: 2, crashed: 3, failed: 4, blocked: 4, interrupted: 5,
+               stopped: 6, paused: 7, awaiting_merge: 7, in_progress: 7, pending: 8, complete: 9 };
+const LABEL = { needs_input: "needs input", awaiting_merge: "awaiting merge", in_progress: "in progress" };
+const BUCKET = s => s === "running" ? "running"
+  : s === "needs_input" ? "needs you"
+  : s === "complete" ? "complete"
+  : s === "unknown" ? "unknown" : "stopped";
+
+const ICON_TERM = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M3 4.5 6.5 8 3 11.5M8.5 12h4.5"/></svg>';
+const ICON_CHAT = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M2.5 3.5h11v7h-6l-3 2.5v-2.5h-2z"/></svg>';
+const ICON_SPARK = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M8 2v3M8 11v3M2 8h3M11 8h3M4 4l2 2M10 10l2 2M12 4l-2 2M6 10l-2 2"/></svg>';
+
+const store = {
+  get(k, d) { try { const v = localStorage.getItem("spec-dashboard:" + k); return v === null ? d : JSON.parse(v); } catch { return d; } },
+  set(k, v) { try { localStorage.setItem("spec-dashboard:" + k, JSON.stringify(v)); } catch {} },
+};
+
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const label = s => LABEL[s] || s;
+const pill = (s, lead) => `<span class="pill s-${esc(s)}${lead ? " lead" : ""}" title="${esc(label(s))}"><span>${esc(label(s))}</span></span>`;
+const money = n => "$" + (Number(n) || 0).toFixed(2);
+
+function ago(iso) {
+  if (!iso) return "—";
+  const s = Math.max(0, (Date.now() - Date.parse(iso)) / 1000);
+  if (s < 60) return "just now";
+  if (s < 3600) return Math.floor(s / 60) + "m ago";
+  if (s < 86400) return Math.floor(s / 3600) + "h ago";
+  return Math.floor(s / 86400) + "d ago";
+}
+
+let data = null, lastJson = "", lastOk = 0, failing = false;
+// Copy payloads live here, keyed by index, rather than in data- attributes:
+// commands carry quotes and paths, and escaping them into HTML attributes and
+// back out again is a place for a paste to come out subtly different.
+let payloads = [];
+
+const showDone = $("showDone"), q = $("q");
+showDone.checked = store.get("showDone", false);
+q.value = store.get("q", "");
+showDone.addEventListener("change", () => { store.set("showDone", showDone.checked); render(); });
+q.addEventListener("input", () => { store.set("q", q.value); render(); });
+
+function matches(text) {
+  const needle = q.value.trim().toLowerCase();
+  return !needle || text.toLowerCase().includes(needle);
+}
+
+function actions(item, slots) {
+  const out = [];
+  (item.commands || []).forEach((c, i) => {
+    const k = payloads.push({ text: c.text, what: c.label }) - 1;
+    out.push(`<button class="btn${i === 0 ? " primary" : ""}" data-kind="cmd" data-copy="${k}" title="${esc(c.text)}">${ICON_TERM}${esc(c.label)}</button>`);
+  });
+  // The phase's own conversation, on every row whatever its status: after a
+  // reboot "where was that session" matters for finished work too. The button
+  // shows the start of the id so you can tell sessions apart, and copies the
+  // whole `cd … && claude --resume …`. A bare id resumes only from the
+  // directory the session ran in.
+  const r = item.resume;
+  if (r && r.text) {
+    const k = payloads.push({ text: r.text, what: "session resume" }) - 1;
+    out.push(`<button class="btn" data-kind="session" data-copy="${k}" title="${esc(r.text)}">${ICON_CHAT}<span class="mono">${esc(r.session_id.slice(0, 8))}</span></button>`);
+  } else if (r) {
+    out.push(`<span class="btn off" data-kind="session" title="Session ${esc(r.session_id)}: ${esc(r.reason)}">${ICON_CHAT}<span class="mono">${esc(r.session_id.slice(0, 8))}</span></span>`);
+  }
+  if (item.prompt) {
+    const k = payloads.push({ text: item.prompt, what: "Claude prompt" }) - 1;
+    out.push(`<button class="btn" data-kind="prompt" data-copy="${k}" title="Copy a prompt to paste into Claude Code in that repository">${ICON_SPARK}Copy prompt</button>`);
+  }
+  if (!slots) return `<div class="acts">${out.join("")}</div>`;
+  // A pipeline row: one cell per kind of button, in fixed columns.
+  const cell = (re, n) => `<div class="acts a${n}">${out.filter(h => re.test(h)).join("")}</div>`;
+  return cell(/data-kind="cmd"/, 1) + cell(/data-kind="session"/, 2) + cell(/data-kind="prompt"/, 3);
+}
+
+function phaseStrip(p) {
+  const segs = p.phases.map(ph => {
+    const st = ph.status === "running" && ph.runner === "gone" ? "crashed" : ph.status;
+    const tip = `${ph.name}: ${label(st)}${ph.model ? " · " + ph.model : ""}${ph.cost ? " · " + money(ph.cost) : ""}${ph.note ? "\n" + ph.note : ""}`;
+    return `<span class="ph ${esc(st)}" title="${esc(tip)}"></span>`;
+  }).join("");
+  const first = p.phases[0]?.name || "", last = p.phases[p.phases.length - 1]?.name || "";
+  return `<div class="phases">${segs}</div><div class="phlabel"><span>${esc(first)}</span><span>${esc(last)}</span></div>`;
+}
+
+function taskCol(t) {
+  if (!t || !t.total) return `<span class="tasks">no tasks.md</span>`;
+  const pct = Math.round(100 * t.done / t.total);
+  const owed = t.blocked ? ` · ${t.blocked} owed` : "";
+  return `<div class="tasks" title="${t.open} open, ${t.blocked} marked 🛑 BLOCKED (owed to a human)">${t.done}/${t.total} tasks${owed}</div><div class="meter"><i style="width:${pct}%"></i></div>`;
+}
+
+function pipelineRow(p) {
+  const sub = [];
+  if (p.at && p.status !== "complete") sub.push(`at <b>${esc(p.at)}</b>`);
+  if (p.note) sub.push(esc(p.note));
+  if (p.roadmap) sub.push(`<span class="tag">roadmap ${esc(p.roadmap.slug)}</span>`);
+  if (!sub.length && p.branch) sub.push(esc(p.branch));
+  const checkoutNote = p.checkout !== p.project_path ? ` · worktree ${esc(p.checkout.split("/").pop())}` : "";
+  return `<div class="row">
+    <div>${pill(p.status, true)}</div>
+    <div class="feat"><div class="name mono" title="${esc(p.feature_rel)}\n${esc(p.description)}">${esc(p.feature)}</div><div class="sub" title="${esc(p.note)}">${sub.join(" · ")}${checkoutNote}</div></div>
+    <div class="phcol">${phaseStrip(p)}</div>
+    <div class="taskcol">${taskCol(p.tasks)}</div>
+    <div class="num">${money(p.cost)}</div>
+    <div class="num ago" title="${esc(p.updated_at || "")}">${ago(p.updated_at)}</div>
+    ${actions(p, true)}
+  </div>`;
+}
+
+function roadmapBlock(r) {
+  const segs = r.entries.map(e => {
+    let st = e.status;
+    if (e.slug === r.current && ["running", "crashed"].includes(r.status)) st = r.status;
+    return `<span class="seg ${esc(st)}${e.slug === r.current ? " cur" : ""}" title="${esc(e.title)}\n${esc(label(e.status))}${e.pipeline_status ? " · pipeline " + esc(label(e.pipeline_status)) : ""}"></span>`;
+  }).join("");
+  const cur = r.entries.find(e => e.slug === r.current);
+  const curLine = cur ? `<div class="cur-entry" title="${esc(cur.note)}">Next: <b>${esc(cur.title)}</b> · ${esc(label(cur.status))}${cur.pipeline_status ? ", pipeline " + esc(label(cur.pipeline_status)) : ""}${cur.note ? " · " + esc(cur.note) : ""}</div>` : "";
+  return `<div class="roadmap">
+    <div class="title">${pill(r.status, true)}<strong class="mono">${esc(r.slug)}</strong><span class="num">${r.done}/${r.total} entries · ${money(r.cost)} · ${ago(r.updated_at)}</span></div>
+    ${actions(r)}
+    ${r.goal ? `<div class="goal" title="${esc(r.goal)}">${esc(r.goal)}</div>` : ""}
+    <div class="track">${segs}</div>
+    ${curLine}
+  </div>`;
+}
+
+function render() {
+  if (!data) return;
+  payloads = [];
+  const all = { running: 0, "needs you": 0, stopped: 0, unknown: 0, complete: 0 };
+  let hiddenDone = 0, quietProjects = [];
+  const sections = [];
+
+  for (const g of data.projects) {
+    const hay = x => [g.name, g.path, x.feature || x.slug, x.branch || "", x.note || "", x.roadmap?.slug || "", x.goal || ""].join(" ");
+    for (const p of g.pipelines) all[BUCKET(p.status)]++;
+    const ps = g.pipelines.filter(p => matches(hay(p)));
+    const rs = g.roadmaps.filter(r => matches(hay(r)));
+    const vp = ps.filter(p => showDone.checked || !DONE.has(p.status));
+    const vr = rs.filter(r => showDone.checked || !DONE.has(r.status));
+    hiddenDone += (ps.length - vp.length) + (rs.length - vr.length);
+    if (!vp.length && !vr.length) { if (ps.length || rs.length) quietProjects.push(g.name); continue; }
+
+    // ONE list per project, roadmaps and pipelines sorted together. They were
+    // two lists, roadmaps first, and each list was sorted correctly. Even so, a
+    // running pipeline in `agents` sat under ten roadmap cards, about a screen
+    // down. Sorting each list correctly is not the same as putting running
+    // work at the top.
+    const items = [...vr.map(r => ({ st: r.status, at: r.updated_at, html: roadmapBlock(r) })),
+                   ...vp.map(p => ({ st: p.status, at: p.updated_at, html: pipelineRow(p) }))];
+    items.sort((a, b) => (RANK[a.st] ?? 9) - (RANK[b.st] ?? 9) || String(b.at).localeCompare(String(a.at)));
+    const t = { running: 0, "needs you": 0, stopped: 0 };
+    g.pipelines.forEach(p => { const b = BUCKET(p.status); if (b in t) t[b]++; });
+    const done = g.pipelines.filter(p => p.status === "complete").length;
+    const urgency = Math.min(...items.map(i => RANK[i.st] ?? 9));
+    sections.push({ urgency, updated: g.updated_at || "", html: `<section class="project">
+      <div class="phead"><h2>${esc(g.name)}</h2><span class="path mono">${esc(g.path.replace(/^\/Users\/[^/]+/, "~"))}</span>
+        <div class="tally"><span><b>${t.running}</b> running</span><span><b>${t["needs you"]}</b> need you</span><span><b>${t.stopped}</b> stopped</span><span><b>${done}</b>/${g.pipelines.length} complete</span></div></div>
+      <div class="items">${items.map(i => i.html).join("")}</div>
+    </section>` });
+  }
+  // Projects with something running go first, then those that need someone.
+  // Among equals, the most recently active comes first.
+  sections.sort((a, b) => a.urgency - b.urgency || b.updated.localeCompare(a.updated));
+
+  $("counts").innerHTML = [["running", "running", "running"], ["needs you", "need you", "needs_input"],
+                           ["stopped", "stopped", "paused"], ["unknown", "unknown", "unknown"], ["complete", "complete", "complete"]]
+    .filter(([k]) => k !== "unknown" || all[k])
+    .map(([k, l, s]) => `<span class="count"><span class="dot s-${s}"></span><b>${all[k]}</b> ${l}</span>`).join("");
+
+  let html = "";
+  if (data.process_table === false) {
+    html += `<div class="notice">The process table can't be read from where the server is running (a sandbox does this), so running phases show as <b>unknown</b> rather than running or crashed. Start <code>spec-dashboard</code> from an ordinary terminal to tell them apart.</div>`;
+  }
+  html += sections.map(s => s.html).join("");
+  if (!sections.length) {
+    html += `<div class="empty"><b>${q.value ? "Nothing matches that filter" : "Nothing unfinished"}</b>${data.projects.length ? `Every pipeline under ${esc(data.roots.join(", "))} is complete.` : `No pipeline state found under ${esc(data.roots.join(", "))}. Pass --root to look elsewhere.`}</div>`;
+  }
+  if (!showDone.checked && (hiddenDone || quietProjects.length)) {
+    html += `<p class="quiet">${hiddenDone} completed pipeline(s) and roadmap(s) hidden${quietProjects.length ? `, including everything in ${quietProjects.map(esc).join(", ")}` : ""}. <button type="button" id="reveal">Show completed</button></p>`;
+  }
+  $("main").innerHTML = html;
+  const reveal = $("reveal");
+  if (reveal) reveal.onclick = () => { showDone.checked = true; showDone.dispatchEvent(new Event("change")); };
+}
+
+async function copy(text) {
+  try { await navigator.clipboard.writeText(text); return true; } catch {}
+  // Fallback for a browser that refuses the async API.
+  const ta = document.createElement("textarea");
+  ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+  document.body.appendChild(ta); ta.select();
+  let ok = false; try { ok = document.execCommand("copy"); } catch {}
+  ta.remove(); return ok;
+}
+
+let toastTimer;
+function toast(html) {
+  const t = $("toast"); t.innerHTML = html; t.classList.add("on");
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove("on"), 2600);
+}
+
+document.addEventListener("click", async e => {
+  const b = e.target.closest("[data-copy]");
+  if (!b) return;
+  const p = payloads[Number(b.dataset.copy)];
+  if (!p) return;
+  const ok = await copy(p.text);
+  toast(ok ? `Copied: ${esc(p.what)}<code>${esc(p.text)}</code>` : "Couldn't reach the clipboard; the text is in the button's tooltip.");
+});
+
+function tickLive() {
+  const el = $("live"), tx = $("liveText");
+  if (!lastOk) return;
+  const s = Math.round((Date.now() - lastOk) / 1000);
+  el.classList.toggle("stale", failing);
+  // A fixed-width MM:SS. The words it replaced changed width every second
+  // ("updated now" against "updated 3s ago") and the corner twitched.
+  const mm = String(Math.min(99, Math.floor(s / 60))).padStart(2, "0"), ss = String(s % 60).padStart(2, "0");
+  tx.textContent = `${mm}:${ss}`;
+  el.title = failing ? `Server unreachable. Last update ${mm}:${ss} ago.`
+                     : `Time since the last update. Refreshes every ${REFRESH_MS / 1000}s while this tab is visible.`;
+}
+
+async function refresh() {
+  try {
+    const r = await fetch("/api/pipelines", { cache: "no-store" });
+    const body = await r.text();
+    if (!r.ok) throw new Error(body);
+    failing = false; lastOk = Date.now();
+    // Redraw only on change, so a refresh doesn't knock the hover off a button
+    // you are about to click. The relative times still advance, because the
+    // timer below redraws them once a minute.
+    if (body !== lastJson) { lastJson = body; data = JSON.parse(body); render(); }
+  } catch (err) {
+    failing = true;
+    if (!data) $("main").innerHTML = `<div class="notice err">Couldn't read /api/pipelines: ${esc(err.message || err)}. Is spec-dashboard still running?</div>`;
+  }
+  tickLive();
+}
+
+let timer;
+function schedule() { clearInterval(timer); timer = setInterval(() => { if (!document.hidden) refresh(); }, REFRESH_MS); }
+document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
+setInterval(tickLive, 1000);
+setInterval(() => { if (data) render(); }, 60000);
+refresh(); schedule();
+</script>
+</body>
+</html>

@@ -122,7 +122,7 @@ if command -v shellcheck >/dev/null 2>&1; then
   out=$(shellcheck --version | awk '/^version:/{print $2}')
   t_note "shellcheck $out"
   files=("$SPEC_RUN" "$SPEC_BOOTSTRAP" "$PKG/bin/spec-status" "$PKG/bin/spec-roadmap" "$PKG/bin/spec-upgrade"
-         "$PKG/bin/spec-reap"
+         "$PKG/bin/spec-reap" "$PKG/bin/spec-dashboard" "$ROOT/bin/spec-dashboard" "$ROOT/install.sh" "$ROOT/dashboard.sh"
          "$PKG/lib/common.sh" "$PKG/lib/verify.sh" "$PKG/lib/roadmap.sh"
          "$ROOT/bin/spec-run" "$ROOT/bin/spec-bootstrap" "$ROOT/bin/spec-status"
          "$ROOT/bin/spec-roadmap" "$ROOT/bin/spec-upgrade" "$ROOT/bin/spec-reap"
@@ -2098,6 +2098,121 @@ assert_contains "$out" "no phase is blocked" "an unblocked pipeline says so posi
 out=$("$SPEC_STATUS" --help 2>&1); assert_eq "$?" "0" "--help exits 0"
 out=$("$SPEC_STATUS" --repo "$WORK" 2>&1); rc=$?
 assert_eq "$rc" "1" "a directory that is not a git repo exits 1"
+
+# ================================================================== install.sh
+printf '\ninstall.sh\n'
+IB="$WORK/installbin"
+out=$(PATH="$IB:$PATH" "$ROOT/install.sh" --bin-dir "$IB" 2>&1); rc=$?
+assert_eq "$rc" "0" "install.sh links every command and exits 0"
+# Every executable in bin/, so a command added later is installed without
+# editing the script. Mutation: hard-code the list and drop one.
+assert_eq "$(ls "$IB" | wc -l | tr -d ' ')" "$(ls "$ROOT/bin" | wc -l | tr -d ' ')" \
+  "one link per command in bin/"
+assert_contains "$out" "spec-run runs from PATH" "and it runs the installed link to prove it works"
+out=$("$ROOT/install.sh" --bin-dir "$IB" 2>&1)
+assert_contains "$out" "already linked" "a second run is a no-op"
+# Never overwrite a file it did not make. Mutation: `ln -sf`.
+IB2="$WORK/installbin2"; mkdir -p "$IB2"; printf 'mine\n' > "$IB2/spec-run"
+"$ROOT/install.sh" --bin-dir "$IB2" >/dev/null 2>&1; rc=$?
+assert_eq "$(cat "$IB2/spec-run")" "mine" "an existing file of the same name is left alone"
+assert_eq "$rc" "1" "and the install says so by exiting non-zero"
+"$ROOT/install.sh" --uninstall --bin-dir "$IB2" >/dev/null 2>&1
+assert_eq "$(cat "$IB2/spec-run" 2>/dev/null)" "mine" "uninstall removes only the links into this clone"
+"$ROOT/install.sh" --uninstall --bin-dir "$IB" >/dev/null 2>&1
+assert_eq "$(ls "$IB" | wc -l | tr -d ' ')" "0" "and removes all of those"
+
+# =================================================================== spec-dashboard
+printf '\nspec-dashboard\n'
+SPEC_DASHBOARD="$PKG/bin/spec-dashboard"
+DROOT="$WORK/dash"; mkdir -p "$DROOT"
+mkbare "$DROOT/proj" main
+git -C "$DROOT/proj" worktree add -q "$DROOT/proj-wt" -b wt >/dev/null 2>&1
+mkfeat() { # mkfeat <checkout> <feature> <state-json> <tasks.md body>
+  mkdir -p "$1/specs/$2/.pipeline"
+  printf '%s\n' "$3" > "$1/specs/$2/.pipeline/state.json"
+  [ -n "${4:-}" ] && printf '%b' "$4" > "$1/specs/$2/tasks.md"
+  return 0
+}
+mkfeat "$DROOT/proj" 001-done \
+  '{"version":1,"phases":{"specify":{"status":"ok","started_at":"2026-01-01T00:00:00Z"},"implement":{"status":"ok","started_at":"2026-01-02T00:00:00Z","cost_usd":2}}}' \
+  '- [x] T001 a\n- [x] T002 b\n'
+# implement records `ok` per PASS, so `ok` with a box still open is NOT done.
+# Mutation: drop the open-task check from `finished` and this reads complete.
+mkfeat "$DROOT/proj" 002-open-task \
+  '{"version":1,"phases":{"implement":{"status":"ok","started_at":"2026-01-02T00:00:00Z"}}}' \
+  '- [x] T001 a\n- [ ] T002 b\n'
+# …but an open box marked 🛑 BLOCKED is owed to a human, and does not hold the
+# pipeline open. That is spec-run's tasks_open, and the two must agree.
+mkfeat "$DROOT/proj" 003-owed \
+  '{"version":1,"phases":{"implement":{"status":"ok","started_at":"2026-01-02T00:00:00Z"}}}' \
+  '- [x] T001 a\n- [ ] T002 🛑 BLOCKED deploy it\n'
+mkfeat "$DROOT/proj" 004-asks \
+  '{"version":1,"phases":{"plan":{"status":"needs_input","session_id":"sid-4","note":"which db?","started_at":"2026-01-02T00:00:00Z"}}}' ''
+# A specify re-run that failed AFTER the work landed. Seen on real state files.
+# Mutation: check the latest phase for BLOCKING before `finished`, and this reads failed.
+mkfeat "$DROOT/proj" 005-rerun \
+  '{"version":1,"phases":{"specify":{"status":"failed","started_at":"2026-01-05T00:00:00Z"},"implement":{"status":"ok","started_at":"2026-01-02T00:00:00Z"}}}' \
+  '- [x] T001 a\n'
+mkfeat "$DROOT/proj" 006-dead \
+  '{"version":1,"phases":{"implement":{"status":"running","runner_pid":999999,"started_at":"2026-01-02T00:00:00Z"}}}' '- [ ] T001 a\n'
+# In a linked worktree: belongs to `proj`, not to `proj-wt`.
+mkfeat "$DROOT/proj-wt" 007-in-wt \
+  '{"version":1,"phases":{"tasks":{"status":"ok","session_id":"sid-gone","started_at":"2026-01-02T00:00:00Z"}}}' '- [ ] T001 a\n'
+mkdir -p "$DROOT/proj/.specify/roadmaps"
+printf '%s\n' '{"goal":"g","entries":[{"slug":"one","title":"One"},{"slug":"two","title":"Two"},{"slug":"three","title":"Three"}]}' \
+  > "$DROOT/proj/.specify/roadmaps/rm.json"
+printf '%s\n' '{"version":1,"slug":"rm","entries":{"one":{"status":"done","updated_at":"2026-01-01T00:00:00Z"},
+  "two":{"status":"in_progress","feature_dir":"specs/002-open-task","updated_at":"2026-01-03T00:00:00Z"}}}' \
+  > "$DROOT/proj/.specify/roadmaps/rm.state.json"
+
+if command -v python3 >/dev/null 2>&1; then
+  DJ="$WORK/dash.json"
+  # A config dir of its own, so the session lookup reads this fixture and not
+  # the developer's real ~/.claude. sid-4's transcript says it ran somewhere
+  # other than the checkout, which is the case a bare `claude --resume` misses.
+  DCFG="$WORK/dash-claude"; mkdir -p "$DCFG/projects/-elsewhere"
+  printf '%s\n' '{"type":"summary"}' '{"type":"user","cwd":"/elsewhere/wt"}' > "$DCFG/projects/-elsewhere/sid-4.jsonl"
+  CLAUDE_CONFIG_DIR="$DCFG" "$SPEC_DASHBOARD" --json --root "$DROOT" > "$DJ" 2>/dev/null
+  dst() { jq -r --arg f "$1" '.projects[].pipelines[] | select(.feature==$f) | .status' "$DJ"; }
+  assert_eq "$(jq -r '[.projects[].name] | join(",")' "$DJ")" "proj" \
+    "a linked worktree's pipelines are grouped under the main checkout's project"
+  assert_eq "$(dst 007-in-wt)" "paused" "and are still read from the worktree"
+  assert_eq "$(dst 001-done)" "complete" "implement ok with every task ticked is complete"
+  assert_eq "$(dst 002-open-task)" "paused" "implement ok with a task still open is NOT complete"
+  assert_eq "$(dst 003-owed)" "complete" "an open task marked 🛑 BLOCKED does not hold a pipeline open"
+  assert_eq "$(dst 004-asks)" "needs_input" "a phase that stopped to ask reads needs_input"
+  # Mutation: cd into the checkout instead of the transcript's cwd, and this fails.
+  assert_eq "$(jq -r '.projects[].pipelines[] | select(.feature=="004-asks") | .resume.text' "$DJ")" \
+    "cd /elsewhere/wt && claude --resume sid-4" \
+    "with the phase's session offered to copy, from the directory its transcript says it ran in"
+  assert_eq "$(jq -r '.projects[].pipelines[] | select(.feature=="007-in-wt") | "\(.resume.text) \(.resume.reason)"' "$DJ")" \
+    "null transcript no longer on disk" "a session whose transcript is gone is reported, not offered"
+  assert_eq "$(dst 005-rerun)" "complete" "a failed re-run of specify after the work landed does not unfinish it"
+  assert_contains "$(jq -r '.projects[].pipelines[] | select(.feature=="005-rerun") | .note' "$DJ")" \
+    "re-run of specify" "but it is noted"
+  # Computed here rather than reusing the interrupted-phase block's _ps_ok,
+  # which is defined further down the file and unbound at this point.
+  _dash_ps=0; [ -n "$(ps -o command= -p $$ 2>/dev/null)" ] && _dash_ps=1
+  if [ "$_dash_ps" -eq 1 ]; then
+    assert_eq "$(dst 006-dead)" "crashed" "a running phase whose runner is gone reads crashed"
+  else
+    assert_eq "$(dst 006-dead)" "unknown" "with the process table unreadable, a running phase reads unknown, not crashed"
+  fi
+  # Read-only: the dashboard reports a crash, it never relabels it the way
+  # state_reconcile_running does. Mutation: call that from the collector.
+  assert_eq "$(jq -r '.phases.implement.status' "$DROOT/proj/specs/006-dead/.pipeline/state.json")" "running" \
+    "and the state file is left exactly as it was"
+  assert_eq "$(jq -r '.projects[].roadmaps[0] | "\(.done)/\(.total) \(.current)"' "$DJ")" "1/3 two" \
+    "a roadmap counts entries from the authored file, including ones never started"
+  assert_contains "$(jq -r '.projects[].pipelines[] | select(.feature=="002-open-task") | .commands[].text' "$DJ")" \
+    "spec-roadmap run rm" "a roadmap's current entry restarts through spec-roadmap, not spec-run"
+  assert_contains "$(jq -r '.projects[].pipelines[] | select(.feature=="007-in-wt") | .commands[].text' "$DJ")" \
+    "spec-run --resume --feature-dir specs/007-in-wt" "and a lone pipeline through spec-run --resume"
+  assert_eq "$(jq -r '.projects[].pipelines[] | select(.feature=="001-done") | .commands | length' "$DJ")" "0" \
+    "a complete pipeline offers nothing to restart"
+else
+  t_skip "spec-dashboard" "python3 not on PATH"
+fi
 
 # =================================================================== spec-upgrade
 printf '\nspec-upgrade\n'
