@@ -2164,6 +2164,16 @@ printf '%s\n' '{"goal":"g","entries":[{"slug":"one","title":"One"},{"slug":"two"
 printf '%s\n' '{"version":1,"slug":"rm","entries":{"one":{"status":"done","updated_at":"2026-01-01T00:00:00Z"},
   "two":{"status":"in_progress","feature_dir":"specs/002-open-task","updated_at":"2026-01-03T00:00:00Z"}}}' \
   > "$DROOT/proj/.specify/roadmaps/rm.state.json"
+# A second roadmap whose current entry is on its FIRST run: spec-roadmap has
+# marked it in_progress but not yet recorded its feature, because it does that
+# only when spec-run returns. 008 started after the entry did, 009 before it.
+printf '%s\n' '{"goal":"g2","entries":[{"slug":"x","title":"X"}]}' > "$DROOT/proj/.specify/roadmaps/rm2.json"
+printf '%s\n' '{"version":1,"slug":"rm2","entries":{"x":{"status":"in_progress","updated_at":"2026-02-01T00:00:00Z"}}}' \
+  > "$DROOT/proj/.specify/roadmaps/rm2.state.json"
+mkfeat "$DROOT/proj" 008-first-run \
+  '{"version":1,"created_at":"2026-02-01T00:10:00Z","phases":{"plan":{"status":"ok","started_at":"2026-02-01T00:10:00Z"}}}' ''
+mkfeat "$DROOT/proj" 009-before \
+  '{"version":1,"created_at":"2026-01-15T00:00:00Z","phases":{"plan":{"status":"ok","started_at":"2026-01-15T00:00:00Z"}}}' ''
 
 if command -v python3 >/dev/null 2>&1; then
   DJ="$WORK/dash.json"
@@ -2202,7 +2212,7 @@ if command -v python3 >/dev/null 2>&1; then
   # state_reconcile_running does. Mutation: call that from the collector.
   assert_eq "$(jq -r '.phases.implement.status' "$DROOT/proj/specs/006-dead/.pipeline/state.json")" "running" \
     "and the state file is left exactly as it was"
-  assert_eq "$(jq -r '.projects[].roadmaps[0] | "\(.done)/\(.total) \(.current)"' "$DJ")" "1/3 two" \
+  assert_eq "$(jq -r '.projects[].roadmaps[] | select(.slug=="rm") | "\(.done)/\(.total) \(.current)"' "$DJ")" "1/3 two" \
     "a roadmap counts entries from the authored file, including ones never started"
   assert_contains "$(jq -r '.projects[].pipelines[] | select(.feature=="002-open-task") | .commands[].text' "$DJ")" \
     "spec-roadmap run rm" "a roadmap's current entry restarts through spec-roadmap, not spec-run"
@@ -2210,6 +2220,12 @@ if command -v python3 >/dev/null 2>&1; then
     "spec-run --resume --feature-dir specs/007-in-wt" "and a lone pipeline through spec-run --resume"
   assert_eq "$(jq -r '.projects[].pipelines[] | select(.feature=="001-done") | .commands | length' "$DJ")" "0" \
     "a complete pipeline offers nothing to restart"
+  # Mutation: drop the inference pass, and 008 shows no roadmap while it runs.
+  assert_eq "$(jq -r '.projects[].pipelines[] | select(.feature=="008-first-run") | "\(.roadmap.slug) \(.roadmap.inferred)"' "$DJ")" \
+    "rm2 true" "an entry's first run is tied to its roadmap before spec-roadmap records the feature"
+  # Mutation: drop the created_at >= started check, and 009 is picked instead.
+  assert_eq "$(jq -r '.projects[].pipelines[] | select(.feature=="009-before") | .roadmap' "$DJ")" "null" \
+    "but never to a pipeline that started before the entry did"
 else
   t_skip "spec-dashboard" "python3 not on PATH"
 fi

@@ -1341,7 +1341,7 @@ reports success over a directory the rest of the pipeline cannot find.
 ## Tests
 
 ```bash
-./tests/run.sh          # shellcheck + 680 fixture assertions
+./tests/run.sh          # shellcheck + 682 fixture assertions
 ```
 
 **The suite is hermetic.** A stub runner shadows the real `claude` for the whole
@@ -1464,7 +1464,7 @@ the one thing it exists to measure.
 ## Tests, and what they cost to run
 
 ```bash
-./tests/run.sh          # shellcheck + 680 assertions, ~3.5 minutes
+./tests/run.sh          # shellcheck + 682 assertions, ~3.5 minutes
 ```
 
 Hermetic: a stub runner shadows the real `claude` for the whole run, so nothing

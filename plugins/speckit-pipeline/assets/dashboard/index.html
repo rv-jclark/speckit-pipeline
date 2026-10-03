@@ -67,6 +67,11 @@ h1 { font-size: 17px; margin: 0; letter-spacing: -.01em; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor !important; display: inline-block; }
 .controls { margin-left: auto; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
 .search { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; width: 220px; color: var(--text); font: inherit; }
+.pick { width: auto; max-width: 200px; cursor: pointer; }
+.plink { color: inherit; text-decoration: none; }
+.plink:hover { text-decoration: underline; text-underline-offset: 3px; }
+.focusbar { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; color: var(--muted); font-size: 13px; }
+.focusbar a { color: var(--run); }
 .toggle { display: inline-flex; gap: 6px; align-items: center; color: var(--muted); cursor: pointer; user-select: none; font-size: 13px; }
 .live { display: inline-flex; align-items: center; gap: 6px; color: var(--faint); font-size: 12.5px; font-variant-numeric: tabular-nums; min-width: 5.5ch; }
 .live i { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); display: inline-block; }
@@ -117,6 +122,9 @@ main { max-width: 1280px; margin: 0 auto; padding: 16px 20px 60px; }
 .items > * { grid-column: 1 / -1; }
 .row { display: grid; grid-template-columns: subgrid; align-items: center; padding: 10px 16px; border-top: 1px solid var(--line); }
 .items > :first-child { border-top: 0; }
+/* The current entry's pipeline, tucked under its roadmap card: no divider
+   between the two, and a rule down the left edge marks them as one unit. */
+.row.nested { border-top: 0; box-shadow: inset 3px 0 0 var(--pause); background: color-mix(in srgb, var(--panel-2) 45%, transparent); }
 .row:hover { background: color-mix(in srgb, var(--panel-2) 60%, transparent); }
 .feat { min-width: 0; }
 .feat .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -209,6 +217,7 @@ main { max-width: 1280px; margin: 0 auto; padding: 16px 20px 60px; }
     <h1>Pipelines</h1>
     <div class="counts" id="counts"></div>
     <div class="controls">
+      <select class="search pick" id="proj" aria-label="Project"><option value="">All projects</option></select>
       <input class="search" id="q" type="search" placeholder="Filter by project, feature, roadmap…" aria-label="Filter">
       <label class="toggle"><input type="checkbox" id="showDone"> Show completed</label>
       <span class="live" id="live" title="Time since the last update"><i></i><span id="liveText">--:--</span></span>
@@ -266,7 +275,13 @@ let data = null, lastJson = "", lastOk = 0, failing = false;
 // back out again is a place for a paste to come out subtly different.
 let payloads = [];
 
-const showDone = $("showDone"), q = $("q");
+const showDone = $("showDone"), q = $("q"), proj = $("proj");
+// The project in focus lives in the URL, not in localStorage, so a refresh
+// keeps it, a bookmark can point at one project, and Back returns to all.
+const focusOf = () => { const m = location.hash.match(/^#project=(.+)$/); return m ? decodeURIComponent(m[1]) : ""; };
+const setFocus = name => { location.hash = name ? "project=" + encodeURIComponent(name) : ""; };
+window.addEventListener("hashchange", () => render());
+proj.addEventListener("change", () => setFocus(proj.value));
 showDone.checked = store.get("showDone", false);
 q.value = store.get("q", "");
 showDone.addEventListener("change", () => { store.set("showDone", showDone.checked); render(); });
@@ -322,14 +337,14 @@ function taskCol(t) {
   return `<div class="tasks" title="${t.open} open, ${t.blocked} marked 🛑 BLOCKED (owed to a human)">${t.done}/${t.total} tasks${owed}</div><div class="meter"><i style="width:${pct}%"></i></div>`;
 }
 
-function pipelineRow(p) {
+function pipelineRow(p, nested) {
   const sub = [];
   if (p.at && p.status !== "complete") sub.push(`at <b>${esc(p.at)}</b>`);
   if (p.note) sub.push(esc(p.note));
-  if (p.roadmap) sub.push(`<span class="tag">roadmap ${esc(p.roadmap.slug)}</span>`);
+  if (p.roadmap) sub.push(`<span class="tag"${p.roadmap.inferred ? ` title="spec-roadmap hasn't recorded this entry's feature yet. It does that when the entry's run returns. Linked because this pipeline was the first one started in that checkout after the entry began."` : ""}>roadmap ${esc(p.roadmap.slug)}</span>`);
   if (!sub.length && p.branch) sub.push(esc(p.branch));
   const checkoutNote = p.checkout !== p.project_path ? ` · worktree ${esc(p.checkout.split("/").pop())}` : "";
-  return `<div class="row">
+  return `<div class="row${nested ? " nested" : ""}">
     <div>${pill(p.status, true)}</div>
     <div class="feat"><div class="name mono" title="${esc(p.feature_rel)}\n${esc(p.description)}">${esc(p.feature)}</div><div class="sub" title="${esc(p.note)}">${sub.join(" · ")}${checkoutNote}</div></div>
     <div class="phcol">${phaseStrip(p)}</div>
@@ -363,8 +378,13 @@ function render() {
   const all = { running: 0, "needs you": 0, stopped: 0, unknown: 0, complete: 0 };
   let hiddenDone = 0, quietProjects = [];
   const sections = [];
+  const focus = focusOf();
+  const names = data.projects.map(g => g.name).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+  proj.innerHTML = `<option value="">All projects</option>` + names.map(n => `<option value="${esc(n)}">${esc(n)}</option>`).join("");
+  proj.value = names.includes(focus) ? focus : "";
 
   for (const g of data.projects) {
+    if (focus && g.name !== focus) continue;
     const hay = x => [g.name, g.path, x.feature || x.slug, x.branch || "", x.note || "", x.roadmap?.slug || "", x.goal || ""].join(" ");
     for (const p of g.pipelines) all[BUCKET(p.status)]++;
     const ps = g.pipelines.filter(p => matches(hay(p)));
@@ -379,22 +399,35 @@ function render() {
     // running pipeline in `agents` sat under ten roadmap cards, about a screen
     // down. Sorting each list correctly is not the same as putting running
     // work at the top.
-    const items = [...vr.map(r => ({ st: r.status, at: r.updated_at, html: roadmapBlock(r) })),
-                   ...vp.map(p => ({ st: p.status, at: p.updated_at, html: pipelineRow(p) }))];
+    // A roadmap's current pipeline is drawn directly under its card, and the
+    // pair sorts as one item by whichever of the two is more urgent. Otherwise
+    // the two land in different places: a running entry and the roadmap it
+    // belongs to, with unrelated rows in between.
+    const byFeature = new Map(vp.map(p => [p.feature, p]));
+    const nested = new Set();
+    const rItems = vr.map(r => {
+      const child = r.current_pipeline && byFeature.get(r.current_pipeline);
+      if (child) nested.add(child.feature);
+      const ranks = [RANK[r.status] ?? 9, child ? (RANK[child.status] ?? 9) : 9];
+      const st = Object.keys(RANK).find(k => RANK[k] === Math.min(...ranks)) || r.status;
+      return { st, at: r.updated_at, html: roadmapBlock(r) + (child ? pipelineRow(child, true) : "") };
+    });
+    const items = [...rItems,
+                   ...vp.filter(p => !nested.has(p.feature)).map(p => ({ st: p.status, at: p.updated_at, html: pipelineRow(p) }))];
     items.sort((a, b) => (RANK[a.st] ?? 9) - (RANK[b.st] ?? 9) || String(b.at).localeCompare(String(a.at)));
     const t = { running: 0, "needs you": 0, stopped: 0 };
     g.pipelines.forEach(p => { const b = BUCKET(p.status); if (b in t) t[b]++; });
     const done = g.pipelines.filter(p => p.status === "complete").length;
-    const urgency = Math.min(...items.map(i => RANK[i.st] ?? 9));
-    sections.push({ urgency, updated: g.updated_at || "", html: `<section class="project">
-      <div class="phead"><h2>${esc(g.name)}</h2><span class="path mono">${esc(g.path.replace(/^\/Users\/[^/]+/, "~"))}</span>
+    sections.push({ name: g.name, html: `<section class="project">
+      <div class="phead"><h2><a class="plink" href="#project=${encodeURIComponent(g.name)}" title="Show only ${esc(g.name)}">${esc(g.name)}</a></h2><span class="path mono">${esc(g.path.replace(/^\/Users\/[^/]+/, "~"))}</span>
         <div class="tally"><span><b>${t.running}</b> running</span><span><b>${t["needs you"]}</b> need you</span><span><b>${t.stopped}</b> stopped</span><span><b>${done}</b>/${g.pipelines.length} complete</span></div></div>
       <div class="items">${items.map(i => i.html).join("")}</div>
     </section>` });
   }
-  // Projects with something running go first, then those that need someone.
-  // Among equals, the most recently active comes first.
-  sections.sort((a, b) => a.urgency - b.urgency || b.updated.localeCompare(a.updated));
+  // Alphabetical, so a project stays put while you watch it. Ordering by
+  // status moved a project being watched between first and third place as its
+  // runs changed state. Rows within a project still put running work first.
+  sections.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
 
   $("counts").innerHTML = [["running", "running", "running"], ["needs you", "need you", "needs_input"],
                            ["stopped", "stopped", "paused"], ["unknown", "unknown", "unknown"], ["complete", "complete", "complete"]]
@@ -405,8 +438,13 @@ function render() {
   if (data.process_table === false) {
     html += `<div class="notice">The process table can't be read from where the server is running (a sandbox does this), so running phases show as <b>unknown</b> rather than running or crashed. Start <code>spec-dashboard</code> from an ordinary terminal to tell them apart.</div>`;
   }
+  if (focus) {
+    html += `<div class="focusbar"><span>${names.includes(focus) ? `Showing only <b>${esc(focus)}</b>.` : `No project named <b>${esc(focus)}</b> under ${esc(data.roots.join(", "))}.`}</span><a href="#">Show all projects</a></div>`;
+  }
   html += sections.map(s => s.html).join("");
-  if (!sections.length) {
+  if (!sections.length && focus && names.includes(focus)) {
+    html += `<div class="empty"><b>${q.value ? "Nothing in " + esc(focus) + " matches that filter" : "Nothing unfinished in " + esc(focus)}</b>Every pipeline and roadmap there is complete.</div>`;
+  } else if (!sections.length && !focus) {
     html += `<div class="empty"><b>${q.value ? "Nothing matches that filter" : "Nothing unfinished"}</b>${data.projects.length ? `Every pipeline under ${esc(data.roots.join(", "))} is complete.` : `No pipeline state found under ${esc(data.roots.join(", "))}. Pass --root to look elsewhere.`}</div>`;
   }
   if (!showDone.checked && (hiddenDone || quietProjects.length)) {

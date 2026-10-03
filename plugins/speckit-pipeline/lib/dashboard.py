@@ -550,8 +550,12 @@ def commands_for_roadmap(r):
     if r["status"] == "complete":
         return [], None
     run = f"spec-roadmap run {_q(r['slug'])}"
-    cmds = [{"label": "Copy run", "text": f"cd {_q(r['checkout'])} && {run}"},
-            {"label": "Copy show", "text": f"cd {_q(r['checkout'])} && spec-roadmap show {_q(r['slug'])}"}]
+    show = {"label": "Copy show", "text": f"cd {_q(r['checkout'])} && spec-roadmap show {_q(r['slug'])}"}
+    # While its runner is up, `run` would start a second runner on the same
+    # roadmap. Only `show` is offered until it stops.
+    if r["status"] == "running":
+        return [show], None
+    cmds = [{"label": "Copy run", "text": f"cd {_q(r['checkout'])} && {run}"}, show]
     cur = next((e for e in r["entries"] if e["slug"] == r["current"]), None)
     where = f" Entry {r['done'] + 1} of {r['total']}, `{cur['slug']}`, is {cur['status']}." if cur else ""
     prompt = (
@@ -637,21 +641,46 @@ class Collector:
                     roadmaps[key] = rec
 
         # Tie each pipeline to the roadmap entry that created it.
+        def link(r, e, p, inferred):
+            p["roadmap"] = {"slug": r["slug"], "entry": e["slug"], "entry_status": e["status"],
+                            "current": e["slug"] == r["current"], "checkout": r["checkout"],
+                            "inferred": inferred}
+            e["pipeline_status"] = p["status"]
+            e["pipeline"] = p["feature"]
+            if e["slug"] == r["current"]:
+                r["current_pipeline"] = p["feature"]
+            # A roadmap whose current entry's pipeline is running is running
+            # too. `in_progress` alone could mean either running or abandoned
+            # weeks ago.
+            if e["slug"] == r["current"] and r["status"] == "in_progress":
+                r["status"] = {"running": "running", "crashed": "crashed",
+                               "unknown": "unknown"}.get(p["status"], "stopped")
+
         for r in roadmaps.values():
             for e in r["entries"]:
                 if not e["feature_dir"]:
                     continue
                 p = pipelines.get((r["project_path"], os.path.basename(e["feature_dir"].rstrip("/"))))
                 if p:
-                    p["roadmap"] = {"slug": r["slug"], "entry": e["slug"], "entry_status": e["status"],
-                                    "current": e["slug"] == r["current"], "checkout": r["checkout"]}
-                    e["pipeline_status"] = p["status"]
-                    # A roadmap whose current entry's pipeline is running is
-                    # running too. `in_progress` alone could mean either running
-                    # or abandoned weeks ago.
-                    if e["slug"] == r["current"] and r["status"] == "in_progress":
-                        r["status"] = {"running": "running", "crashed": "crashed",
-                                       "unknown": "unknown"}.get(p["status"], "stopped")
+                    link(r, e, p, False)
+
+        # spec-roadmap records an entry's feature only after spec-run returns,
+        # so for the whole of an entry's FIRST run its slot says
+        # `in_progress` with no feature. That is the run you most want to see
+        # tied to its roadmap. Seen live: entry 6 of 7 in_progress since
+        # 10:33:32, feature_dir null, while 430-year-end-runway (created
+        # 10:49:42, same worktree) ran with no roadmap shown beside it.
+        # Inferred link: the first pipeline created in the roadmap's own
+        # checkout after the entry started that no other entry claims.
+        for r in roadmaps.values():
+            cur = next((e for e in r["entries"] if e["slug"] == r["current"]), None)
+            if not cur or cur["status"] != "in_progress" or cur["feature_dir"] or not cur["updated_at"]:
+                continue
+            cands = [p for p in pipelines.values()
+                     if p["checkout"] == r["checkout"] and not p["roadmap"]
+                     and (p["created_at"] or "") >= cur["updated_at"]]
+            if cands:
+                link(r, cur, min(cands, key=lambda p: p["created_at"]), True)
 
         for p in pipelines.values():
             p["commands"], p["prompt"] = commands_for_pipeline(p)
