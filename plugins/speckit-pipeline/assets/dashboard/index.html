@@ -104,6 +104,7 @@ main { max-width: 1280px; margin: 0 auto; padding: 16px 20px 60px; }
 @keyframes pulse { 50% { opacity: .25; } }
 .s-needs_input { color: var(--need); background: var(--need-bg); }
 .s-failed, .s-blocked, .s-interrupted { color: var(--bad); background: var(--bad-bg); }
+.s-limited { color: var(--need); background: var(--need-bg); }
 .s-crashed { color: var(--crash); background: var(--crash-bg); }
 .s-paused, .s-stopped, .s-awaiting_merge, .s-in_progress, .s-pending { color: var(--pause); background: var(--pause-bg); }
 .s-complete, .s-done { color: var(--ok); background: var(--ok-bg); }
@@ -137,7 +138,7 @@ main { max-width: 1280px; margin: 0 auto; padding: 16px 20px 60px; }
 .ph { flex: 1; height: 8px; border-radius: 2px; background: var(--pend); }
 .ph.ok, .ph.unevaluated, .ph.skipped { background: var(--ok); opacity: .75; }
 .ph.running { background: var(--run); animation: pulse 1.4s ease-in-out infinite; }
-.ph.needs_input { background: var(--need); }
+.ph.needs_input, .ph.limited { background: var(--need); }
 .ph.failed, .ph.interrupted, .ph.blocked { background: var(--bad); }
 .ph.crashed { background: var(--crash); }
 .phlabel { display: flex; justify-content: space-between; color: var(--faint); font-size: 11px; margin-top: 3px; }
@@ -237,9 +238,9 @@ const DONE = new Set(["complete"]);
 // page is mostly watched for progress. Then whatever needs a human, most
 // urgent first. `unknown` sits next to running because it usually IS running:
 // the server just couldn't read the process table to prove it.
-const RANK = { running: 0, unknown: 1, needs_input: 2, crashed: 3, failed: 4, blocked: 4, interrupted: 5,
+const RANK = { running: 0, unknown: 1, needs_input: 2, crashed: 3, failed: 4, blocked: 4, interrupted: 5, limited: 5,
                stopped: 6, paused: 7, awaiting_merge: 7, in_progress: 7, pending: 8, complete: 9 };
-const LABEL = { needs_input: "needs input", awaiting_merge: "awaiting merge", in_progress: "in progress" };
+const LABEL = { needs_input: "needs input", awaiting_merge: "awaiting merge", in_progress: "in progress", limited: "usage limit" };
 const BUCKET = s => s === "running" ? "running"
   : s === "needs_input" ? "needs you"
   : s === "complete" ? "complete"

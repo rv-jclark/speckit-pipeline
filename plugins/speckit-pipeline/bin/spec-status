@@ -88,7 +88,7 @@ print_token_profile "$STATE"
 
 # What to do next, derived from the recorded statuses rather than announced.
 say ""
-blocked=$(jq -r '[.phases | to_entries[] | select(.value.status=="needs_input" or .value.status=="failed")]
+blocked=$(jq -r '[.phases | to_entries[] | select(.value.status=="needs_input" or .value.status=="failed" or .value.status=="limited")]
                  | if length==0 then "" else .[0].key + "\t" + .[0].value.status + "\t"
                      + (.[0].value.note // "") + "\t" + (.[0].value.session_id // "") end' "$STATE")
 if [ -n "$blocked" ]; then
@@ -96,6 +96,7 @@ if [ -n "$blocked" ]; then
   case "$bstatus" in
     needs_input) warn "$bphase needs input: $bnote";;
     failed)      err  "$bphase failed: $bnote";;
+    limited)     warn "$bphase paused by the usage limit: $bnote";;
   esac
   say ""
   [ -n "$bsid" ] && say "  pick that phase up in conversation:  claude --resume $bsid"

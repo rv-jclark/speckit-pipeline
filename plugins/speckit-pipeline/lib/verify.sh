@@ -51,8 +51,38 @@ _tasks_blocked() { # count unchecked tasks the SPEC marks as not-ours-to-do
   # marker has to be explicit and at the front — a task that merely mentions the
   # word, or a ticked one, must not qualify, or the count becomes a place to hide
   # unfinished work.
-  c=$(grep -cE '^[[:space:]]*-[[:space:]]*\[[[:space:]]\][[:space:]]*(T[0-9]+[[:space:]]+)?(\[[A-Z0-9]+\][[:space:]]*)*🛑[[:space:]]*BLOCKED' \
-      "$f" 2>/dev/null) || c=0
+  #
+  # 🛑 …and a marker that has gone STALE does not count (#17). A pass marks
+  # tasks BLOCKED on a prerequisite ("needs T001: the registry is unreachable").
+  # Once that prerequisite task is ticked, the marker is no longer true, but it
+  # still read as owed: the remainder counted as zero open work, no implement
+  # pass ran to notice, and review reported 53 tasks undelivered. A blocked task
+  # whose reason names other task IDs, ALL of them now ticked, is open work
+  # again. A reason that names no task (a real device, a human eye) can't go
+  # stale this way, and stays owed.
+  c=$(awk '
+    { lines[NR] = $0 }
+    /^[[:space:]]*[-*][[:space:]]+\[[xX]\]/ {
+      if (match($0, /T[0-9]+/)) done[substr($0, RSTART, RLENGTH)] = 1
+    }
+    END {
+      n = 0
+      for (i = 1; i <= NR; i++) {
+        l = lines[i]
+        if (l !~ /^[[:space:]]*-[[:space:]]*\[[[:space:]]\][[:space:]]*(T[0-9]+[[:space:]]+)?(\[[A-Z0-9]+\][[:space:]]*)*🛑[[:space:]]*BLOCKED/) continue
+        own = ""; if (match(l, /T[0-9]+/)) own = substr(l, RSTART, RLENGTH)
+        why = l; sub(/^.*BLOCKED/, "", why)
+        named = 0; open_dep = 0
+        while (match(why, /T[0-9]+/)) {
+          id = substr(why, RSTART, RLENGTH); why = substr(why, RSTART + RLENGTH)
+          if (id == own) continue
+          named++; if (!(id in done)) open_dep = 1
+        }
+        if (named > 0 && !open_dep) continue   # stale: every task it waits on is done
+        n++
+      }
+      print n
+    }' "$f" 2>/dev/null) || c=0
   printf '%s\n' "${c:-0}"
 }
 
@@ -334,6 +364,60 @@ scope_snapshot() { # scope_snapshot <root> <outfile> <prefix...>
 
 # Paths that are newly out-of-scope-dirty, or whose contents changed, since the
 # snapshot. A path present in the snapshot and unchanged is somebody else's.
+# _phase_transcript <session_id> — the phase's own Claude Code transcript, if it
+# is on disk. A custom runner may keep transcripts elsewhere, or none; callers
+# treat "not found" as "no evidence either way".
+_phase_transcript() {
+  local base="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects" f
+  [ -n "${1:-}" ] || return 1
+  for f in "$base"/*/"$1".jsonl; do
+    [ -f "$f" ] && { printf '%s\n' "$f"; return 0; }
+  done
+  return 1
+}
+
+# scope_attribute <transcript> <root> — reads out-of-scope paths on stdin and
+# prints each as "own<TAB>path" or "foreign<TAB>path" (#16).
+#
+# The scope check compares the tree before and after a phase, so a change made
+# by ANYONE while the phase ran counted against it. Measured: a clean review
+# (0 findings) was failed for Dockerfile and docs/decisions.md, both edited by
+# the supervising session mid-phase, and the entry had to be reviewed again.
+#
+# A path is the phase's own if its transcript shows a way it could have
+# written it: a Write/Edit/MultiEdit/NotebookEdit naming it, or a Bash command
+# naming it. When the phase did anything this cannot see through (a broad git
+# command, a package install, a formatter, an in-place edit, a subagent), EVERY
+# path is its own. Precision is given up whenever attribution would be a guess,
+# because a false "foreign" lets a real scope breach through.
+scope_attribute() {
+  local tx="$1" root="$2" calls path base
+  calls=$(jq -r 'select(.type == "assistant") | .message.content[]? | select(.type == "tool_use")
+           | if (.name | test("^(Write|Edit|MultiEdit|NotebookEdit)$")) then
+               "W\t" + (.input.file_path // .input.notebook_path // "")
+             elif .name == "Bash" then "B\t" + ((.input.command // "") | gsub("\n"; " "))
+             elif (.name | test("^(Task|Agent)$")) then "X\tsubagent"
+             else empty end' "$tx" 2>/dev/null) || calls=""
+  if printf '%s\n' "$calls" | grep -qE '^X	' || \
+     printf '%s\n' "$calls" | grep '^B	' | grep -qE \
+       'git[[:space:]]+(add|commit|checkout|switch|reset|stash|merge|rebase|pull|cherry-pick|restore|apply|am|mv|rm)([[:space:]]|$)|(^|[[:space:];&|(])(npm|pnpm|yarn|bun|npx|pip3?|uv|poetry|cargo|go|bundle|composer|make|prettier|eslint|black|ruff|gofmt)([[:space:]]|$)|sed[[:space:]]+(-[a-zA-Z]*i|--in-place)|perl[[:space:]]+-[a-zA-Z]*i|(^|[[:space:];&|(])(mv|cp|rsync|tee|touch|patch|tar|unzip|find)([[:space:]]|$)'; then
+    while IFS= read -r path; do [ -n "$path" ] && printf 'own\t%s\n' "$path"; done
+    return 0
+  fi
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    base=$(basename "$path")
+    if printf '%s\n' "$calls" | awk -F'\t' -v full="$root/$path" -v rel="$path" -v b="$base" '
+         ($1 == "W" && ($2 == full || $2 == rel || substr($2, length($2) - length(rel)) == "/" rel)) ||
+         ($1 == "B" && index($2, b) > 0) { found = 1 }
+         END { exit !found }'; then
+      printf 'own\t%s\n' "$path"
+    else
+      printf 'foreign\t%s\n' "$path"
+    fi
+  done
+}
+
 scope_violations_since() { # scope_violations_since <root> <snapshot> <prefix...>
   local root="$1" snap="$2"; shift 2
   local path before after

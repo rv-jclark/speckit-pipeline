@@ -142,6 +142,13 @@ b4=$(grep -nE '(^|[^[:alnum:]_])(mapfile|readarray)([^[:alnum:]_]|$)|declare -A|
        "$SPEC_RUN" "$SPEC_BOOTSTRAP" "$PKG/lib/common.sh" "$PKG/lib/verify.sh" \
        "$ROOT/bin/spec-run" "$ROOT/bin/spec-bootstrap" 2>/dev/null | grep -v '^\s*#' || true)
 assert_eq "$b4" "" "no bash-4-only construct in the shipped scripts (macOS ships 3.2)"
+# A bare `mktemp` ignores TMPDIR on macOS and is denied by Claude Code's sandbox,
+# which stopped plan phases (#20). That includes the VENDORED spec-kit scripts:
+# the phases run them, and a refresh from upstream brings bare calls back.
+# Mutation: revert one of the patched calls, and this lists it.
+bare_mktemp=$(grep -rnE 'mktemp([[:space:]]+-[a-z]+)*[[:space:]]*(\)|;|\||$)' \
+                "$PKG/assets/specify" "$PKG/lib" "$PKG/bin" 2>/dev/null | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' || true)
+assert_eq "$bare_mktemp" "" "no bare mktemp anywhere a phase runs it, vendored scripts included"
 t_note "running under bash ${BASH_VERSION}"
 
 # The suite must not reach a real claude. If this fails, an assertion somewhere
@@ -539,6 +546,28 @@ assert_contains "$m" "marked BLOCKED" "while still reporting how many were marke
 IFS=$'\t' read -r v m < <(verify_phase implement "$BLK" tasks.md)
 assert_eq "$v" "needs_input" "a ticked marker and a passing mention both fail to qualify"
 
+# A marker on a prerequisite that has since been done is STALE, and stale
+# markers are open work, not owed work (#17). Measured: 53 tasks "blocked on
+# T001", T001 ticked once dependencies were installed, and no implement pass
+# ever ran again, because the remainder still read as all-owed.
+{
+  echo '# Tasks: stale-marker fixture'
+  echo
+  echo '## Phase 1'
+  _blk_pad '- [X] T001 install dependencies'
+  _blk_pad '- [ ] T002 🛑 BLOCKED: needs T001 — the registry was unreachable'
+  _blk_pad '- [ ] T003 [US1] 🛑 BLOCKED: needs a real device to confirm the drag handle'
+  _blk_pad '- [ ] T004 🛑 BLOCKED: waits on T001 and T009'
+  _blk_pad '- [ ] T009 build the thing T004 waits for'
+} > "$BLK/tasks.md"
+# Mutation: drop the staleness rule, and this is 3.
+assert_eq "$(_tasks_blocked "$BLK")" "2" \
+  "a marker whose named prerequisites are all ticked no longer counts as owed"
+IFS=$'\t' read -r v m < <(verify_phase implement "$BLK" tasks.md)
+assert_eq "$v" "needs_input" "so the remainder is open work, and implement runs again"
+assert_contains "$(cat "$SPEC_RUN")" "RE-CHECK IT FIRST" \
+  "and every implement pass is told to re-check markers before it starts"
+
 printf -- '- [ ] T001 first\n- [ ] T002 second\n- [x] T003 done\n' >> "$FD/tasks.md"
 res=$(verify_phase tasks "$FD" tasks.md)
 assert_eq "$(cut -f1 <<<"$res")" "ok" "a tasks.md with checkboxes passes"
@@ -653,6 +682,34 @@ rm "$SR/.claude/skills/speckit-specify/SKILL.md"
 v=$(scope_violations_since "$SR" "$SNAP" "${SCOPE[@]}")
 assert_contains "$v" ".claude/skills/speckit-specify/SKILL.md" \
   "a DELETED out-of-scope file is caught even though it left the dirty list"
+
+# ---------------------------------------- whose write was it? (#16)
+printf '\nscope attribution\n'
+SA="$WORK/scope-attr"; mkdir -p "$SA"
+tx() { # tx <file> <tool_use json>... — a minimal transcript of assistant tool calls
+  local f="$1"; shift; : > "$f"
+  for u in "$@"; do printf '{"type":"assistant","message":{"content":[%s]}}\n' "$u" >> "$f"; done
+}
+tx "$SA/write.jsonl" '{"type":"tool_use","name":"Write","input":{"file_path":"/r/Dockerfile"}}'
+assert_eq "$(printf 'Dockerfile\n' | scope_attribute "$SA/write.jsonl" /r)" "own	Dockerfile" \
+  "a path the phase wrote with Write is its own"
+tx "$SA/none.jsonl" '{"type":"tool_use","name":"Read","input":{"file_path":"/r/Dockerfile"}}' \
+                    '{"type":"tool_use","name":"Bash","input":{"command":"grep -rn TODO src"}}'
+# Mutation: return "own" for everything, and this is own.
+assert_eq "$(printf 'Dockerfile\ndocs/decisions.md\n' | scope_attribute "$SA/none.jsonl" /r | cut -f1 | sort -u)" "foreign" \
+  "paths no tool call of the phase touched were changed by someone else"
+tx "$SA/redirect.jsonl" '{"type":"tool_use","name":"Bash","input":{"command":"echo x > docs/decisions.md"}}'
+assert_eq "$(printf 'docs/decisions.md\n' | scope_attribute "$SA/redirect.jsonl" /r)" "own	docs/decisions.md" \
+  "a shell command naming the path makes it the phase's own"
+tx "$SA/broad.jsonl" '{"type":"tool_use","name":"Bash","input":{"command":"git add -A && git commit -m wip"}}'
+# Mutation: drop the broad-command rule, and this is foreign.
+assert_eq "$(printf 'Dockerfile\n' | scope_attribute "$SA/broad.jsonl" /r)" "own	Dockerfile" \
+  "after a broad git command nothing is attributed elsewhere — that would be a guess"
+tx "$SA/agent.jsonl" '{"type":"tool_use","name":"Task","input":{"prompt":"fix it"}}'
+assert_eq "$(printf 'Dockerfile\n' | scope_attribute "$SA/agent.jsonl" /r)" "own	Dockerfile" \
+  "nor after a subagent, whose writes are in a transcript of its own"
+_tx_rc=0; ( export CLAUDE_CONFIG_DIR="$SA/no-config"; _phase_transcript 00000000-dead-beef ) >/dev/null || _tx_rc=$?
+assert_eq "$_tx_rc" "1" "a phase with no transcript on disk has no evidence, so the strict rule stands"
 
 # =============================================================== preflight ====
 printf '\npreflight\n'
@@ -3198,6 +3255,61 @@ assert_eq "$(jq -r '.entries.one.status' "$NB/.specify/roadmaps/rm.state.json")"
 # Mutation: drop the entry_has_own_branch check and this reports awaiting_merge,
 # which is the tidy lie — a gate with nothing to gate.
 
+# …but a RESUMED entry, already on the branch it recorded as its own, does have
+# one (#13). That is where the printed advice leaves you: `spec-run --resume`
+# stays on the feature branch, so the next `spec-roadmap run` starts on it, and
+# "differs from where we started" fails for the entry's genuine branch.
+# Mutation: drop the resume exemption, and this reads blocked.
+RB="$WORK/resumed-branch"; mkbare "$RB" main
+"$SPEC_BOOTSTRAP" "$RB" >/dev/null 2>&1
+git -C "$RB" add -A >/dev/null 2>&1; git -C "$RB" commit -qm bootstrap
+mkdir -p "$RB/.specify/roadmaps"
+printf '{"goal":"g","base":"main","entries":[{"slug":"one","title":"first","description":"do one"}]}\n' \
+  > "$RB/.specify/roadmaps/rm.json"
+git -C "$RB" add -A >/dev/null 2>&1; git -C "$RB" commit -qm roadmap
+git -C "$RB" checkout -q -b 001-nobranch; mkdir -p "$RB/specs/001-nobranch"
+printf '%s\n' '{"version":1,"slug":"rm","entries":{"one":{"status":"in_progress","feature_dir":"specs/001-nobranch","branch":"001-nobranch"}}}' \
+  > "$RB/.specify/roadmaps/rm.state.json"
+out=$(SPEC_RUN_CLAUDE_BIN=claude-nobranch "$SPEC_ROADMAP" run --repo "$RB" --slug rm --base main --no-auto-merge 2>&1); rc=$?
+assert_not_contains "$out" "no branch of its own" \
+  "a resumed entry on the branch it recorded as its own is not called branchless"
+assert_eq "$(jq -r '.entries.one.status' "$RB/.specify/roadmaps/rm.state.json")" "awaiting_merge" \
+  "and it reaches the merge gate"
+
+# --- the Claude usage limit is a pause, not a failure (#15)
+# A phase cut off by the limit ends with is_error and exit 1, which read as
+# "the runner reported failure (success)" and marked the entry blocked.
+cat > "$FAKE/claude-limit" <<'FAKEEOF'
+#!/usr/bin/env bash
+[ "${1:-}" = "--help" ] && exit 0
+prompt=""; for a in "$@"; do case "$a" in /speckit-*) prompt="$a";; esac; done
+case "$prompt" in
+  /speckit-plan*)
+    echo '{"is_error":true,"subtype":"success","total_cost_usd":0.75,"num_turns":21,"duration_ms":10,"result":"You'"'"'ve hit your session limit · resets 1:40pm (America/New_York)"}'
+    exit 1;;
+esac
+exec claude-pipeline "$@"
+FAKEEOF
+chmod +x "$FAKE/claude-limit"
+UL="$WORK/usage-limit"; mkbare "$UL" main
+"$SPEC_BOOTSTRAP" "$UL" >/dev/null 2>&1
+git -C "$UL" add -A >/dev/null 2>&1; git -C "$UL" commit -qm bootstrap
+mkdir -p "$UL/.specify/roadmaps"
+printf '{"goal":"g","base":"main","entries":[{"slug":"one","title":"first","description":"do one"}]}\n' \
+  > "$UL/.specify/roadmaps/rm.json"
+git -C "$UL" add -A >/dev/null 2>&1; git -C "$UL" commit -qm roadmap
+out=$(SPEC_RUN_CLAUDE_BIN=claude-limit "$SPEC_ROADMAP" run --repo "$UL" --slug rm --base main --no-auto-merge 2>&1); rc=$?
+ULST="$UL/.specify/roadmaps/rm.state.json"
+assert_eq "$rc" "2" "a phase stopped by the usage limit pauses the roadmap (exit 2), it does not fail it"
+assert_contains "$out" "resets 1:40pm" "saying when the limit resets"
+assert_not_contains "$out" "failure (success)" "without the self-contradicting 'failure (success)'"
+# Mutation: drop the limited branch in spec-run, and this reads blocked.
+assert_eq "$(jq -r '.entries.one.status' "$ULST")" "in_progress" "the entry stays resumable, not blocked"
+ul_dir=$(jq -r '.entries.one.feature_dir' "$ULST")
+assert_eq "$(jq -r '.phases.plan.status' "$UL/$ul_dir/.pipeline/state.json")" "limited" "and the phase is recorded as limited"
+out=$(SPEC_RUN_CLAUDE_BIN=claude-pipeline "$SPEC_ROADMAP" run --repo "$UL" --slug rm --base main --no-auto-merge 2>&1); rc=$?
+assert_eq "$(jq -r '.entries.one.status' "$ULST")" "awaiting_merge" "and once the limit resets, spec-roadmap run finishes it"
+
 # ------------------------------------------- roadmap: inside a git worktree ----
 printf '\nroadmap: a base checked out in another worktree\n'
 # A branch can only be checked out in ONE worktree, and running several at once is
@@ -3737,6 +3849,16 @@ case "$1 $2" in
     echo "https://github.com/o/r/pull/$n";;
   "pr checks")
     cat "${GH_FAKE_CHECKS:-/dev/null}" 2>/dev/null || echo '[]';;
+  "pr view")
+    # Mergeability, only when a test sets it; otherwise unreadable, as on a
+    # gh too old for the fields.
+    [ -n "${GH_FAKE_MERGEABLE:-}" ] && { echo "$GH_FAKE_MERGEABLE"; exit 0; }
+    exit 1;;
+  "api "*)
+    # Branch rules, only when a test supplies them; otherwise the call fails,
+    # which is what a repository with no readable rulesets looks like.
+    case "$2" in */rules/branches/*) [ -n "${GH_FAKE_RULES:-}" ] && { cat "$GH_FAKE_RULES"; exit 0; };; esac
+    exit 1;;
   "pr merge")
     n="$3"
     [ -n "${GH_FAKE_MERGE_FAIL:-}" ] && { echo "GraphQL: Pull request is not mergeable: review required" >&2; exit 1; }
@@ -3835,6 +3957,42 @@ assert_contains "$out" "review required" "reporting gh's own reason"
 assert_eq "$(grep -E '^[^#]*gh pr merge' "$PKG/lib/roadmap.sh" | grep -c -- '--admin' || true)" "0" \
   "and the runner never reaches for --admin"
 
+# --- a PR that conflicts with the base says so (#19)
+# GitHub runs no checks on a conflicted PR, so this used to read "has no CI
+# checks, so CI green cannot be established", which hid the real cause.
+am_fixture am-conflict
+out=$(GH_FAKE_MERGEABLE="CONFLICTING DIRTY" GH_FAKE_CHECKS=/dev/null SPEC_RUN_CLAUDE_BIN=claude-pipeline \
+      "$SPEC_ROADMAP" run --repo "$AM" --slug rm --base origin/main 2>&1); rc=$?
+# Mutation: drop the mergeability check, and this reads "no CI checks".
+assert_contains "$out" "conflicts with main" "a conflicted pull request is reported as a conflict"
+assert_not_contains "$out" "has no CI checks" "not as missing CI"
+assert_eq "$([ -f "$GH_FAKE_STATE/merges" ] && echo merged || echo held)" "held" "and nothing is merged"
+
+# --- an entry added to the roadmap file mid-run is run too (#18)
+# The count used to be read once at the start, so entries split or added while
+# the run was going were silently left for another `spec-roadmap run`.
+cat > "$FAKE/claude-grow" <<'FAKEEOF'
+#!/usr/bin/env bash
+[ "${1:-}" = "--help" ] && exit 0
+root=$(git rev-parse --show-toplevel 2>/dev/null); rm_file="$root/.specify/roadmaps/rm.json"
+case "$*" in *speckit-specify*)
+  if [ ! -f "$root/.grew" ]; then
+    : > "$root/.grew"
+    jq '.entries += [{"slug":"three","title":"third","description":"do three"}]' "$rm_file" > "$rm_file.tmp" && mv "$rm_file.tmp" "$rm_file"
+  fi;;
+esac
+exec claude-pipeline "$@"
+FAKEEOF
+chmod +x "$FAKE/claude-grow"
+am_fixture am-grow
+printf '.grew\n' >> "$AM/.git/info/exclude"
+out=$(GH_FAKE_CHECKS="$GREEN" SPEC_RUN_CLAUDE_BIN=claude-grow \
+      "$SPEC_ROADMAP" run --repo "$AM" --slug rm --base origin/main 2>&1); rc=$?
+assert_contains "$out" "roadmap file changed during this run" "a roadmap file edited mid-run is noticed"
+# Mutation: read the count once again, and three stays pending.
+assert_eq "$(jq -r '[.entries.one.status, .entries.two.status, .entries.three.status] | join("/")' "$AM/.specify/roadmaps/rm.state.json")" \
+  "done/done/done" "and the entry added mid-run is run, not left for another invocation"
+
 # --- switched off, per run or per roadmap: nothing is pushed
 am_fixture am-off
 out=$(GH_FAKE_CHECKS="$GREEN" SPEC_RUN_CLAUDE_BIN=claude-pipeline \
@@ -3848,6 +4006,32 @@ out=$(GH_FAKE_CHECKS="$GREEN" SPEC_RUN_CLAUDE_BIN=claude-pipeline \
       "$SPEC_ROADMAP" run --repo "$AM" --slug rm --base origin/main 2>&1); rc=$?
 assert_eq "$rc" "2" "\"auto_merge\": false in the roadmap file is honoured, not read as the default"
 assert_contains "$out" "auto-merge off" "and the run says which way it went"
+
+# --- the merge method: repo flags AND branch rules, or what the roadmap names (#14)
+RULES="$WORK/rules-merge-only.json"
+echo '[{"type":"pull_request","parameters":{"allowed_merge_methods":["merge"]}}]' > "$RULES"
+I3='{"squashMergeAllowed":true,"mergeCommitAllowed":true,"rebaseMergeAllowed":true}'
+assert_eq "$(_am_pick_method "$I3" '[]')" "squash" "with no branch rules, squash is preferred"
+# Mutation: ignore the rules argument, and this is squash.
+assert_eq "$(_am_pick_method "$I3" "$(cat "$RULES")")" "merge" "a ruleset allowing only merge narrows it to merge"
+assert_eq "$(_am_pick_method "$I3" '[{"type":"pull_request","parameters":{"allowed_merge_methods":["merge","rebase"]}},{"type":"pull_request","parameters":{"allowed_merge_methods":["rebase"]}}]')" \
+  "rebase" "stacked rulesets each narrow the set"
+assert_eq "$(_am_pick_method "$I3" "$(cat "$RULES")" rebase)" "" "and a method the rules forbid is never picked, even if asked for"
+am_fixture am-ruleset
+out=$(GH_FAKE_RULES="$RULES" GH_FAKE_CHECKS="$GREEN" SPEC_RUN_CLAUDE_BIN=claude-pipeline \
+      "$SPEC_ROADMAP" run --repo "$AM" --slug rm --base origin/main 2>&1); rc=$?
+assert_eq "$rc" "0" "a merge-only ruleset does not stop the roadmap at the gate"
+assert_eq "$(grep -c -- '--merge' "$GH_FAKE_STATE/merges") $(grep -c -- '--squash' "$GH_FAKE_STATE/merges")" "2 0" \
+  "because every entry is merged with --merge, not --squash"
+am_fixture am-method-file
+jq '. + {merge_method:"rebase"}' "$AM/.specify/roadmaps/rm.json" > "$WORK/rm.tmp" && mv "$WORK/rm.tmp" "$AM/.specify/roadmaps/rm.json"
+out=$(GH_FAKE_CHECKS="$GREEN" SPEC_RUN_CLAUDE_BIN=claude-pipeline \
+      "$SPEC_ROADMAP" run --repo "$AM" --slug rm --base origin/main 2>&1); rc=$?
+assert_contains "$out" 'merge_method "rebase"' "a merge_method the repository does not allow is declined, by name"
+am_fixture am-method-bad
+jq '. + {merge_method:"fast-forward"}' "$AM/.specify/roadmaps/rm.json" > "$WORK/rm.tmp" && mv "$WORK/rm.tmp" "$AM/.specify/roadmaps/rm.json"
+out=$("$SPEC_ROADMAP" run --repo "$AM" --slug rm --base origin/main 2>&1); rc=$?
+assert_eq "$rc" "1" "an unknown merge_method is refused before anything runs"
 
 # --- the review condition, directly: nothing leaves the machine without it
 am_fixture am-unit

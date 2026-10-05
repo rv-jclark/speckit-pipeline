@@ -242,6 +242,15 @@ valid_effort() {
 # so a run that starts is recorded BEFORE it can fail: an absent record and a
 # failed record must never collapse into one state.
 
+# usage_limit_message <text>... — the Claude usage-limit line, if any text holds
+# one, e.g. "You've hit your session limit · resets 1:40pm (America/New_York)".
+# Prints nothing otherwise. A phase stopped by the limit is not a failure of
+# the work (#15): it is resumable, and the reset time is when to resume.
+usage_limit_message() {
+  printf '%s\n' "$@" | grep -iE "hit your (session|usage|weekly|daily|5-hour|five-hour)[^.]* limit|usage limit (reached|exceeded)|limit (reached|exceeded)[^.]*resets" \
+    | head -1 | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | cut -c1-200
+}
+
 state_init() { # state_init <state_file> <feature_dir> <branch> <description>
   local f="$1" tmp
   mkdir -p "$(dirname "$f")"

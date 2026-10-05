@@ -324,6 +324,11 @@ It stops for one of three reasons, and says which:
 | `needs_input` | the artifact exists but records an open question | answer it, then `spec-run --resume` |
 | `failed` | the artifact is absent, thin, or the phase did not complete | read the reason; fix the cause before retrying |
 | `gate:` | a configured pause (`clarify`, or `--stop-after`) | review the artifact, then `spec-run --resume` |
+| `limited` | the Claude usage limit cut the phase off; the work is not at fault | wait for the reset time it prints, then `spec-run --resume` (or `spec-roadmap run`) |
+
+A usage-limit stop exits 2, like a gate, not 1. A roadmap keeps the entry
+`in_progress`, so `spec-roadmap run` picks it up after the reset. It used to be
+recorded as `failed`, which stopped the roadmap and marked the entry blocked.
 
 In the first two cases it prints the phase's own account and two commands:
 
@@ -731,6 +736,19 @@ conditions: the failure this tool was built against (an agent told in prose to
 stop merged two pull requests and deployed them). So the conditions are code,
 and the phases still have no merge of their own.
 
+**The merge method** is the first of squash, merge and rebase that BOTH the
+repository settings and the base branch's rulesets allow. A ruleset can narrow
+what the repository settings permit, and picking from the repository flags
+alone sent `--squash` to a branch whose ruleset allowed only merge commits. To
+choose the method yourself, for example to keep conventional-commit history for
+semantic-release, set `"merge_method": "merge"` (or `"squash"`, `"rebase"`) in
+the roadmap file. A method the repository or its rules forbid is declined by
+name, before anything is pushed.
+
+**A pull request that conflicts with the base is declined as a conflict:** merge
+the base in, push, and re-run. GitHub runs no checks on a conflicted PR, so this
+used to be reported as "no CI checks", which hid the cause.
+
 **To keep every merge yours:** `spec-roadmap run --no-auto-merge`, or
 `"auto_merge": false` in the roadmap file so it survives every run. Merging is
 then yours as before; the runner stops at each entry with manual instructions.
@@ -807,6 +825,9 @@ done its part and the next move is a human's.
   again would make spec-kit cut a *second* branch for the same entry — two specs,
   one state slot that can only point at one of them. Reached by a Ctrl-C, a
   rolling restart, a deleted state file, or a laptop lid.
+- **The roadmap file is re-read before every entry,** so entries added or split
+  while a run is going are run in the same invocation, and the run says the file
+  changed.
 - **A failing entry stops the roadmap.** Continuing would build the next entry
   against a base that does not contain this one's work — a spec written on a
   false premise, which is the whole failure this gate exists to prevent.
@@ -1117,6 +1138,14 @@ box must be left unchecked. A task that merely *mentions* the word does not
 qualify, deliberately — otherwise the marker becomes a place to hide unfinished
 work.
 
+**A marker can go stale.** A pass marks tasks blocked on a prerequisite (`🛑
+BLOCKED: needs T001`). Once every task its reason names is ticked, the marker no
+longer counts as owed. The task is open work again, so implement runs on it, and
+every implement pass is told to re-check each marker's reason before it starts.
+Without this, 53 tasks "blocked on T001" stayed blocked after T001 was done,
+because the remainder read as all-owed and no pass ran again. A reason that
+names no task, such as a real device or a human's eye, never goes stale this way.
+
 ⚠️ **This existed for a while as an unreachable mechanism.** `verify.sh` read the
 marker and nothing told any phase how to write one, so the only way to produce it
 was to read `verify.sh` — and a format undocumented to its own producers never
@@ -1145,6 +1174,15 @@ attributed correctly. (Both of those are corrections: the first version compared
 against clean, and on the first real run it blamed a phase for the 14 skill files
 `spec-bootstrap` had just installed and for the caller's own log file, failing a
 `specify` that had done everything right.)
+
+A change made **while** the phase ran is attributed from the phase's own
+transcript. An out-of-scope path counts against the phase if one of its tool
+calls could have written it: a Write or Edit naming it, a shell command naming
+it, or any command too broad to see through (`git add -A`, a package install, a
+formatter, a subagent). Otherwise it is reported as "changed outside this phase
+while it ran" and does not fail the phase. Without a transcript on disk, every
+change counts, as before. This exists because the supervising session's own
+commits once failed a clean review, which then had to run again.
 
 And a **completion check**. With `--output-format json`, a normal completion
 always returns a result envelope — so no envelope plus a non-zero exit means the
@@ -1370,7 +1408,7 @@ reports success over a directory the rest of the pipeline cannot find.
 ## Tests
 
 ```bash
-./tests/run.sh          # shellcheck + 690 fixture assertions
+./tests/run.sh          # shellcheck + 721 fixture assertions
 ```
 
 **The suite is hermetic.** A stub runner shadows the real `claude` for the whole
@@ -1493,7 +1531,7 @@ the one thing it exists to measure.
 ## Tests, and what they cost to run
 
 ```bash
-./tests/run.sh          # shellcheck + 690 assertions, ~3.5 minutes
+./tests/run.sh          # shellcheck + 721 assertions, ~3.5 minutes
 ```
 
 Hermetic: a stub runner shadows the real `claude` for the whole run, so nothing

@@ -376,6 +376,16 @@ BASE=$(jqd "$RM" '.base' "$BASE")
 # On unless switched off. Read with an explicit `== false`, not jqd: jq's `//`
 # treats false as missing, so `"auto_merge": false` would read as the default.
 AUTO_MERGE=$(jq -r 'if .auto_merge == false then "0" else "1" end' "$RM" 2>/dev/null) || AUTO_MERGE=1
+# "merge_method": "merge" | "squash" | "rebase" pins how an entry's PR is merged
+# (#14), for example to keep conventional-commit history for semantic-release
+# where squash is also allowed. Unset, the first method the repository and its
+# branch rules both allow is used.
+ROADMAP_MERGE_METHOD=$(jq -r '.merge_method // empty' "$RM" 2>/dev/null) || ROADMAP_MERGE_METHOD=""
+case "$ROADMAP_MERGE_METHOD" in
+  ""|merge|squash|rebase) ;;
+  *) die "merge_method in $RM is \"$ROADMAP_MERGE_METHOD\"" "use \"merge\", \"squash\" or \"rebase\", or remove it";;
+esac
+export ROADMAP_MERGE_METHOD
 [ -n "$AUTO_MERGE_FLAG" ] && AUTO_MERGE="$AUTO_MERGE_FLAG"
 roadmap_state_init "$ST" "${RM#"$REPO"/}" "$SLUG" "$BASE"
 
@@ -493,7 +503,17 @@ rc_final=0
 # the remaining entries to eat.
 n_entries=$(jq -r '.entries | length' "$RM")
 ei=0
-while [ "$ei" -lt "$n_entries" ]; do
+while :; do
+  # Re-read on every entry, not once at the start (#18). An entry split in two
+  # while the run was going (8 entries became 10) left the last two for another
+  # `spec-roadmap run`, and nothing said so. The roadmap file is authored by
+  # hand, mid-run edits included, so the loop reads what it says now.
+  n_now=$(jq -r '.entries | length' "$RM" 2>/dev/null) || n_now="$n_entries"
+  if [ "$n_now" != "$n_entries" ]; then
+    warn "the roadmap file changed during this run: $n_entries → $n_now entries; continuing with the file as it is now"
+    n_entries="$n_now"
+  fi
+  [ "$ei" -lt "$n_entries" ] || break
   # One jq call per field, deliberately, and NOT one `read` over a separated
   # line. Two hazards, and a single read cannot avoid both:
   #
@@ -882,6 +902,17 @@ while [ "$ei" -lt "$n_entries" ]; do
        [ "$newbranch" = "${BASE##*/}" ]; then
       entry_has_own_branch=0
     fi
+    # 🛑 …unless this is a resume, and we are on the branch the entry already
+    # recorded as its own (#13). The advice printed when an entry stops is
+    # `spec-run --resume`, then `spec-roadmap run`. The first leaves the repo ON
+    # the entry's feature branch, so head_before is that branch, the pipeline
+    # finishes on it, and "differs from where we started" fails for a branch
+    # that is genuinely the entry's own. Hit twice on one roadmap (docket), each
+    # fixed by hand-editing the state file to awaiting_merge.
+    if [ "$entry_has_own_branch" -eq 0 ] && [ -n "$resume_dir" ] && [ -n "$branch" ] && \
+       [ "$newbranch" = "$branch" ] && [ "$newbranch" != "${BASE##*/}" ]; then
+      entry_has_own_branch=1
+    fi
   fi
 
   case "$src" in
@@ -932,9 +963,22 @@ while [ "$ei" -lt "$n_entries" ]; do
             --arg c "$ecost" '{status:"in_progress", feature_dir:$d, branch:$b,
                                cost_usd:($c|tonumber? // null)}')"
        say ""
-       warn "$slug — the pipeline stopped and needs you (see above)"
-       say "  continue that entry: spec-run --resume"
-       say "  then the roadmap:    spec-roadmap run $SLUG"
+       limited=""
+       [ -n "$newdir" ] && limited=$(jq -r '[.phases | to_entries[] | select(.value.status == "limited") | .value.note][0] // empty' \
+                                       "$REPO/$newdir/.pipeline/state.json" 2>/dev/null)
+       if [ -n "$limited" ]; then
+         # The entry stays in_progress, and nothing needs fixing (#15).
+         # `spec-roadmap run` resumes it, so that is the one command to give.
+         warn "$slug — paused by the Claude usage limit, not by a problem with the work"
+         say "  ${limited#stopped by the Claude usage limit: }"
+         say "  once it resets: spec-roadmap run $SLUG"
+       else
+         warn "$slug — the pipeline stopped and needs you (see above)"
+         # Resume through the roadmap, not `spec-run --resume`: the roadmap
+         # resumes the entry's own feature, and finishing it there also runs the
+         # merge gate.
+         say "  deal with what it asked, then: spec-roadmap run $SLUG"
+       fi
        say ""
        exit 2;;
     *) roadmap_entry_set "$ST" "$slug" "$(jq -n --arg d "$newdir" --arg b "$newbranch" \

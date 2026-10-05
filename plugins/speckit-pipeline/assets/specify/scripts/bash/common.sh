@@ -420,7 +420,7 @@ _sorted_extension_ids() {
         local -a python_cmd
         read -r -a python_cmd <<< "$python_spec"
         local py_stderr sorted_ids
-        py_stderr=$(mktemp)
+        py_stderr=$(mktemp "${TMPDIR:-/tmp}/speckit.XXXXXX")
         if sorted_ids=$(SPECKIT_EXTENSIONS="$ext_dir" "${python_cmd[@]}" -c "
 import json, os, re, sys
 from pathlib import Path
@@ -689,7 +689,7 @@ except Exception:
                     local result
                     local py_stderr
                     local parse_status
-                    py_stderr=$(mktemp)
+                    py_stderr=$(mktemp "${TMPDIR:-/tmp}/speckit.XXXXXX")
                     if result=$(SPECKIT_MANIFEST="$manifest" SPECKIT_TMPL="$template_name" "${python_cmd[@]}" -c "
 import sys, os
 try:

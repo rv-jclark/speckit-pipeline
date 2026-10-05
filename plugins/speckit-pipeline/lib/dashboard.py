@@ -30,7 +30,7 @@ PHASES_JSON = os.path.join(ROOT, "lib", "phases.json")
 PAGE = os.path.join(ROOT, "assets", "dashboard", "index.html")
 
 # A phase in one of these states stopped without finishing, so someone has to act.
-BLOCKING = {"needs_input", "failed", "interrupted", "blocked"}
+BLOCKING = {"needs_input", "failed", "interrupted", "blocked", "limited"}
 # Statuses that count as a pass for the purpose of moving on. `unevaluated` is
 # not a pass (the README is explicit about that), but analyze records it as its
 # normal outcome, and treating it as a stop would flag every pipeline that ran
@@ -250,21 +250,34 @@ def task_counts(feature_dir):
     return _cached(os.path.join(feature_dir, "tasks.md"), _parse_tasks)
 
 
+_TID = re.compile(r"T[0-9]+")
+_CHECKED = re.compile(r"^[ \t]*[-*][ \t]+\[[xX]\]")
+
+
 def _parse_tasks(path):
     total = unchecked = blocked = 0
     try:
         if path is None:
             raise OSError
         with open(path, encoding="utf-8", errors="replace") as f:
-            for line in f:
-                if _ANY_BOX.match(line):
-                    total += 1
-                if _UNCHECKED.match(line):
-                    unchecked += 1
-                    if _BLOCKED.match(line):
-                        blocked += 1
+            lines = f.readlines()
     except OSError:
-        pass
+        lines = []
+    done = {m.group(0) for l in lines if _CHECKED.match(l) for m in [_TID.search(l)] if m}
+    for line in lines:
+        if _ANY_BOX.match(line):
+            total += 1
+        if _UNCHECKED.match(line):
+            unchecked += 1
+            if _BLOCKED.match(line):
+                # Same staleness rule as verify.sh's _tasks_blocked (#17): a
+                # marker whose reason names only tasks now ticked is open work.
+                own = _TID.search(line)
+                named = [t for t in _TID.findall(line.split("BLOCKED", 1)[1])
+                         if not own or t != own.group(0)]
+                if named and all(t in done for t in named):
+                    continue
+                blocked += 1
     return {"total": total, "done": total - unchecked, "open": unchecked - blocked,
             "blocked": blocked}
 
@@ -526,7 +539,7 @@ def commands_for_pipeline(p):
         resume = f"spec-roadmap run {_q(rm['slug'])}"
         restart = f"cd {_q(rm['checkout'])} && {resume}"
     cmds = []
-    if p["status"] in ("crashed", "interrupted", "failed", "needs_input", "paused"):
+    if p["status"] in ("crashed", "interrupted", "failed", "needs_input", "paused", "limited"):
         cmds.append({"label": "Copy restart", "text": restart})
 
     why = {
@@ -535,6 +548,7 @@ def commands_for_pipeline(p):
         "failed": f"its {p['at']} phase failed: {p['note']}" if p["note"] else f"its {p['at']} phase failed",
         "needs_input": f"its {p['at']} phase stopped to ask a question: {p['note']}",
         "paused": p["note"] if p["at"] else "no phase has run yet",
+        "limited": f"its {p['at']} phase was stopped by the Claude usage limit ({p['note']})",
     }.get(p["status"])
     prompt = None
     if why:

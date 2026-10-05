@@ -73,6 +73,22 @@ could not help. The suite now bootstraps a fresh repository and requires it to p
 preflight, and separately asserts that every command `extensions.yml` hooks has a
 vendored skill.
 
+## Local patches
+
+The vendored files are upstream's, with ONE deliberate change. Re-apply it after
+any refresh; `tests/run.sh` fails until you do.
+
+- **Every `mktemp` is rooted in `$TMPDIR`** (#20): `mktemp "${TMPDIR:-/tmp}/speckit.XXXXXX"`
+  rather than a bare `mktemp`, in `scripts/bash/common.sh` (two places) and
+  `extensions/agent-context/scripts/bash/update-agent-context.sh`. On macOS, bare
+  `mktemp` ignores `TMPDIR` and writes under `/var/folders/…/T`, which Claude
+  Code's sandbox denies. `setup-plan.sh` then failed inside the plan phase with
+  "mkstemp failed … Operation not permitted", and some plan phases stopped at
+  `needs_input`, stopping the roadmap. Claude Code points `TMPDIR` at a
+  sandbox-writable directory, so rooting the call there is enough.
+  `spec-upgrade` delivers the patch to existing projects: it compares every
+  scaffold file, not only the version number.
+
 ## Refreshing again
 
 ```bash

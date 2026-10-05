@@ -345,7 +345,7 @@ PY
 fi
 
 # Build the managed section
-TMP_SECTION="$(mktemp)"
+TMP_SECTION="$(mktemp "${TMPDIR:-/tmp}/speckit.XXXXXX")"
 trap 'rm -f "$TMP_SECTION"' EXIT
 {
   echo "$MARKER_START"

@@ -451,9 +451,27 @@ auto_merge_remote() {
 }
 
 # auto_merge_entry <repo> <base> <feature_dir_rel> <branch> <slug> <title>
+# _am_pick_method <repo-flags-json> <branch-rules-json> [preferred] — the merge
+# method to use, or nothing if none is allowed. Allowed means allowed by the
+# repository's own flags AND by every pull_request rule on the branch (rulesets
+# stack, so each one can only narrow the set). Squash first, then merge, then
+# rebase, unless the roadmap names one with "merge_method". Pure, so it is
+# testable without a network.
+_am_pick_method() {
+  jq -rn --argjson info "$1" --argjson rules "${2:-[]}" --arg want "${3:-}" '
+    ([ (if $info.squashMergeAllowed then "squash" else empty end),
+       (if $info.mergeCommitAllowed then "merge" else empty end),
+       (if $info.rebaseMergeAllowed then "rebase" else empty end) ]) as $repo
+    | ([ ($rules // [])[] | select(.type == "pull_request")
+         | .parameters.allowed_merge_methods // empty ]) as $sets
+    | (reduce $sets[] as $s ($repo; map(select(. as $m | $s | index($m))))) as $ok
+    | if $want != "" then (if ($ok | index($want)) then $want else "" end)
+      else ($ok[0] // "") end' 2>/dev/null
+}
+
 auto_merge_entry() {
   local repo="$1" base="$2" fdir="$3" branch="$4" slug="$5" title="$6"
-  local st review remote base_branch info method out n paths
+  local st review remote base_branch info rules method out n paths
   # shellcheck disable=SC2034 # read by bin/spec-roadmap
   AUTO_MERGE_WHY=""; AUTO_MERGE_PR=""
 
@@ -476,9 +494,23 @@ auto_merge_entry() {
   command -v gh >/dev/null 2>&1 || { _am_decline "the GitHub CLI (gh) is not installed"; return 2; }
   info=$(cd "$repo" && gh repo view --json squashMergeAllowed,mergeCommitAllowed,rebaseMergeAllowed 2>&1) || {
     _am_decline "gh cannot read this repository: $(printf '%s' "$info" | head -1)"; return 2; }
-  method=$(jq -r 'if .squashMergeAllowed then "squash" elif .mergeCommitAllowed then "merge"
-                  elif .rebaseMergeAllowed then "rebase" else "" end' <<<"$info" 2>/dev/null)
-  [ -n "$method" ] || { _am_decline "the repository allows no merge method gh can use"; return 2; }
+  # The branch's effective rules, because a ruleset can narrow what the repo
+  # flags allow (#14): rulesets allowing only `merge`, with "Allow squash" still
+  # ticked at repo level, made `gh pr merge --squash` refuse at the gate. An
+  # unreadable answer (no rulesets, no permission, an older GHES) is treated as
+  # "no further restriction". The repo flags still apply, and gh pr merge is the
+  # final word either way.
+  rules=$(cd "$repo" && gh api "repos/{owner}/{repo}/rules/branches/$base_branch" 2>/dev/null) || rules='[]'
+  jq -e 'type == "array"' <<<"$rules" >/dev/null 2>&1 || rules='[]'
+  method=$(_am_pick_method "$info" "$rules" "${ROADMAP_MERGE_METHOD:-}")
+  if [ -z "$method" ]; then
+    if [ -n "${ROADMAP_MERGE_METHOD:-}" ]; then
+      _am_decline "the roadmap asks for merge_method \"$ROADMAP_MERGE_METHOD\", which this repository or its $base_branch rules do not allow"
+    else
+      _am_decline "no merge method is allowed by both the repository settings and the $base_branch rules"
+    fi
+    return 2
+  fi
 
   # 3. Commit what the pipeline left uncommitted. Implement commits only
   #    sometimes, so without this nearly every entry would reach the push with
@@ -533,8 +565,21 @@ Merged automatically once every check is green (\`--no-auto-merge\` turns this o
   # 6. CI. Polled rather than `--watch`ed so "no checks at all" and "checks not
   #    registered yet" can be told apart: a fresh push often has none for a
   #    minute, and a repo without CI has none forever.
-  local waited=0 checks pending failed total
+  local waited=0 checks pending failed total mstate
   while :; do
+    # Conflicts first, on every poll (#19). GitHub runs no pull_request
+    # workflows on a PR that conflicts with its base, so a conflicted PR has no
+    # checks, and that was reported as "no CI checks, so CI green cannot be
+    # established". The fix is to merge the base in, which that message never
+    # said. Mergeability is computed in the background and reads UNKNOWN at
+    # first, hence every poll. An unreadable answer is not evidence either way.
+    mstate=$(cd "$repo" && gh pr view "$n" --json mergeable,mergeStateStatus \
+               --jq '.mergeable + " " + .mergeStateStatus' 2>/dev/null) || mstate=""
+    case "$mstate" in
+      CONFLICTING*|*DIRTY)
+        _am_decline "pull request #$n conflicts with $base_branch: merge $base_branch into $branch, resolve the conflicts, push, and re-run"
+        return 2;;
+    esac
     checks=$(cd "$repo" && gh pr checks "$n" --json name,bucket 2>/dev/null) || true
     total=$(jq -r 'length' <<<"${checks:-[]}" 2>/dev/null) || total=0
     if [ "${total:-0}" -eq 0 ]; then

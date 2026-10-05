@@ -29,6 +29,14 @@ and a full entry far longer than the foreground window, so it will be background
 anyway. Invoking this from a slash command does not change any of that — a skill
 is instructions, not an executor.
 
+While it runs, **do not edit, commit or check out anything in that working tree.**
+Each phase's write-scope check compares the tree before and after the phase. It
+discounts a change only when the phase's own transcript shows no way the phase
+could have made it. Any broad command the phase ran (`git add -A`, a package
+install, a subagent) makes every change count as the phase's. A clean review has
+already been failed this way and had to be run again (#16). If you need to make
+a change, wait for the phase to finish, or work in a separate worktree.
+
 So do these two things, in this order, every time:
 
 1. **Launch it in the background, logging to a path the user can follow.** Use

@@ -587,6 +587,16 @@ judgement, a real device, or anything else needing a human or a browser:
      so recording the truth does not stall the run. The marker must open the
      task text, after any `T0NN` and `[TAG]` prefixes.
 
+A 🛑 BLOCKED MARKER IS A CLAIM ABOUT THE PAST, SO RE-CHECK IT FIRST. Before
+starting this pass, read every task marked `🛑 BLOCKED` and test whether its
+reason still holds. A prerequisite installed since, a task it waited on now
+ticked, a file that now exists: then the marker is false. Remove the
+`🛑 BLOCKED: …` text, leave the task as an ordinary unchecked one, and do it.
+Measured (#17): dependencies were installed after a pass had marked 53 tasks
+"blocked on T001", and every later pass skipped all 53 because the markers were
+never re-read. Keep a marker only when its reason is still true today, such as
+a real device or a human's judgement.
+
 🛑 NEVER tick a task by deferring it to CI unless you have READ the CI config and
 confirmed it runs that exact check. Measured: a pass ticked three verification
 tasks "deferring full green confirmation to CI's fresh-DB run"; review checked
@@ -1177,9 +1187,26 @@ run_phase() { # run_phase <phase_json>
     case "$cli_subtype" in
       error_max_turns)
         note="the phase ran OUT OF TURNS after ${turns:-?} (raise max_turns for '$id' in phases.json)${artifact:+ — $artifact is likely unfinished}";;
+      success|"")
+        # is_error with subtype "success" read as "reported failure (success)",
+        # which contradicts itself (#15). It means the runner ended the session
+        # on an error after a normal-looking turn.
+        note="the runner ended the phase on an error${artifact:+ — $artifact is likely unfinished}";;
       *)
-        note="the runner reported failure (${cli_subtype:-unknown})${artifact:+ — $artifact is likely unfinished}";;
+        note="the runner reported failure ($cli_subtype)${artifact:+ — $artifact is likely unfinished}";;
     esac
+  fi
+
+  # The Claude usage limit, which ends a phase with is_error and exit 1. That is
+  # not the work failing: the phase is resumable once the limit resets. It was
+  # recorded as `failed`, which stopped the roadmap and marked the entry blocked
+  # (#15). `limited` stops this run as a gate does (exit 2), so spec-roadmap
+  # keeps the entry in_progress, and --resume re-runs the phase.
+  local limit_msg
+  limit_msg=$(usage_limit_message "$result" "$errcap")
+  if [ -n "$limit_msg" ]; then
+    status=limited
+    note="stopped by the Claude usage limit: $limit_msg — resume once it resets"
   fi
 
   # No parseable result AND an artifact that did not move: the phase did not run.
@@ -1219,9 +1246,25 @@ run_phase() { # run_phase <phase_json>
   if [ -n "$snap" ]; then
     violations=$(scope_violations_since "$REPO" "$snap" "${prefixes[@]}")
     rm -f "$snap"
+    # Split by the phase's own tool calls (#16), so a change someone else made
+    # while it ran is reported as that, not as this phase breaching its scope.
+    # No transcript means no evidence, and the strict rule stands.
+    local tx foreign=""
+    if [ -n "$violations" ] && tx=$(_phase_transcript "$sid"); then
+      local split
+      split=$(printf '%s\n' "$violations" | scope_attribute "$tx" "$REPO")
+      violations=$(printf '%s\n' "$split" | awk -F'\t' '$1 == "own" {print $2}')
+      foreign=$(printf '%s\n' "$split" | awk -F'\t' '$1 == "foreign" {print $2}')
+    fi
     if [ -n "$violations" ]; then
       status=failed
       note="wrote outside its declared scope (${prefixes[*]}): $(printf '%s' "$violations" | tr '\n' ' ')"
+    fi
+    if [ -n "$foreign" ]; then
+      warn "  changed outside this phase while it ran (no tool call of the phase touched them):"
+      printf '%s\n' "$foreign" | sed 's/^/      /'
+      say  "  not counted against $id. Don't edit the working tree while a phase runs."
+      note="$note; changed by something else while it ran: $(printf '%s' "$foreign" | tr '\n' ' ')"
     fi
   fi
 
@@ -1236,8 +1279,18 @@ run_phase() { # run_phase <phase_json>
     ok)          ok   "$id — $note  $(dim_s "($(fmt_cost "$cost"), ${turns:-?} turns)")";;
     unevaluated) warn "$id — $note  ($(fmt_cost "$cost"), ${turns:-?} turns)";;
     needs_input) warn "$id — $note  ($(fmt_cost "$cost"), ${turns:-?} turns)";;
+    limited)     warn "$id — $note  ($(fmt_cost "$cost"), ${turns:-?} turns)";;
     failed)      err  "$id — $note  ($(fmt_cost "$cost"), ${turns:-?} turns, exit $rc)";;
   esac
+
+  if [ "$status" = limited ]; then
+    printf '\n'
+    say "  nothing is wrong with the work; the account ran out of usage."
+    say "  once it resets, continue with:"
+    say "    spec-run --resume${FROM:+ --from $id}"
+    printf '\n'
+    return 2
+  fi
 
   if [ "$status" = failed ] || [ "$status" = needs_input ]; then
     printf '\n'
