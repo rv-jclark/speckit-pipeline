@@ -243,13 +243,32 @@ valid_effort() {
 # failed record must never collapse into one state.
 
 state_init() { # state_init <state_file> <feature_dir> <branch> <description>
-  local f="$1"
+  local f="$1" tmp
   mkdir -p "$(dirname "$f")"
-  [ -f "$f" ] && return 0
+  # 🛑 The roadmap entry that owns this pipeline, recorded by the PIPELINE at
+  # birth. spec-roadmap only writes an entry's feature_dir once spec-run
+  # returns, so for the whole of an entry's first run nothing on disk tied the
+  # running pipeline to its roadmap. Seen live: entry 6 of 7 read `in_progress`
+  # with feature_dir null for the whole run of 430-year-end-runway. spec-roadmap
+  # exports these two around its spec-run call; a run started by hand has
+  # neither, and records nothing.
+  if [ -f "$f" ]; then
+    # A resumed entry whose state predates this field gets it now. A pipeline
+    # that already names an owner keeps it; it is never re-pointed.
+    if [ -n "${SPEC_ROADMAP_SLUG:-}" ] && [ -n "${SPEC_ROADMAP_ENTRY:-}" ] && \
+       [ "$(jq -r '.roadmap.slug // empty' "$f" 2>/dev/null)" = "" ]; then
+      tmp=$(mktmp)
+      jq --arg s "$SPEC_ROADMAP_SLUG" --arg e "$SPEC_ROADMAP_ENTRY" \
+        '.roadmap = {slug:$s, entry:$e}' "$f" > "$tmp" && mv "$tmp" "$f"
+    fi
+    return 0
+  fi
   jq -n \
     --arg fd "$2" --arg br "$3" --arg desc "$4" --arg t "$(now_iso)" \
+    --arg rs "${SPEC_ROADMAP_SLUG:-}" --arg re "${SPEC_ROADMAP_ENTRY:-}" \
     '{version:1, feature_dir:$fd, branch:$br, description:$desc,
-      created_at:$t, phases:{}}' > "$f"
+      created_at:$t, phases:{}}
+     + (if $rs != "" and $re != "" then {roadmap:{slug:$rs, entry:$re}} else {} end)' > "$f"
 }
 
 state_phase_get() { # state_phase_get <state_file> <phase> <field> <default>

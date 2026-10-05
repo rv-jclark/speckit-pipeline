@@ -2121,6 +2121,20 @@ assert_eq "$(cat "$IB2/spec-run" 2>/dev/null)" "mine" "uninstall removes only th
 "$ROOT/install.sh" --uninstall --bin-dir "$IB" >/dev/null 2>&1
 assert_eq "$(ls "$IB" | wc -l | tr -d ' ')" "0" "and removes all of those"
 
+# =================================================================== state_init
+printf '\nstate_init: the owning roadmap entry\n'
+SI="$WORK/state-init"; mkdir -p "$SI"
+( unset SPEC_ROADMAP_SLUG SPEC_ROADMAP_ENTRY; state_init "$SI/a.json" /f b d )
+assert_eq "$(jq -c '.roadmap' "$SI/a.json")" "null" "a pipeline started by hand records no roadmap"
+( SPEC_ROADMAP_SLUG=rm SPEC_ROADMAP_ENTRY=one state_init "$SI/b.json" /f b d )
+assert_eq "$(jq -c '.roadmap' "$SI/b.json")" '{"slug":"rm","entry":"one"}' "one started by spec-roadmap records its entry"
+( SPEC_ROADMAP_SLUG=rm SPEC_ROADMAP_ENTRY=two state_init "$SI/a.json" /f b d )
+assert_eq "$(jq -c '.roadmap' "$SI/a.json")" '{"slug":"rm","entry":"two"}' \
+  "a resumed pipeline that predates the field gets it"
+# Mutation: drop the "already names an owner" check, and b is re-pointed.
+( SPEC_ROADMAP_SLUG=other SPEC_ROADMAP_ENTRY=x state_init "$SI/b.json" /f b d )
+assert_eq "$(jq -c '.roadmap' "$SI/b.json")" '{"slug":"rm","entry":"one"}' "but an owner once recorded is never re-pointed"
+
 # =================================================================== spec-dashboard
 printf '\nspec-dashboard\n'
 SPEC_DASHBOARD="$PKG/bin/spec-dashboard"
@@ -2172,6 +2186,13 @@ printf '%s\n' '{"version":1,"slug":"rm2","entries":{"x":{"status":"in_progress",
   > "$DROOT/proj/.specify/roadmaps/rm2.state.json"
 mkfeat "$DROOT/proj" 008-first-run \
   '{"version":1,"created_at":"2026-02-01T00:10:00Z","phases":{"plan":{"status":"ok","started_at":"2026-02-01T00:10:00Z"}}}' ''
+# Owners declared by the pipelines themselves (state_init). 011's entry is done,
+# merged after a review that stopped on findings nobody re-ran review on.
+mkfeat "$DROOT/proj" 010-declared \
+  '{"version":1,"roadmap":{"slug":"rm","entry":"three"},"phases":{"plan":{"status":"ok","started_at":"2026-01-02T00:00:00Z"}}}' ''
+mkfeat "$DROOT/proj" 011-landed \
+  '{"version":1,"roadmap":{"slug":"rm","entry":"one"},"phases":{"implement":{"status":"ok","started_at":"2026-01-02T00:00:00Z"},"review":{"status":"needs_input","note":"2 unresolved","started_at":"2026-01-03T00:00:00Z"}}}' \
+  '- [x] T001 a\n- [ ] T002 b\n'
 mkfeat "$DROOT/proj" 009-before \
   '{"version":1,"created_at":"2026-01-15T00:00:00Z","phases":{"plan":{"status":"ok","started_at":"2026-01-15T00:00:00Z"}}}' ''
 
@@ -2226,6 +2247,14 @@ if command -v python3 >/dev/null 2>&1; then
   # Mutation: drop the created_at >= started check, and 009 is picked instead.
   assert_eq "$(jq -r '.projects[].pipelines[] | select(.feature=="009-before") | .roadmap' "$DJ")" "null" \
     "but never to a pipeline that started before the entry did"
+  # Mutation: drop the declared-owner pass, and 010 shows no roadmap.
+  assert_eq "$(jq -r '.projects[].pipelines[] | select(.feature=="010-declared") | "\(.roadmap.slug)/\(.roadmap.entry) \(.roadmap.inferred)"' "$DJ")" \
+    "rm/three false" "a pipeline is tied to the roadmap entry it says owns it"
+  # Mutation: drop the landed override, and 011 reads needs_input at review.
+  assert_eq "$(jq -r '.projects[].pipelines[] | select(.feature=="011-landed") | .status' "$DJ")" "complete" \
+    "a pipeline whose roadmap entry is done is complete, whatever it last recorded"
+  assert_contains "$(jq -r '.projects[].pipelines[] | select(.feature=="011-landed") | .note' "$DJ")" \
+    "last record was review needs input" "keeping the old verdict in the note"
 else
   t_skip "spec-dashboard" "python3 not on PATH"
 fi
@@ -3091,6 +3120,9 @@ IRST="$IR/.specify/roadmaps/rm.state.json"
 assert_eq "$(jq -r '.entries.one.status' "$IRST")" "awaiting_merge" "and records it as awaiting_merge"
 first_dir=$(jq -r '.entries.one.feature_dir' "$IRST")
 assert_contains "$first_dir" "specs/001" "with the feature directory it created"
+# Mutation: drop the export around spec-run in spec-roadmap, and this is null.
+assert_eq "$(jq -c '.roadmap' "$IR/$first_dir/.pipeline/state.json")" '{"slug":"rm","entry":"one"}' \
+  "and the pipeline recorded which roadmap entry owns it"
 n_specs=$(ls -1d "$IR"/specs/[0-9][0-9][0-9]-* 2>/dev/null | wc -l | tr -d ' ')
 assert_eq "$n_specs" "1" "exactly one feature exists"
 

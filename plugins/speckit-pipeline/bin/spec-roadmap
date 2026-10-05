@@ -776,6 +776,11 @@ while [ "$ei" -lt "$n_entries" ]; do
   # between could legitimately change it.
   fjson_before=$(jq -r '.feature_directory // empty' "$REPO/.specify/feature.json" 2>/dev/null)
 
+  # Tell spec-run which entry it is running, so the pipeline records its owner
+  # in its own state.json the moment it is created (see state_init). Without
+  # this, a reader has nothing tying the two together until spec-run returns.
+  export SPEC_ROADMAP_SLUG="$SLUG" SPEC_ROADMAP_ENTRY="$slug"
+
   # NOT "${PASSTHROUGH[@]:-}": on bash 3.2 an empty array expands that way to a
   # single EMPTY argument, which spec-run then reads as part of the feature
   # description. It survives by luck today (an empty first positional collapses
@@ -793,6 +798,8 @@ while [ "$ei" -lt "$n_entries" ]; do
   else
     "$SPEC_RUN" --repo "$REPO" "$description"; src=$?
   fi
+
+  unset SPEC_ROADMAP_SLUG SPEC_ROADMAP_ENTRY
 
   # Learn where it landed, and what it cost, from the pipeline's own state.
   newdir=$(jq -r '.feature_directory // empty' "$REPO/.specify/feature.json" 2>/dev/null)

@@ -343,7 +343,8 @@ specs/NNN-my-feature/
 ├── spec.md, plan.md, tasks.md      the artifacts, written by the skills
 ├── research.md, data-model.md …    plan's supporting output
 └── .pipeline/
-    ├── state.json                  per-phase status, model, cost, tokens, session ids
+    ├── state.json                  per-phase status, model, cost, tokens, session ids,
+    │                               and the roadmap entry that owns it, if any
     ├── cost.log                    one tab-separated line per attempt
     ├── review.md                   review's findings, with path:line citations
     └── <phase>.result.json         that phase's stdout, stderr and exit code
@@ -359,7 +360,7 @@ echo 'specs/*/.pipeline/' >> .gitignore
 
 `spec-status` reports on one feature in one repo. `spec-dashboard` reports on all
 of them at once. It serves a page on loopback that refreshes every five seconds
-and groups pipelines and roadmaps by project:
+and groups pipelines and roadmaps by project.
 
 With nothing installed, run it straight from the clone:
 
@@ -393,6 +394,27 @@ the same rule `spec-run` uses. A roadmap is complete when every entry in its
 roadmap file is `done`. The **Show completed** tick brings everything back, and
 the filter box matches project, feature, branch and roadmap.
 
+**A roadmap entry that is `done` makes its pipeline complete,** whatever the
+pipeline last recorded. A `done` entry has landed on the base branch. Review
+findings are often fixed and merged by hand without review being run again,
+which leaves the pipeline's own record ending at `review: needs input` after
+the work has shipped. The row's note keeps that last recorded state.
+
+**Projects are listed alphabetically,** so the one you're watching stays in
+place. Within a project, running work comes first, then whatever needs you. A
+roadmap's current pipeline sits directly under the roadmap's card. Click a
+project's name, or pick it from the header, to show only that project. The
+choice is kept in the URL (`#project=docket`), so it survives a refresh and can
+be bookmarked.
+
+**Each pipeline records the roadmap entry that owns it.** `spec-roadmap` passes
+the roadmap and entry to `spec-run`, which writes them into `state.json` as
+`"roadmap": {"slug": …, "entry": …}` when it creates the pipeline. The roadmap's
+own state names an entry's feature only after `spec-run` returns, so without
+this an entry's first run had no link to its roadmap until it finished. Runs
+from before this field are linked by inference instead: the first pipeline
+created in the roadmap's checkout after the entry started.
+
 | Status | Meaning |
 |---|---|
 | `running` | a phase is `running` and its `spec-run` process is alive |
@@ -403,16 +425,23 @@ the filter box matches project, feature, branch and roadmap.
 | `unknown` | the server cannot read the process table (a sandbox), so running and crashed look the same |
 | `complete` | see above |
 
-Every unfinished row has copy buttons:
+Rows have copy buttons:
 
-- **Copy restart** copies `cd <repo> && spec-run --resume --feature-dir specs/…`.
-  If the pipeline is a roadmap's current entry, it copies
-  `spec-roadmap run <slug>` instead, so the roadmap's merge gate still runs.
-- **Copy session resume** copies `claude --resume <id>` for a phase that stopped
-  to ask you something or failed. This opens the phase's own conversation.
+- **Copy restart**, on unfinished pipelines, copies
+  `cd <repo> && spec-run --resume --feature-dir specs/…`. If the pipeline is a
+  roadmap's current entry, it copies `spec-roadmap run <slug>` instead, so the
+  roadmap's merge gate still runs.
+- **The session button**, on every row, shows the start of the latest phase's
+  session ID and copies `cd <dir> && claude --resume <id>`. The directory comes
+  from the session's own transcript, because `claude --resume` only finds a
+  session from the directory it ran in. If Claude Code has pruned the
+  transcript, the ID is struck through and nothing is copied.
 - **Copy prompt** copies a prompt for Claude Code. It explains why the run
   stopped, asks Claude to find and fix the cause, resume the run, and watch it
   to the end.
+- **Copy run** and **Copy show** on a roadmap copy `spec-roadmap run` and
+  `spec-roadmap show`. A running roadmap offers only **show**, because a second
+  `run` would start a second runner on it.
 
 It is **read-only**. Unlike `spec-status`, it never rewrites a crashed `running`
 phase to `interrupted`. The next `spec-run` or `spec-status` in that repository
@@ -1341,7 +1370,7 @@ reports success over a directory the rest of the pipeline cannot find.
 ## Tests
 
 ```bash
-./tests/run.sh          # shellcheck + 682 fixture assertions
+./tests/run.sh          # shellcheck + 690 fixture assertions
 ```
 
 **The suite is hermetic.** A stub runner shadows the real `claude` for the whole
@@ -1464,7 +1493,7 @@ the one thing it exists to measure.
 ## Tests, and what they cost to run
 
 ```bash
-./tests/run.sh          # shellcheck + 682 assertions, ~3.5 minutes
+./tests/run.sh          # shellcheck + 690 assertions, ~3.5 minutes
 ```
 
 Hermetic: a stub runner shadows the real `claude` for the whole run, so nothing

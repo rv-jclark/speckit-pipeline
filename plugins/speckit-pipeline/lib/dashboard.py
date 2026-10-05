@@ -387,6 +387,8 @@ def pipeline_record(state_path, checkout, project, table):
         "note": note,
         "session_id": sid,
         "roadmap": None,
+        # What the pipeline itself says owns it (state_init, from spec-roadmap).
+        "declared_roadmap": st.get("roadmap") if isinstance(st.get("roadmap"), dict) else None,
     }
 
 
@@ -645,6 +647,17 @@ class Collector:
             p["roadmap"] = {"slug": r["slug"], "entry": e["slug"], "entry_status": e["status"],
                             "current": e["slug"] == r["current"], "checkout": r["checkout"],
                             "inferred": inferred}
+            # A roadmap entry that is `done` has landed on the base branch,
+            # and that outranks anything the pipeline recorded before it did.
+            # Seen on docket: all 10 entries merged, 9 of their pipelines still
+            # ending at `review: needs_input`. The findings were fixed and
+            # merged by hand, and nothing re-ran review afterwards, so the
+            # pipeline's record stopped at the verdict from before the fix.
+            # The old verdict stays in the note so it isn't hidden.
+            if e["status"] == "done" and p["status"] != "complete":
+                was = f"{p['at']} {p['status'].replace('_', ' ')}" if p["at"] else p["status"]
+                p["status"], p["landed"] = "complete", True
+                p["note"] = f"landed via roadmap {r['slug']}; the pipeline's last record was {was}"
             e["pipeline_status"] = p["status"]
             e["pipeline"] = p["feature"]
             if e["slug"] == r["current"]:
@@ -664,6 +677,18 @@ class Collector:
                 if p:
                     link(r, e, p, False)
 
+        # The pipeline's own record of its owner, written when it was created.
+        # Exact, and present from the first second of the run.
+        for p in pipelines.values():
+            d = p["declared_roadmap"]
+            if p["roadmap"] or not d:
+                continue
+            r = roadmaps.get((p["project_path"], d.get("slug")))
+            e = r and next((e for e in r["entries"] if e["slug"] == d.get("entry")), None)
+            if e and not e.get("pipeline"):
+                link(r, e, p, False)
+
+        # FALLBACK, for runs started before pipelines recorded their owner.
         # spec-roadmap records an entry's feature only after spec-run returns,
         # so for the whole of an entry's FIRST run its slot says
         # `in_progress` with no feature. That is the run you most want to see
