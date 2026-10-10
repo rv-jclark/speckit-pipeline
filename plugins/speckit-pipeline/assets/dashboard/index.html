@@ -64,6 +64,10 @@ h1 { font-size: 17px; margin: 0; letter-spacing: -.01em; }
 .counts { display: flex; gap: 6px; flex-wrap: wrap; }
 .count { display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px; border-radius: 999px; background: var(--panel); border: 1px solid var(--line); font-size: 12.5px; color: var(--muted); }
 .count b { color: var(--text); font-variant-numeric: tabular-nums; }
+/* The counts are toggles: off hides that kind of row. */
+button.count { font: inherit; font-size: 12.5px; cursor: pointer; }
+button.count:hover { border-color: var(--faint); }
+button.count[aria-pressed="false"] { opacity: .45; text-decoration: line-through; border-style: dashed; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor !important; display: inline-block; }
 .controls { margin-left: auto; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
 .search { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; width: 220px; color: var(--text); font: inherit; }
@@ -72,7 +76,6 @@ h1 { font-size: 17px; margin: 0; letter-spacing: -.01em; }
 .plink:hover { text-decoration: underline; text-underline-offset: 3px; }
 .focusbar { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; color: var(--muted); font-size: 13px; }
 .focusbar a { color: var(--run); }
-.toggle { display: inline-flex; gap: 6px; align-items: center; color: var(--muted); cursor: pointer; user-select: none; font-size: 13px; }
 .live { display: inline-flex; align-items: center; gap: 6px; color: var(--faint); font-size: 12.5px; font-variant-numeric: tabular-nums; min-width: 5.5ch; }
 .live i { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); display: inline-block; }
 .live.stale i { background: var(--crash); }
@@ -220,7 +223,6 @@ main { max-width: 1280px; margin: 0 auto; padding: 16px 20px 60px; }
     <div class="controls">
       <select class="search pick" id="proj" aria-label="Project"><option value="">All projects</option></select>
       <input class="search" id="q" type="search" placeholder="Filter by project, feature, roadmap…" aria-label="Filter">
-      <label class="toggle"><input type="checkbox" id="showDone"> Show completed</label>
       <span class="live" id="live" title="Time since the last update"><i></i><span id="liveText">--:--</span></span>
     </div>
   </div>
@@ -231,8 +233,6 @@ main { max-width: 1280px; margin: 0 auto; padding: 16px 20px 60px; }
 <script>
 "use strict";
 const REFRESH_MS = 5000;
-// Statuses that mean "nobody needs to do anything": hidden unless asked for.
-const DONE = new Set(["complete"]);
 // The sort order, for rows within a project and for the projects themselves
 // (a project sorts by its highest row). Running work goes first because this
 // page is mostly watched for progress. Then whatever needs a human, most
@@ -243,8 +243,22 @@ const RANK = { running: 0, unknown: 1, needs_input: 2, crashed: 3, failed: 4, bl
 const LABEL = { needs_input: "needs input", awaiting_merge: "awaiting merge", in_progress: "in progress", limited: "usage limit" };
 const BUCKET = s => s === "running" ? "running"
   : s === "needs_input" ? "needs you"
+  : s === "crashed" ? "crashed"
+  : ["blocked", "failed", "interrupted"].includes(s) ? "blocked"
   : s === "complete" ? "complete"
   : s === "unknown" ? "unknown" : "stopped";
+// The header pills, in order: [bucket, label, status whose colour it takes,
+// tooltip]. Each one is a toggle. "complete" is the Show completed checkbox.
+const PILLS = [["running", "running", "running", ""],
+               ["needs you", "need you", "needs_input", "stopped to ask a question"],
+               ["unknown", "unknown", "unknown", "liveness can't be read from here"],
+               ["crashed", "crashed", "crashed", "marked running, but the runner process is gone"],
+               ["blocked", "blocked", "blocked", "blocked, failed or interrupted"],
+               ["stopped", "stopped", "paused", "paused, usage limit, awaiting merge or not started"],
+               ["complete", "complete", "complete", ""]];
+// A roadmap whose status is copied from its current pipeline is not counted
+// again: that pipeline is already in the numbers.
+const DERIVED = new Set(["running", "crashed", "unknown", "stopped"]);
 
 const ICON_TERM = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M3 4.5 6.5 8 3 11.5M8.5 12h4.5"/></svg>';
 const ICON_CHAT = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M2.5 3.5h11v7h-6l-3 2.5v-2.5h-2z"/></svg>';
@@ -276,17 +290,32 @@ let data = null, lastJson = "", lastOk = 0, failing = false;
 // back out again is a place for a paste to come out subtly different.
 let payloads = [];
 
-const showDone = $("showDone"), q = $("q"), proj = $("proj");
+const q = $("q"), proj = $("proj");
 // The project in focus lives in the URL, not in localStorage, so a refresh
 // keeps it, a bookmark can point at one project, and Back returns to all.
 const focusOf = () => { const m = location.hash.match(/^#project=(.+)$/); return m ? decodeURIComponent(m[1]) : ""; };
 const setFocus = name => { location.hash = name ? "project=" + encodeURIComponent(name) : ""; };
 window.addEventListener("hashchange", () => render());
 proj.addEventListener("change", () => setFocus(proj.value));
-showDone.checked = store.get("showDone", false);
 q.value = store.get("q", "");
-showDone.addEventListener("change", () => { store.set("showDone", showDone.checked); render(); });
 q.addEventListener("input", () => { store.set("q", q.value); render(); });
+// Kinds of row switched off in the header, remembered per browser like the
+// filter. Completed work starts hidden: nobody needs to do anything about it.
+// It was a "Show completed" checkbox, kept under its old key.
+const hidden = new Set(store.get("hidden", []));
+if (!store.get("showDone", false)) hidden.add("complete");
+const isOn = b => !hidden.has(b);
+const shown = s => isOn(BUCKET(s));
+$("counts").addEventListener("click", e => {
+  const b = e.target.closest("[data-bucket]")?.dataset.bucket;
+  if (!b) return;
+  hidden.has(b) ? hidden.delete(b) : hidden.add(b);
+  saveHidden(); render();
+});
+function saveHidden() {
+  store.set("showDone", !hidden.has("complete"));
+  store.set("hidden", [...hidden].filter(b => b !== "complete"));
+}
 
 function matches(text) {
   const needle = q.value.trim().toLowerCase();
@@ -376,8 +405,9 @@ function roadmapBlock(r) {
 function render() {
   if (!data) return;
   payloads = [];
-  const all = { running: 0, "needs you": 0, stopped: 0, unknown: 0, complete: 0 };
-  let hiddenDone = 0, quietProjects = [];
+  const all = Object.fromEntries(PILLS.map(([k]) => [k, 0]));
+  const off = Object.fromEntries(PILLS.map(([k]) => [k, 0]));
+  let quietProjects = [];
   const sections = [];
   const focus = focusOf();
   const names = data.projects.map(g => g.name).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
@@ -387,12 +417,16 @@ function render() {
   for (const g of data.projects) {
     if (focus && g.name !== focus) continue;
     const hay = x => [g.name, g.path, x.feature || x.slug, x.branch || "", x.note || "", x.roadmap?.slug || "", x.goal || ""].join(" ");
-    for (const p of g.pipelines) all[BUCKET(p.status)]++;
+    const counted = [...g.pipelines, ...g.roadmaps.filter(r => !DERIVED.has(r.status))];
+    for (const x of counted) all[BUCKET(x.status)]++;
     const ps = g.pipelines.filter(p => matches(hay(p)));
     const rs = g.roadmaps.filter(r => matches(hay(r)));
-    const vp = ps.filter(p => showDone.checked || !DONE.has(p.status));
-    const vr = rs.filter(r => showDone.checked || !DONE.has(r.status));
-    hiddenDone += (ps.length - vp.length) + (rs.length - vr.length);
+    const vp = ps.filter(p => shown(p.status));
+    // A roadmap stays when its current pipeline does, so a running entry keeps
+    // the card it belongs to even with that roadmap's own status switched off.
+    const vpFeatures = new Set(vp.map(p => p.feature));
+    const vr = rs.filter(r => shown(r.status) || vpFeatures.has(r.current_pipeline));
+    for (const x of [...ps.filter(p => !vp.includes(p)), ...rs.filter(r => !vr.includes(r) && !DERIVED.has(r.status))]) off[BUCKET(x.status)]++;
     if (!vp.length && !vr.length) { if (ps.length || rs.length) quietProjects.push(g.name); continue; }
 
     // ONE list per project, roadmaps and pipelines sorted together. They were
@@ -416,12 +450,14 @@ function render() {
     const items = [...rItems,
                    ...vp.filter(p => !nested.has(p.feature)).map(p => ({ st: p.status, at: p.updated_at, html: pipelineRow(p) }))];
     items.sort((a, b) => (RANK[a.st] ?? 9) - (RANK[b.st] ?? 9) || String(b.at).localeCompare(String(a.at)));
-    const t = { running: 0, "needs you": 0, stopped: 0 };
-    g.pipelines.forEach(p => { const b = BUCKET(p.status); if (b in t) t[b]++; });
-    const done = g.pipelines.filter(p => p.status === "complete").length;
+    const t = Object.fromEntries(PILLS.map(([k]) => [k, 0]));
+    g.pipelines.forEach(p => t[BUCKET(p.status)]++);
+    // Running, need you and stopped always; the rarer kinds only when present.
+    const tally = PILLS.filter(([k]) => k !== "complete" && (t[k] || ["running", "needs you", "stopped"].includes(k)))
+      .map(([k, l]) => `<span><b>${t[k]}</b> ${l}</span>`).join("");
     sections.push({ name: g.name, html: `<section class="project">
       <div class="phead"><h2><a class="plink" href="#project=${encodeURIComponent(g.name)}" title="Show only ${esc(g.name)}">${esc(g.name)}</a></h2><span class="path mono">${esc(g.path.replace(/^\/Users\/[^/]+/, "~"))}</span>
-        <div class="tally"><span><b>${t.running}</b> running</span><span><b>${t["needs you"]}</b> need you</span><span><b>${t.stopped}</b> stopped</span><span><b>${done}</b>/${g.pipelines.length} complete</span></div></div>
+        <div class="tally">${tally}<span><b>${t.complete}</b>/${g.pipelines.length} complete</span></div></div>
       <div class="items">${items.map(i => i.html).join("")}</div>
     </section>` });
   }
@@ -430,10 +466,11 @@ function render() {
   // runs changed state. Rows within a project still put running work first.
   sections.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
 
-  $("counts").innerHTML = [["running", "running", "running"], ["needs you", "need you", "needs_input"],
-                           ["stopped", "stopped", "paused"], ["unknown", "unknown", "unknown"], ["complete", "complete", "complete"]]
-    .filter(([k]) => k !== "unknown" || all[k])
-    .map(([k, l, s]) => `<span class="count"><span class="dot s-${s}"></span><b>${all[k]}</b> ${l}</span>`).join("");
+  // Unknown, crashed and blocked only appear when there are some, or when
+  // they're switched off, so a hidden kind can always be switched back on.
+  $("counts").innerHTML = PILLS
+    .filter(([k]) => all[k] || !isOn(k) || !["unknown", "crashed", "blocked"].includes(k))
+    .map(([k, l, s, tip]) => `<button type="button" class="count" data-bucket="${esc(k)}" aria-pressed="${isOn(k)}" title="${esc((isOn(k) ? "Click to hide " : "Click to show ") + l + (tip ? " (" + tip + ")" : ""))}"><span class="dot s-${s}"></span><b>${all[k]}</b> ${l}</button>`).join("");
 
   let html = "";
   if (data.process_table === false) {
@@ -443,17 +480,24 @@ function render() {
     html += `<div class="focusbar"><span>${names.includes(focus) ? `Showing only <b>${esc(focus)}</b>.` : `No project named <b>${esc(focus)}</b> under ${esc(data.roots.join(", "))}.`}</span><a href="#">Show all projects</a></div>`;
   }
   html += sections.map(s => s.html).join("");
-  if (!sections.length && focus && names.includes(focus)) {
+  const offList = PILLS.filter(([k]) => off[k]).map(([k, l]) => `${off[k]} ${k === "needs you" ? "needing you" : l}`);
+  const offOnlyDone = offList.length === 1 && off.complete;
+  if (!sections.length && offList.length && !offOnlyDone) {
+    html += `<div class="empty"><b>Nothing to show${focus ? " in " + esc(focus) : ""} with these filters</b>Everything here is a kind switched off in the header.</div>`;
+  } else if (!sections.length && focus && names.includes(focus)) {
     html += `<div class="empty"><b>${q.value ? "Nothing in " + esc(focus) + " matches that filter" : "Nothing unfinished in " + esc(focus)}</b>Every pipeline and roadmap there is complete.</div>`;
   } else if (!sections.length && !focus) {
     html += `<div class="empty"><b>${q.value ? "Nothing matches that filter" : "Nothing unfinished"}</b>${data.projects.length ? `Every pipeline under ${esc(data.roots.join(", "))} is complete.` : `No pipeline state found under ${esc(data.roots.join(", "))}. Pass --root to look elsewhere.`}</div>`;
   }
-  if (!showDone.checked && (hiddenDone || quietProjects.length)) {
-    html += `<p class="quiet">${hiddenDone} completed pipeline(s) and roadmap(s) hidden${quietProjects.length ? `, including everything in ${quietProjects.map(esc).join(", ")}` : ""}. <button type="button" id="reveal">Show completed</button></p>`;
+  if (offList.length) {
+    const what = offOnlyDone ? `${off.complete} completed pipeline(s) and roadmap(s)` : offList.join(", ");
+    html += `<p class="quiet">${what} hidden${quietProjects.length ? `, including everything in ${quietProjects.map(esc).join(", ")}` : ""}. <button type="button" id="reveal">${offOnlyDone ? "Show completed" : "Show all"}</button></p>`;
   }
   $("main").innerHTML = html;
   const reveal = $("reveal");
-  if (reveal) reveal.onclick = () => { showDone.checked = true; showDone.dispatchEvent(new Event("change")); };
+  if (reveal) reveal.onclick = () => {
+    hidden.clear(); saveHidden(); render();
+  };
 }
 
 async function copy(text) {
