@@ -439,6 +439,24 @@ _am_changed_paths() { # <repo>
   } | sort -u
 }
 
+# _am_addable_paths <repo> <paths> — the paths git add can be given. A deletion
+# the phase already staged (git rm) is in neither the index nor the tree, so
+# naming it to git add is a fatal "pathspec did not match" and the whole commit
+# failed (measured: 158 paths refused over one staged-deleted route). It is
+# staged already, so the commit takes it from the index without being named.
+# --literal-pathspecs keeps a Next.js route like app/api/[id]/route.ts from
+# being read as a glob.
+_am_addable_paths() { # <repo> <paths>
+  local p
+  printf '%s\n' "$2" | while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    if [ -e "$1/$p" ] || [ -L "$1/$p" ] ||
+       git -C "$1" --literal-pathspecs ls-files --error-unmatch -- "$p" >/dev/null 2>&1; then
+      printf '%s\n' "$p"
+    fi
+  done
+}
+
 # auto_merge_remote <repo> <base>  -> prints "<remote>\t<branch>", or nothing
 auto_merge_remote() {
   local repo="$1" base="$2"
@@ -471,7 +489,7 @@ _am_pick_method() {
 
 auto_merge_entry() {
   local repo="$1" base="$2" fdir="$3" branch="$4" slug="$5" title="$6"
-  local st review remote base_branch info rules method out n paths
+  local st review remote base_branch info rules method out n paths addable p
   # shellcheck disable=SC2034 # read by bin/spec-roadmap
   AUTO_MERGE_WHY=""; AUTO_MERGE_PR=""
 
@@ -519,8 +537,9 @@ auto_merge_entry() {
   paths=$(_am_changed_paths "$repo")
   if [ -n "$paths" ]; then
     n=$(printf '%s\n' "$paths" | grep -c .)
+    addable=$(_am_addable_paths "$repo" "$paths")
     # shellcheck disable=SC2086 # one path per line; word-splitting is wanted, globbing is not
-    ( set -f; IFS=$'\n'; git -C "$repo" add -A -- $paths ) >/dev/null 2>&1 &&
+    { [ -z "$addable" ] || ( set -f; IFS=$'\n'; git -C "$repo" --literal-pathspecs add -A -- $addable ) >/dev/null 2>&1; } &&
     git -C "$repo" commit -q -m "feat($slug): ${title:-$slug}" \
         -m "Committed by spec-roadmap auto-merge: the pipeline's uncommitted output ($n path(s))." \
         >/dev/null 2>&1 || { _am_decline "could not commit the entry's $n uncommitted path(s)"; return 2; }

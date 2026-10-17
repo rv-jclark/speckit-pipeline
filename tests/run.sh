@@ -4049,6 +4049,17 @@ assert_contains "$AUTO_MERGE_WHY" "unresolved BLOCKER or MAJOR" "an entry with o
 [ -n "$(git -C "$AM" status --porcelain work.txt)" ] && t_pass "a declined merge leaves the entry's work uncommitted" \
   || t_fail "a declined merge leaves the entry's work uncommitted" "it was committed"
 git -C "$AM" checkout -q main 2>/dev/null; rm -f "$AM/work.txt"
+
+# --- a deletion the phase already staged is committed, not refused
+AP="$WORK/am-addable"; rm -rf "$AP"; mkdir -p "$AP/app/api/todos/[id]"
+git -C "$AP" init -q
+printf 'x\n' > "$AP/app/api/todos/[id]/route.ts"; printf 'y\n' > "$AP/gone.txt"; printf 'z\n' > "$AP/edit.txt"
+git -C "$AP" add -A >/dev/null 2>&1; git -C "$AP" commit -qm base
+git -C "$AP" rm -q 'app/api/todos/[id]/route.ts' gone.txt
+printf 'z2\n' > "$AP/edit.txt"; mkdir -p "$AP/app/api/items/[id]"; printf 'n\n' > "$AP/app/api/items/[id]/route.ts"
+assert_eq "$(_am_addable_paths "$AP" "$(_am_changed_paths "$AP")" | tr '\n' ' ')" \
+  "app/api/items/[id]/route.ts edit.txt " \
+  "staged deletions are left to the index; bracketed and edited paths are still added"
 unset GH_FAKE_STATE GH_FAKE_REMOTE SPEC_ROADMAP_CHECKS_POLL SPEC_ROADMAP_CHECKS_GRACE SPEC_ROADMAP_CHECKS_TIMEOUT
 
 printf '\nroadmap spend\n'
