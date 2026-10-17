@@ -4053,6 +4053,7 @@ git -C "$AM" checkout -q main 2>/dev/null; rm -f "$AM/work.txt"
 # --- a deletion the phase already staged is committed, not refused
 AP="$WORK/am-addable"; rm -rf "$AP"; mkdir -p "$AP/app/api/todos/[id]"
 git -C "$AP" init -q
+git -C "$AP" config user.email t@t.invalid; git -C "$AP" config user.name t
 printf 'x\n' > "$AP/app/api/todos/[id]/route.ts"; printf 'y\n' > "$AP/gone.txt"; printf 'z\n' > "$AP/edit.txt"
 git -C "$AP" add -A >/dev/null 2>&1; git -C "$AP" commit -qm base
 git -C "$AP" rm -q 'app/api/todos/[id]/route.ts' gone.txt
