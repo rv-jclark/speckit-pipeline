@@ -42,6 +42,38 @@
 
 [Gates determined based on constitution file]
 
+## Invariants — what must never happen *(mandatory)*
+
+<!--
+  ACTION REQUIRED: Replace the placeholder row. This list is what review checks
+  the work AGAINST, so a property missing here is a property nobody checks.
+
+  - State each invariant as a FALSIFIABLE property: one input that would break it
+    must be imaginable.
+  - The PROBE detects a violation through the REAL interface (endpoint, page,
+    CLI, public function) — never by reading the implementation back to itself.
+  - The ENUMERATION is the set the invariant must hold over, written out in full
+    (e.g. every operation kind × every path). A probe over one member is a sample.
+  - When two things must agree, say which one CALLS the other. An invariant kept
+    by two copies staying in sync is one edit from broken.
+-->
+
+| ID | Invariant (never …) | Probe (real interface) | Holds over (enumerate every member) |
+|----|---------------------|------------------------|-------------------------------------|
+| INV-001 | [INVARIANT] | [probe] | [every kind × every path] |
+
+### Blast-radius decisions
+
+<!--
+  Decide every authority, deletion and money question HERE, before tasks exist.
+  Implement never decides one. If implement must reverse one, it stops, records
+  the reversal in this table with its consequences, and only then continues.
+-->
+
+| Decision | Choice | Why | Invariants it sets |
+|----------|--------|-----|--------------------|
+| [authority / deletion / money question] | [choice] | [why] | [INV-###] |
+
 ## Project Structure
 
 ### Documentation (this feature)

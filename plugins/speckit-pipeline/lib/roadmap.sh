@@ -577,6 +577,16 @@ Merged automatically once every check is green (\`--no-auto-merge\` turns this o
   else
     say "    reusing its pull request #$n"
   fi
+  # 5b. A DRAFT is marked ready first. Implement opens one at its first commit so
+  #     CI runs alongside review (spec 460: CI first ran only after four review
+  #     rounds, and found ~8 failures they had not). A draft cannot be merged, and
+  #     some CI skips drafts — so this comes before the checks are read, not after.
+  #     An unreadable answer is not evidence of a draft; the merge reports it.
+  if [ "$(cd "$repo" && gh pr view "$n" --json isDraft --jq '.isDraft' 2>/dev/null)" = true ]; then
+    out=$(cd "$repo" && gh pr ready "$n" 2>&1) || {
+      _am_decline "pull request #$n is a draft and gh pr ready was refused: $(printf '%s' "$out" | tail -1)"; return 2; }
+    say "    marked draft pull request #$n ready for review"
+  fi
   # shellcheck disable=SC2034 # read by bin/spec-roadmap
   AUTO_MERGE_PR="$n"
   say "    waiting for the checks on #$n"

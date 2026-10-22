@@ -59,11 +59,45 @@ allowed to touch — a phase that writes outside it fails the run. Your job is t
 judge and to record. Fixing is `/speckit-implement`'s job, which is why findings
 become tasks rather than patches.
 
-Concretely, you write exactly two things:
+Concretely, you write exactly three things:
 
 - `FEATURE_DIR/review.md` — always.
+- `FEATURE_DIR/review-probes/` — every adversarial probe you write, kept.
 - an appended `## Phase N: Review remediation` section in `FEATURE_DIR/tasks.md`
   — only when there is at least one blocking finding.
+
+## Rules that stop review swirl
+
+Measured (spec 460): four review rounds, and every round found BLOCKER/MAJOR
+defects inside the previous round's fixes. Each round free-hunted a different
+corner, pulled in adjacent pre-existing defects, and re-derived its probes by
+hand. These rules exist to make a second round re-check the first, not wander.
+
+1. **Review AGAINST the invariant list.** plan.md § Invariants is the checklist.
+   For each invariant, enumerate its set EXHAUSTIVELY — every member it names,
+   e.g. every operation kind × every path — and run its probe through the real
+   interface. Record each as `held`, `violated` (with the probe), or
+   `not checked` (with the reason). A violated invariant is a BLOCKER or MAJOR.
+   If the plan has no invariant list, say so in the verdict and derive one from
+   the spec before judging; do not free-hunt.
+2. **Keep every probe.** Save each adversarial probe you write to
+   `FEATURE_DIR/review-probes/`, named for its invariant (`INV-003-delete-every-path.sh`).
+   Re-run every probe already there FIRST: one that held last round and fails
+   now is a regression the last fix introduced. Each probe not yet in the
+   project's suite gets an adoption task when you append remediation, or a
+   § Follow-ups line when nothing blocks.
+3. **Ship on no BLOCKER and no MAJOR.** MINORs are listed in § Follow-ups and
+   never become remediation tasks.
+4. **Fence the scope.** A defect outside the spec's declared surface — present
+   before this branch and not made reachable or worse by it — goes to
+   § Follow-ups marked `out of scope`, whatever its severity. It is not this
+   spec's work and must not gate it.
+5. **Redesign on a repeat.** Count prior rounds from the existing
+   `## Phase N: Review remediation` sections in tasks.md and the previous
+   review.md. If a prior round already had a BLOCKER in the same component as a
+   new one, stop patching: write ONE remediation task, tagged `REDESIGN`, to
+   re-plan that component, and name the invariant its design failed to make
+   structural. No patch tasks for that component.
 
 **EVERY FINDING CITES `path:line`.** A finding without a location is not a
 finding, it is an impression, and an impression cannot be acted on or checked.
@@ -89,6 +123,10 @@ once from the repo root and parse `FEATURE_DIR` and `AVAILABLE_DOCS`. Derive:
 - TASKS = `FEATURE_DIR/tasks.md`
 - CONSTITUTION = `.specify/memory/constitution.md` (if present and not an
   unfilled template)
+
+Also read plan.md § Invariants and § Blast-radius decisions, the previous
+`review.md` if one exists, and every `## Phase N: Review remediation` in
+tasks.md: together they are the round history.
 
 If `spec.md` or `tasks.md` is missing, STOP and say which prerequisite command to
 run. Do not review against artifacts that are not there.
@@ -118,7 +156,8 @@ Say which; they are different evidence.
 
 ### 3. Build the obligation inventory
 
-From SPEC: functional requirements (FR-###), success criteria (SC-###) that
+From PLAN § Invariants first: every INV-### with its enumerated set — these
+are checked member by member, not sampled. From SPEC: functional requirements (FR-###), success criteria (SC-###) that
 require buildable work, user stories and their acceptance scenarios, edge cases.
 From PLAN: architecture and stack decisions, the data model, named touch-points,
 technical constraints. From CONSTITUTION: MUST/SHOULD principles.
@@ -128,7 +167,11 @@ against, so it is also the honest denominator for "I checked N of M".
 
 ### 4. Judge
 
-Work through four passes. They are ordered by what costs most to find late.
+Work through five passes. They are ordered by what costs most to find late.
+
+**0. Invariants.** Re-run `FEATURE_DIR/review-probes/`, then probe every
+invariant over its whole enumeration (rule 1 above). Anything else you notice
+is judged in the passes below, inside the scope fence.
 
 **a. Coherence across passes.** The one nothing else looks at.
 - Duplicated abstractions: two implementations of the same job, introduced by
@@ -169,6 +212,7 @@ Severity, which decides whether a finding blocks the merge:
   must not be padded.
 
 BLOCKER and MAJOR are the blocking set. Be willing to return zero of them.
+A defect outside the scope fence is never in the blocking set (rule 4).
 
 ### 6. Write `review.md`
 
@@ -178,12 +222,20 @@ Write to `FEATURE_DIR/review.md`, in this shape:
 # Review: <feature name>
 
 Reviewed <N> file(s) changed across <M> commit(s), against <base>...HEAD.
-Read in full: <paths>. Sampled: <paths>. Not reviewed: <paths, and why>.
+Round <R>. Read in full: <paths>. Sampled: <paths>. Not reviewed: <paths, and why>.
 
 ## Verdict
 
 <one paragraph: does this satisfy the spec and hang together, and what would
 you do about it. Lead with the answer.>
+
+## Invariants
+
+| ID | Result | Enumerated over | Probe / reason |
+|---|---|---|---|
+| INV-001 | held | 4 kinds × 3 paths, 12 of 12 | review-probes/INV-001-every-path.sh |
+| INV-002 | violated | 2 of 2 roles | review-probes/INV-002-viewer-write.sh → F1 |
+| INV-003 | not checked | — | needs a production export |
 
 ## Findings
 
@@ -200,6 +252,14 @@ you do about it. Lead with the answer.>
 - [ ] MINOR F3 — ...
 
 - NOTE F4 — <observation>  (no checkbox: notes are not work)
+
+## Follow-ups
+
+Not this spec's work, and not gating. Unboxed on purpose.
+
+- FU1 — MINOR F3, src/y.py:4
+- FU2 — out of scope: <pre-existing defect>, src/z.py:10
+- FU3 — adopt review-probes/INV-001-every-path.sh into the suite
 
 ## Coverage
 
@@ -222,6 +282,10 @@ Rules the verifier enforces, so get them right:
   `🛑 BLOCKER` or `MAJOR` after the box. Unchecked means unresolved.
 - At least one `path:line` citation must appear in the file.
 - `NOTE` items take no checkbox — they are not work and must not gate.
+- When plan.md has an `## Invariants` section, review.md must have one too,
+  and it must name every `INV-###` the plan defines. A missing one fails the
+  phase: an invariant nobody reported on reads as held.
+- § Follow-ups items take no checkbox, so they never gate.
 - If there are no findings at all, write `## Findings` with the single line
   `No findings. <what you checked and how.>` — the section is never empty and
   never omitted.
@@ -241,7 +305,11 @@ Appending, per the same contract `/speckit-converge` uses:
 
    ```markdown
    - [ ] T091 <imperative fix> — review F1 (BLOCKER), src/orders/repo.py:412
+   - [ ] T092 Adopt review-probes/INV-002-viewer-write.sh into tests/ as a failing test first — review F1
+   - [ ] T093 REDESIGN src/preview/: re-plan so INV-004 holds by construction (preview CALLS merge) — review F2 (BLOCKER, second round in this component)
    ```
+
+   For a violated invariant, the probe-adoption task comes before its fix.
 
 4. Do not modify, reorder or re-tick any existing task. Do not touch `spec.md`
    or `plan.md`.
@@ -264,8 +332,12 @@ Finish with the counts and the handoff:
 
 - [ ] The landed work was read as a whole — diff-first, or present-state with
       that stated explicitly
+- [ ] Every plan invariant recorded held / violated / not checked, over its
+      full enumeration, with every probe saved in `review-probes/`
 - [ ] `review.md` written with a verdict, findings that each cite `path:line`,
-      coverage counts, and an honest list of what could not be checked
+      follow-ups, coverage counts, and an honest list of what could not be checked
+- [ ] Out-of-scope defects and MINORs in § Follow-ups, not in tasks.md; a
+      repeat BLOCKER in one component became a REDESIGN task, not a patch
 - [ ] Remediation tasks appended to `tasks.md` if and only if something blocks
 - [ ] No code, `spec.md` or `plan.md` was modified
 - [ ] Counts and next action reported

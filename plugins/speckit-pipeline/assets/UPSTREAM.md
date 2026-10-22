@@ -75,7 +75,7 @@ vendored skill.
 
 ## Local patches
 
-The vendored files are upstream's, with ONE deliberate change. Re-apply it after
+The vendored files are upstream's, with TWO deliberate changes. Re-apply both after
 any refresh; `tests/run.sh` fails until you do.
 
 - **Every `mktemp` is rooted in `$TMPDIR`** (#20): `mktemp "${TMPDIR:-/tmp}/speckit.XXXXXX"`
@@ -88,6 +88,16 @@ any refresh; `tests/run.sh` fails until you do.
   sandbox-writable directory, so rooting the call there is enough.
   `spec-upgrade` delivers the patch to existing projects: it compares every
   scaffold file, not only the version number.
+- **The anti-swirl rules** (0.6.0): an `## Invariants — what must never happen`
+  section and `### Blast-radius decisions` in `templates/plan-template.md`;
+  invariant-probe and guards tasks in `templates/tasks-template.md`; a
+  one-feature-per-spec note in `templates/spec-template.md`; and matching rules
+  in the `speckit-plan`, `speckit-tasks` and `speckit-implement` skills. Measured
+  on one real feature (spec 460): four review rounds, each finding BLOCKER/MAJOR
+  defects inside the previous round's fixes, because no round had a list to check
+  against. `lib/verify.sh` reads the plan section, so a refresh that drops it
+  silently turns the review ledger check off — the suite's "anti-swirl rules"
+  block pins every piece.
 
 ## Refreshing again
 

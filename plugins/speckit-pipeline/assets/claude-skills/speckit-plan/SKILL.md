@@ -65,6 +65,7 @@ You **MUST** consider the user input before proceeding (if not empty).
    - Fill Technical Context (mark unknowns as "NEEDS CLARIFICATION")
    - Fill Constitution Check section from constitution
    - Evaluate gates (ERROR if violations unjustified)
+   - Fill **Invariants — what must never happen** (see Invariants below). Verification fails a plan that still carries `[INVARIANT]`.
    - Phase 0: Generate research.md (resolve all NEEDS CLARIFICATION)
    - Phase 1: Generate data-model.md, contracts/, quickstart.md
    - Re-evaluate Constitution Check post-design
@@ -157,6 +158,16 @@ Command ends after Phase 1 design. Report branch, IMPL_PLAN path, and generated 
 
 **Output**: data-model.md, /contracts/*, quickstart.md
 
+## Invariants
+
+Review checks the work against this list and nothing else, so write it before any design that could break it. Measured (spec 460): with no invariant list, four review rounds each hunted a different corner, and every round found BLOCKER/MAJOR defects inside the previous round's fixes.
+
+1. **One row per property that must never break.** State it as a falsifiable "never …": an input that would break it must be imaginable.
+2. **Give the probe.** It detects a violation through the real interface — the endpoint, the page, the CLI, the public function — never by reading the implementation back to itself.
+3. **Enumerate the set it holds over**, every member written out: every operation kind × every path, every role × every action. A probe over one member is a sample, not a check.
+4. **Make agreement structural.** When two things must agree (a preview and the action it previews, a count and the list it counts), the design has one of them CALL the other. Spec 460's preview hand-replayed the merge's steps and drifted three times; round 4 made it call the merge.
+5. **Decide blast radius here.** Every authority, deletion and money decision goes in *Blast-radius decisions* with its choice and the invariants it sets. Implement does not decide one. If implement must reverse one, it stops, records the reversal and its consequences in that table, and then continues.
+
 ## Key rules
 
 - Use absolute paths for filesystem operations; use project-relative paths for references in documentation
@@ -165,5 +176,6 @@ Command ends after Phase 1 design. Report branch, IMPL_PLAN path, and generated 
 ## Done When
 
 - [ ] Plan workflow executed and design artifacts generated
+- [ ] Invariants filled: each falsifiable, with a probe through the real interface and its full enumeration; blast-radius decisions recorded
 - [ ] Extension hooks dispatched or skipped according to the rules in Mandatory Post-Execution Hooks above
 - [ ] Completion reported to user with branch, plan path, and generated artifacts
