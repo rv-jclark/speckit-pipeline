@@ -21,6 +21,13 @@
   - Tested independently
   - Deployed independently
   - Demonstrated to users independently
+
+  ONE USER-FACING FEATURE PER SPEC. Review judges a spec as one surface, so a spec
+  bundling several features gives every review round several surfaces to wander
+  across. Measured: one entry bundled five features and took four review rounds.
+  If these stories would span several independent surfaces, split them into
+  separate specs (separate roadmap entries) — each complete in itself, not a
+  "phase 2" of this one.
 -->
 
 ### User Story 1 - [Brief Title] (Priority: P1)

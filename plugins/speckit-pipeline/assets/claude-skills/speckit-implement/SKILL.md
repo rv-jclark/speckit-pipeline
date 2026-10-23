@@ -166,6 +166,14 @@ You **MUST** consider the user input before proceeding (if not empty).
    - **Integration work**: Database connections, middleware, logging, external services
    - **Polish and validation**: Unit tests, performance optimization, documentation
 
+   **Rules that keep review from swirling** (measured on spec 460: four review rounds, each finding BLOCKER/MAJOR defects inside the last round's fixes):
+   - **Single source, by construction.** When two things must agree — a preview and the action it previews, a count and the list it counts, a copy and its origin — make one CALL the other. Never hand-sync a copy. Spec 460's preview re-implemented the merge's steps and drifted three times until it called the merge.
+   - **Fix by redesign when a fix is a second patch.** A remediation task tagged `REDESIGN` means patching already failed there: amend plan.md for that component first (the invariant, and how the design now makes it structural), then replace the code rather than patch it.
+   - **Never decide or reverse a blast-radius decision silently.** Authority, deletion and money choices live in plan.md § Blast-radius decisions. If a task forces a reversal, stop that task, record the reversal there — old choice, new choice, why, and every invariant and task it changes — append a task for each consequence, and only then continue.
+   - **Run invariant probes first.** Each must fail before you change the code it guards; a probe that already passes detects nothing — fix the probe.
+   - **Open a draft PR at the first commit** so CI runs alongside review rather than after it: when the branch is not the default branch, has a remote, and has no open PR, push it and run `gh pr create --draft --fill`. Push after each later commit. If push or `gh` is unavailable, say so in your report and carry on — it is not a task failure.
+   - **Run the guards task before every push**, not only at the end.
+
 8. Progress tracking and error handling:
    - Report progress after each completed task
    - Halt execution if any non-parallel task fails

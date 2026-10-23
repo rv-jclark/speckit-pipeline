@@ -144,6 +144,37 @@ _review_citations() { # <review.md path>
   printf '%s\n' "${c:-0}"
 }
 
+# The plan's invariant list, which review is checked against. Both read only an
+# `## Invariants` heading at the front of a line, so a plan that predates the
+# section — or a project whose own template override omits it — is not judged by
+# a rule it was never given.
+_plan_has_invariants() { # <plan.md path>
+  [ -f "$1" ] && grep -qE '^##[[:space:]]+Invariants' "$1" 2>/dev/null
+}
+# Every INV-### id the plan defines in its table (a row opening `| INV-`), one
+# per line, deduplicated. Ids merely mentioned in prose are not definitions.
+_plan_invariant_ids() { # <plan.md path>
+  [ -f "$1" ] || return 0
+  grep -oE '^\|[[:space:]]*INV-[0-9]+' "$1" 2>/dev/null | grep -oE 'INV-[0-9]+' | sort -u
+}
+# Plan ids the review never names. An invariant nobody reported on reads as held,
+# which is the free-hunting review this list exists to replace.
+_review_missing_invariants() { # <plan.md> <review.md>
+  local id miss=""
+  grep -qE '^##[[:space:]]+Invariants' "$2" 2>/dev/null || { printf 'section\n'; return 0; }
+  # IFS is set HERE, never inherited: word-splitting obeys the caller's IFS, and
+  # under a tab-only IFS every id arrived as one newline-joined word — which
+  # grep -E reads as several alternative patterns, so ONE id present satisfied
+  # them all. Measured: the suite's own fixture passed a ledger missing two ids.
+  # (Not a heredoc: that needs a temp file, which a sandboxed caller may refuse.)
+  local IFS='
+'
+  for id in $(_plan_invariant_ids "$1"); do
+    grep -qE "(^|[^0-9A-Za-z])$id([^0-9]|\$)" "$2" 2>/dev/null || miss="${miss:+$miss }$id"
+  done
+  printf '%s\n' "$miss"
+}
+
 _task_counts() { # prints "<unchecked> <total>"
   local f="$1" unchecked total
   [ -f "$f" ] || { echo "0 0"; return; }
@@ -215,6 +246,14 @@ verify_phase() { # verify_phase <phase_id> <feature_dir> <artifact_rel|""> [chun
   case "$phase" in
     specify|clarify|plan)
       markers=$(_clarification_markers "$path")
+      # 🛑 An unfilled invariant row is a plan with nothing for review to check
+      # against. It is a FAILURE rather than a question: nobody but the plan
+      # phase can write it, and the review phase would otherwise free-hunt —
+      # four rounds of it on spec 460, each finding defects in the last one's fixes.
+      if [ "$phase" = plan ] && grep -q '\[INVARIANT\]' "$path" 2>/dev/null; then
+        printf 'failed\t%s still carries the [INVARIANT] placeholder — the Invariants section was not filled, so review has nothing to check against\n' "$rel"
+        return 0
+      fi
       if [ "$markers" -gt 0 ]; then
         printf 'needs_input\t%s carries %s unresolved [NEEDS CLARIFICATION] marker(s)\n' \
           "$rel" "$markers"
@@ -293,6 +332,21 @@ verify_phase() { # verify_phase <phase_id> <feature_dir> <artifact_rel|""> [chun
         printf 'failed\t%s cites no path:line anywhere (%s bytes) — nothing shows the code was read, so its verdict cannot be relied on\n' \
           "$rel" "$bytes"
         return 0
+      fi
+      # The ledger is checked BEFORE the findings count for the same reason the
+      # citations are: a review that skipped an invariant has not established it
+      # held, so a clean verdict from it must not advance the run.
+      if _plan_has_invariants "$fdir/plan.md"; then
+        local missing
+        missing=$(_review_missing_invariants "$fdir/plan.md" "$path")
+        if [ "$missing" = section ]; then
+          printf 'failed\t%s has no ## Invariants section, but plan.md defines one — review must record every invariant held / violated / not checked\n' "$rel"
+          return 0
+        fi
+        if [ -n "$missing" ]; then
+          printf 'failed\t%s never reports on %s from plan.md — an invariant nobody checked reads as held\n' "$rel" "$missing"
+          return 0
+        fi
       fi
       blockers=$(_review_blockers "$path")
       if [ "${blockers:-0}" -gt 0 ]; then

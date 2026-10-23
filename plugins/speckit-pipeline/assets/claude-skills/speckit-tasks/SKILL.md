@@ -142,7 +142,15 @@ The tasks.md should be immediately executable - each task must be specific enoug
 
 **CRITICAL**: Tasks MUST be organized by user story to enable independent implementation and testing.
 
-**Tests are OPTIONAL**: Only generate test tasks if explicitly requested in the feature specification or if user requests TDD approach.
+**Tests are OPTIONAL**: Only generate test tasks if explicitly requested in the feature specification or if user requests TDD approach. **Invariant probes and the guards task are not tests in that sense — they are always generated** (see below).
+
+### Invariant Probes and Guards (REQUIRED)
+
+1. **One probe task per invariant** in plan.md § Invariants, in the phase that builds what the invariant protects. Name the INV id, the real interface it probes through, and the full enumeration it covers.
+2. **Probes are the FIRST tasks of their phase**, before any implementation task in it.
+3. **Each probe must FAIL on the pre-change code.** Say so in the task. A probe that passes before the change detects nothing; if one cannot fail first, the task says why.
+4. **Probes live in the project's test suite**, never a temp dir — the next review round re-runs them for free.
+5. **One guards task, in the final phase**: run the project's fast guard tier — structural, inventory, golden, exhaustiveness, fixture-writer tests — and fix every failure **before any push**. Measured (spec 460): CI found ~8 failures targeted local runs missed, nearly all cheap guard tests. Name the command if the project has one.
 
 ### Checklist Format (REQUIRED)
 
@@ -238,12 +246,13 @@ those tasks are shaped decides whether they get done or rot.
 - **Phase 1**: Setup (project initialization)
 - **Phase 2**: Foundational (blocking prerequisites - MUST complete before user stories)
 - **Phase 3+**: User Stories in priority order (P1, P2, P3...)
-  - Within each story: Tests (if requested) → Models → Services → Endpoints → Integration
+  - Within each story: Invariant probes → Tests (if requested) → Models → Services → Endpoints → Integration
   - Each phase should be a complete, independently testable increment
 - **Final Phase**: Polish & Cross-Cutting Concerns
 
 ## Done When
 
 - [ ] tasks.md generated with all phases, task IDs, and file paths
+- [ ] Every plan.md invariant has a probe task, first in its phase, that must fail on the pre-change code; the final phase has the guards task
 - [ ] Extension hooks dispatched or skipped according to the rules in Mandatory Post-Execution Hooks above
 - [ ] Completion reported to user with task count, story breakdown, and MVP scope

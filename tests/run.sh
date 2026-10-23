@@ -636,6 +636,80 @@ assert_eq "$(cut -f1 <<<"$res")" "ok" \
 # inflated into a gate with nothing to decide — which is the failure the
 # BLOCKED-task rule above already exists to undo.
 
+# --- invariants: what plan promises and review must report on, member by member
+# Spec 460 took four review rounds, each free-hunting a different corner and
+# finding defects in the last round's fixes. The plan's invariant list is what
+# makes a round re-check the last one, so a plan without it fails, and a review
+# that skips any of its ids fails before its findings are counted.
+printf '\ninvariants: plan defines them, review reports every one\n'
+INVD="$WORK/inv"; mkdir -p "$INVD"
+# Built from the REAL vendored template, so the template's own prose is under test:
+# a comment that quoted the placeholder would fail every plan that kept it.
+sed -e 's/\[FEATURE\]/Trust and access/' -e 's/\[DATE\]/2026-10-22/' -e '/REMOVE IF UNUSED/d' \
+  "$PKG/assets/specify/templates/plan-template.md" > "$INVD/plan.md"
+IFS=$'\t' read -r st note < <(verify_phase plan "$INVD" plan.md)
+assert_eq "$st" "failed" "a plan whose Invariants row is still the placeholder fails"
+assert_contains "$note" "Invariants section was not filled" "and says review would have nothing to check"
+sed -i'' -e 's/| INV-001 | \[INVARIANT\] |/| INV-001 | never a viewer write | POST \/x as viewer | 2 roles x 3 routes |/' "$INVD/plan.md"
+printf '| INV-002 | never a lost delete | DELETE /y | every kind |\n| INV-01 | never a stale preview | GET /p | every op |\n' \
+  >> "$INVD/plan.md"
+IFS=$'\t' read -r st note < <(verify_phase plan "$INVD" plan.md)
+# Mutation: put the placeholder back in the template's comment, and this fails.
+assert_eq "$st" "ok" "the same plan with its invariants filled passes, template prose and all"
+assert_eq "$(_plan_invariant_ids "$INVD/plan.md" | tr '\n' ' ')" "INV-001 INV-002 INV-01 " \
+  "invariant ids are read from table rows, not from prose that mentions one"
+
+{ printf '# Review\n\n## Verdict\n\nFine.\n'; _pad40
+  printf '## Findings\n\nNo findings. Read src/a.py:1.\n'; } > "$INVD/review.md"
+IFS=$'\t' read -r st note < <(verify_phase review "$INVD" review.md)
+assert_eq "$st" "failed" "a clean, cited review with no invariant ledger fails when the plan has one"
+assert_contains "$note" "no ## Invariants section" "naming the missing ledger"
+{ printf '# Review\n\n## Invariants\n\n| INV-001 | held |\n| INV-011 | held |\n'; _pad40
+  printf '## Findings\n\nNo findings. Read src/a.py:1.\n'; } > "$INVD/review.md"
+IFS=$'\t' read -r st note < <(verify_phase review "$INVD" review.md)
+assert_eq "$st" "failed" "a ledger that skips an invariant fails"
+# Mutation: drop the trailing boundary in the id match, and INV-011 satisfies INV-01.
+assert_contains "$note" "INV-002 INV-01 from plan.md" "naming each one skipped, and INV-011 does not stand in for INV-01"
+{ printf '# Review\n\n## Invariants\n\n| INV-001 | held |\n| INV-002 | violated | F1 |\n| INV-01 | not checked | needs prod |\n'; _pad40
+  printf '## Findings\n\n- MINOR F1 — src/a.py:1\n'; } > "$INVD/review.md"
+IFS=$'\t' read -r st note < <(verify_phase review "$INVD" review.md)
+assert_eq "$st" "ok" "a ledger naming every invariant passes on to the findings count"
+# Old plans were never given the section, so their reviews are not held to it.
+printf '# Implementation Plan: old\n\n## Summary\n\n| INV-001 | prose table |\n' > "$INVD/plan.md"
+{ printf '# Review\n\nNo findings. Read src/a.py:1.\n'; _pad40; } > "$INVD/review.md"
+assert_eq "$(verify_phase review "$INVD" review.md | cut -f1)" "ok" \
+  "a plan with no ## Invariants heading does not hold its review to a ledger"
+
+# --- the anti-swirl rules are in the text each phase actually reads
+# Prose is the only channel to a phase, so the rules must be where it reads.
+# Mutation: delete any one rule, and its line here fails.
+SKL="$PKG/assets/claude-skills"; TPLD="$PKG/assets/specify/templates"
+while IFS='|' read -r f needle label; do
+  assert_contains "$(cat "$f")" "$needle" "$label"
+done <<PINS
+$TPLD/plan-template.md|## Invariants — what must never happen|the plan template has an Invariants section
+$TPLD/plan-template.md|Probe (real interface)|each invariant carries a probe through the real interface
+$TPLD/plan-template.md|Holds over (enumerate every member)|and the enumeration it must hold over
+$TPLD/plan-template.md|### Blast-radius decisions|blast-radius decisions are recorded in the plan
+$SKL/speckit-plan/SKILL.md|Decide blast radius here|the plan skill decides authority, deletion and money up front
+$SKL/speckit-plan/SKILL.md|Make agreement structural|and makes agreement structural
+$TPLD/tasks-template.md|Invariant probes (FIRST in the phase — each must FAIL on the pre-change code)|the tasks template puts probes first in their phase
+$TPLD/tasks-template.md|Guards: run the project's fast guard tier|and has a guards task before any push
+$SKL/speckit-tasks/SKILL.md|Probes are the FIRST tasks of their phase|the tasks skill orders probes first
+$SKL/speckit-tasks/SKILL.md|Each probe must FAIL on the pre-change code|and requires them to fail first
+$SKL/speckit-tasks/SKILL.md|One guards task, in the final phase|and generates the guards task
+$SKL/speckit-implement/SKILL.md|Single source, by construction|implement makes one thing CALL the other
+$SKL/speckit-implement/SKILL.md|gh pr create --draft|implement opens a draft PR at the first commit
+$SKL/speckit-implement/SKILL.md|record the reversal there|implement records a reversed decision before continuing
+$SKL/speckit-review/SKILL.md|Review AGAINST the invariant list|review checks against the invariant list
+$SKL/speckit-review/SKILL.md|enumerate its set EXHAUSTIVELY|enumerating each set exhaustively
+$SKL/speckit-review/SKILL.md|FEATURE_DIR/review-probes/|review keeps its probes
+$SKL/speckit-review/SKILL.md|Ship on no BLOCKER and no MAJOR|review ships on no BLOCKER/MAJOR
+$SKL/speckit-review/SKILL.md|Fence the scope|review fences its scope
+$SKL/speckit-review/SKILL.md|Redesign on a repeat|review triggers a redesign on a repeat BLOCKER
+$TPLD/spec-template.md|ONE USER-FACING FEATURE PER SPEC|the spec template keeps one feature per spec
+PINS
+
 ( unset -f file_sha 2>/dev/null
   out=$(bash -c ". '$PKG/lib/verify.sh'" 2>&1); rc=$?
   [ "$rc" -ne 0 ] && printf 'GUARD_FIRED\n' || printf 'GUARD_SILENT\n' ) > "$WORK/guard"
@@ -1615,6 +1689,17 @@ assert_contains "$contract_impl" "YOU ARE HEADLESS" \
   "and still gets the shared contract"
 assert_contains "$contract_impl" "ONE PASS OF A CHUNKED PHASE" \
   "and, being chunked, is told to do one ## Phase group and stop"
+
+# review is told to check the plan's invariants, keep its probes and stop
+# patching on a repeat — the rules that would have ended spec 460 at round two.
+argv_rev=$("$SPEC_RUN" --repo "$BS" --feature-dir "$BS/specs/001-t" --only review --dry-run 2>&1)
+contract_rev=$(unquote "$argv_rev")
+assert_contains "$contract_rev" "REVIEW AGAINST THE INVARIANT LIST" \
+  "the review prompt carries the invariant rule"
+assert_contains "$contract_rev" "REDESIGN, DO NOT PATCH" "and the redesign trigger"
+assert_contains "$contract_rev" "FENCE THE SCOPE" "and the scope fence"
+assert_not_contains "$contract" "REVIEW AGAINST THE INVARIANT LIST" \
+  "and specify is not given the review rules"
 
 # 🛑 Cost in a pass is dominated by re-reading its own transcript, not by output:
 # one measured pass reported 27,706,579 cache-read tokens against 28,608 output
@@ -3843,13 +3928,15 @@ case "$1 $2" in
     else [ "$state" = open ] && echo "$n"; fi
     exit 0;;
   "pr create")
-    head=""; while [ $# -gt 0 ]; do case "$1" in --head) head="$2"; shift;; esac; shift; done
+    head=""; draft=""; while [ $# -gt 0 ]; do case "$1" in --head) head="$2"; shift;; --draft) draft=1;; esac; shift; done
     n=$(( $(cat "$S/next" 2>/dev/null || echo 6) + 1 )); echo "$n" > "$S/next"
     echo "$n" > "$S/pr.$head"; echo "$head" > "$S/branch.$n"
+    [ -n "$draft" ] && touch "$S/draft.$n"
     echo "https://github.com/o/r/pull/$n";;
   "pr checks")
     cat "${GH_FAKE_CHECKS:-/dev/null}" 2>/dev/null || echo '[]';;
   "pr view")
+    case "$*" in *isDraft*) [ -f "$S/draft.$3" ] && echo true || echo false; exit 0;; esac
     # Mergeability, only when a test sets it; otherwise unreadable, as on a
     # gh too old for the fields.
     [ -n "${GH_FAKE_MERGEABLE:-}" ] && { echo "$GH_FAKE_MERGEABLE"; exit 0; }
@@ -3859,8 +3946,12 @@ case "$1 $2" in
     # which is what a repository with no readable rulesets looks like.
     case "$2" in */rules/branches/*) [ -n "${GH_FAKE_RULES:-}" ] && { cat "$GH_FAKE_RULES"; exit 0; };; esac
     exit 1;;
+  "pr ready")
+    rm -f "$S/draft.$3"; echo "$3" >> "$S/readied";;
   "pr merge")
     n="$3"
+    # GitHub refuses to merge a draft; so does this.
+    [ -f "$S/draft.$n" ] && { echo "Pull request #$n is still a draft" >&2; exit 1; }
     [ -n "${GH_FAKE_MERGE_FAIL:-}" ] && { echo "GraphQL: Pull request is not mergeable: review required" >&2; exit 1; }
     echo "$3 $4" >> "$S/merges"
     b=$(cat "$S/branch.$n"); w="$S/merge-wt.$n"; rm -rf "$w"
@@ -3967,6 +4058,29 @@ out=$(GH_FAKE_MERGEABLE="CONFLICTING DIRTY" GH_FAKE_CHECKS=/dev/null SPEC_RUN_CL
 assert_contains "$out" "conflicts with main" "a conflicted pull request is reported as a conflict"
 assert_not_contains "$out" "has no CI checks" "not as missing CI"
 assert_eq "$([ -f "$GH_FAKE_STATE/merges" ] && echo merged || echo held)" "held" "and nothing is merged"
+
+# --- a DRAFT pull request that implement opened is marked ready, then merged
+# Implement opens a draft at its first commit so CI runs alongside review. The
+# roadmap reuses that PR, and a draft cannot be merged, so it must be readied —
+# before the checks are read, since some CI skips drafts.
+cat > "$FAKE/claude-draft" <<'FAKEEOF'
+#!/usr/bin/env bash
+[ "${1:-}" = "--help" ] && exit 0
+case "$*" in *speckit-implement*)
+  b=$(git branch --show-current 2>/dev/null)
+  [ -n "$b" ] && [ -z "$(gh pr list --head "$b" --state open)" ] && gh pr create --draft --fill --head "$b" >/dev/null;;
+esac
+exec claude-pipeline "$@"
+FAKEEOF
+chmod +x "$FAKE/claude-draft"
+am_fixture am-draft
+out=$(GH_FAKE_CHECKS="$GREEN" SPEC_RUN_CLAUDE_BIN=claude-draft \
+      "$SPEC_ROADMAP" run --repo "$AM" --slug rm --base origin/main 2>&1); rc=$?
+# Mutation: drop the `gh pr ready` step, and the fake refuses the draft merge (rc 2).
+assert_eq "$rc" "0" "a draft pull request opened by implement still merges unattended"
+assert_contains "$out" "marked draft pull request" "by marking it ready first"
+assert_eq "$(wc -l < "$GH_FAKE_STATE/readied" 2>/dev/null | tr -d ' ')" "2" \
+  "once per entry, on the PR implement opened rather than a second one"
 
 # --- an entry added to the roadmap file mid-run is run too (#18)
 # The count used to be read once at the start, so entries split or added while

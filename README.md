@@ -1115,6 +1115,31 @@ anywhere is recorded `failed`, checked before its findings count, because a
 review that cannot show it looked has a worthless verdict — and a worthless
 clean verdict is the most expensive thing this file could wave through.
 
+### Invariants: what review checks against
+
+Measured on one real feature (spec 460): four review rounds, and every round
+found BLOCKER/MAJOR defects inside the previous round's fixes. Each round
+free-hunted a different corner, so none re-checked the last. Since 0.6.0 the
+plan names what must never happen, and review reports on exactly that:
+
+- **plan** fills `## Invariants` — each a falsifiable "never …", the probe that
+  detects a violation through the real interface, and the full set it holds
+  over — plus the blast-radius decisions (authority, deletion, money). A
+  `plan.md` still carrying `[INVARIANT]` is `failed`.
+- **tasks** makes each invariant's probe the first task of its phase, failing on
+  the pre-change code, and adds a guards task before any push.
+- **implement** makes one thing CALL the other instead of hand-syncing a copy,
+  records any reversed decision before continuing, and opens a draft PR at its
+  first commit so CI runs alongside review. `spec-roadmap` marks that draft ready
+  before reading its checks.
+- **review** records every `INV-###` as held, violated or not checked, keeps its
+  probes in `review-probes/`, ships on no BLOCKER/MAJOR, sends MINORs and
+  out-of-scope defects to Follow-ups, and turns a repeat BLOCKER in one
+  component into a `REDESIGN` task. A `review.md` with no `## Invariants`
+  section, or one skipping an id the plan defines, is `failed` — checked before
+  its findings, like the citations. A plan with no `## Invariants` heading (an
+  older project, or an override without it) is not held to this.
+
 ### Work that cannot be done here: the `🛑 BLOCKED` marker
 
 Some tasks genuinely need a human — a real device, a visual judgement, a
@@ -1342,8 +1367,8 @@ scaffold, so a fresh repository needs one `spec-bootstrap` and no separate
 spec-kit install. Provenance and the pinned version are in
 [`assets/UPSTREAM.md`](plugins/speckit-pipeline/assets/UPSTREAM.md).
 
-Two deliberate deviations from the scaffold it was copied from, both recorded in
-`UPSTREAM.md` so neither is silent:
+Deliberate deviations from the scaffold it was copied from, each recorded in
+`UPSTREAM.md` so none is silent:
 
 - **The plan template's Constitution Check is upstream's placeholder.** The
   scaffold had five concrete gates written into it — one project's architecture
@@ -1352,6 +1377,8 @@ Two deliberate deviations from the scaffold it was copied from, both recorded in
   `.specify/memory/constitution.md`, which is where the plan phase reads them
   from; `.specify/templates/overrides/` is there if you do want them at template
   level.
+- **The plan, tasks and spec templates carry the invariant rules** (0.6.0) —
+  see [Invariants](#invariants-what-review-checks-against).
 - **The spec template's `Testing Strategy *(mandatory)*` section is kept.** It is
   an addition to upstream, but unlike the gates it names nothing
   project-specific: it asks what needs automated coverage, and what is
@@ -1408,7 +1435,7 @@ reports success over a directory the rest of the pipeline cannot find.
 ## Tests
 
 ```bash
-./tests/run.sh          # shellcheck + 722 fixture assertions
+./tests/run.sh          # shellcheck + 760 fixture assertions
 ```
 
 **The suite is hermetic.** A stub runner shadows the real `claude` for the whole
@@ -1531,7 +1558,7 @@ the one thing it exists to measure.
 ## Tests, and what they cost to run
 
 ```bash
-./tests/run.sh          # shellcheck + 722 assertions, ~3.5 minutes
+./tests/run.sh          # shellcheck + 760 assertions, ~3.5 minutes
 ```
 
 Hermetic: a stub runner shadows the real `claude` for the whole run, so nothing

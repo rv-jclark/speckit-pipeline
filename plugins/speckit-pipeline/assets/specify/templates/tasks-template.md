@@ -9,7 +9,7 @@ description: "Task list template for feature implementation"
 
 **Prerequisites**: plan.md (required), spec.md (required for user stories), research.md, data-model.md, contracts/
 
-**Tests**: The examples below include test tasks. Tests are OPTIONAL - only include them if explicitly requested in the feature specification.
+**Tests**: The examples below include test tasks. Tests are OPTIONAL - only include them if explicitly requested in the feature specification. **Invariant probes are NOT optional**: every invariant in plan.md § Invariants gets a probe task, and probes are the FIRST tasks of their phase.
 
 **Organization**: Tasks are grouped by user story to enable independent implementation and testing of each story.
 
@@ -61,6 +61,10 @@ description: "Task list template for feature implementation"
 
 **⚠️ CRITICAL**: No user story work can begin until this phase is complete
 
+### Invariant probes (FIRST in the phase — each must FAIL on the pre-change code)
+
+- [ ] TXXX [P] Probe INV-001 through [the real interface] over [every kind × every path] in tests/[path]
+
 Examples of foundational tasks (adjust based on your project):
 
 - [ ] T004 Setup database schema and migrations framework
@@ -79,6 +83,10 @@ Examples of foundational tasks (adjust based on your project):
 **Goal**: [Brief description of what this story delivers]
 
 **Independent Test**: [How to verify this story works on its own]
+
+### Invariant probes for User Story 1 (FIRST — each must FAIL on the pre-change code)
+
+- [ ] TXXX [P] [US1] Probe INV-002 through [endpoint/page] over [the enumerated set] in tests/[path]
 
 ### Tests for User Story 1 (OPTIONAL - only if tests requested) ⚠️
 
@@ -157,6 +165,7 @@ Examples of foundational tasks (adjust based on your project):
 - [ ] TXXX [P] Additional unit tests (if requested) in tests/unit/
 - [ ] TXXX Security hardening
 - [ ] TXXX Run quickstart.md validation
+- [ ] TXXX Guards: run the project's fast guard tier (structural, inventory, golden, exhaustiveness, fixture-writer tests) and fix every failure BEFORE any push
 
 ---
 
@@ -179,6 +188,7 @@ Examples of foundational tasks (adjust based on your project):
 
 ### Within Each User Story
 
+- Invariant probes come first and MUST FAIL on the pre-change code; a probe that passes before the change detects nothing
 - Tests (if included) MUST be written and FAIL before implementation
 - Models before services
 - Services before endpoints

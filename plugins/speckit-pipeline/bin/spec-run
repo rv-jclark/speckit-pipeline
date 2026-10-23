@@ -514,9 +514,45 @@ unfinished work.
 EOF
 }
 
+# What the review phase has to know that a fresh process would not: that it is
+# one ROUND of possibly several, and that rounds which free-hunt never converge.
+# The skill carries the full rules; this is the part worth saying twice.
+_handoff_review() {
+  cat <<'EOF'
+
+REVIEW AGAINST THE INVARIANT LIST, NOT BY FREE HUNTING. Measured (spec 460, one
+real feature): four review rounds, and every round found BLOCKER/MAJOR defects
+inside the PREVIOUS round's fixes. Each round hunted a different corner, so no
+two rounds checked the same thing and none proved anything stayed fixed.
+
+  1. Read plan.md § Invariants. For EACH invariant, enumerate its set
+     exhaustively (every operation kind × every path it names) and run its probe
+     through the real interface. Record every invariant in review.md
+     § Invariants as `held`, `violated` (with the probe that shows it) or
+     `not checked` (with the reason). A violated invariant is a BLOCKER or MAJOR.
+  2. Re-run every probe already in FEATURE_DIR/review-probes/ FIRST. A probe that
+     held last round and fails now is a regression the fix introduced.
+  3. SAVE every adversarial probe you write to FEATURE_DIR/review-probes/, named
+     for its invariant. A probe in a temp dir dies with this process and gets
+     re-derived by hand next round. Each one not yet in the project's suite
+     gets an adoption task in the remediation phase, or a § Follow-ups line
+     when nothing blocks.
+  4. SHIP ON NO BLOCKER OR MAJOR. MINORs go to § Follow-ups, never to tasks.md.
+  5. FENCE THE SCOPE. A defect outside the spec's declared surface — present
+     before this branch and not made reachable by it — goes to § Follow-ups
+     marked out of scope. It is not this spec's work, whatever its severity.
+  6. REDESIGN, DO NOT PATCH, ON A REPEAT. If an earlier round (an existing
+     `## Phase N: Review remediation` in tasks.md) already had a BLOCKER in the
+     component where you find another, write ONE remediation task to re-plan
+     that component, tagged REDESIGN, naming the invariant its design failed to
+     make structural. Do not write patch tasks for it.
+EOF
+}
+
 handoff_extra() { # handoff_extra <phase_id> <chunked>
   case "$1" in
     tasks) _handoff_tasks; return 0;;
+    review) _handoff_review; return 0;;
     implement) ;;
     *) return 0;;
   esac
