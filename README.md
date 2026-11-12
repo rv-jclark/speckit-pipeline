@@ -1435,7 +1435,7 @@ reports success over a directory the rest of the pipeline cannot find.
 ## Tests
 
 ```bash
-./tests/run.sh          # shellcheck + 760 fixture assertions
+./tests/run.sh          # shellcheck + 791 fixture assertions
 ```
 
 **The suite is hermetic.** A stub runner shadows the real `claude` for the whole
@@ -1550,6 +1550,51 @@ the two cheap levers here are structural rather than clever: chunk the long phas
 so the quadratic term is divided, and stop loading tool lists and documents the
 phase cannot use into a prefix it pays for once per turn.
 
+### What a phase starts with
+
+`read/turn` is an average over the whole phase, so it mixes two things: the work,
+and whatever was loaded before the work began. The second has its own figure.
+**Startup context** is the first model turn's whole input — the harness's system
+prompt and tool definitions, every installed plugin's skill listing, the
+project's `CLAUDE.md` and `.claude/rules`, the handoff contract — and it is the
+twelfth column of `cost.log` (`startup`), a `STARTUP` column in the token
+profile, and `startup_tokens` on each phase in `state.json`.
+
+It matters because it is paid **once per turn, not once**. Every turn re-reads
+everything before it, so a phase of T turns reads its startup context T times;
+`% READS` in the profile is that product as a share of the phase's cache reads.
+Measured 2026-11-12 across every `cost.log` on the author's machine — 157
+features, 3,095 phase runs:
+
+| project's always-on instructions | startup context | share of its cache-read tokens |
+|---|---|---|
+| a 240-byte `CLAUDE.md` | 31k | 35% |
+| a 100 KB `CLAUDE.md` | 80k | 46% |
+| a 16 KB `CLAUDE.md`, 78 KB of always-on `.claude/rules` | 125k | 60% |
+
+The 31k floor is the harness plus what is installed on the machine: 18 plugins
+and ~160 skills, none of which a phase uses.
+
+A run says so, once, when a phase starts above `defaults.startup_warn_tokens`
+(40000; `0` turns it off), and lists what it can see of the cause: the size on
+disk of `CLAUDE.md` and of the always-on files under `.claude/rules/`, and —
+when the run is streamed — the plugin, skill and tool counts from the session's
+own init event and the size of the project's auto-memory index. Those are sizes
+and counts, **not a token split** — the runner cannot see how the harness
+assembles its prompt and does not pretend to. They need not add up to the
+figure, either: in the 125k project above, the files listed account for under
+half of it, and the remainder is not yet explained. The warning
+changes no verdict: a heavy start is a cost, not a defect.
+
+The remedy is usually in the consuming project rather than here. Reference
+material a phase needs only sometimes is cheaper as a doc it reads on demand
+than as an instruction file it re-reads every turn.
+
+The figure comes from the first assistant message: on stdout under `--stream`,
+otherwise from the session transcript under `~/.claude/projects/`. A runner that
+provides neither records `unmeasured`. A `cost.log` begun before the column
+existed has its header extended and its rows left as they were.
+
 The counts are recorded **raw, never priced**. A dollar figure needs a per-model
 rate table, and a rate table in the engine goes stale silently the first time
 anything is repriced — at which point the log would be confidently wrong about
@@ -1558,7 +1603,7 @@ the one thing it exists to measure.
 ## Tests, and what they cost to run
 
 ```bash
-./tests/run.sh          # shellcheck + 760 assertions, ~3.5 minutes
+./tests/run.sh          # shellcheck + 791 assertions, ~3.5 minutes
 ```
 
 Hermetic: a stub runner shadows the real `claude` for the whole run, so nothing

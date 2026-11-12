@@ -145,6 +145,15 @@
     "ordinary shell the phases need to do their job. `auto` also allows the",
     "env-prefixed form if you prefer a classifier to a rule.",
     "",
+    "defaults.startup_warn_tokens is the size of startup context — everything a",
+    "phase had loaded before its first action — above which a run says so, once.",
+    "The figure is recorded per attempt in cost.log's `startup` column whatever",
+    "this is set to; the threshold only decides whether anyone is told. 40000 is",
+    "placed from measurement, not taste: across 157 features on the author's",
+    "machine a repo with a near-empty CLAUDE.md started at 31k (the harness and",
+    "the installed plugins alone), and the repos worth acting on started at 80k",
+    "and 125k. Set it to 0 to turn the warning off.",
+    "",
     "defaults.claude_bin is the executable each phase runs. Point it at a wrapper",
     "(--claude-bin, or SPEC_RUN_CLAUDE_BIN) when the plain CLI cannot get through",
     "your organisation's permission prompts. Whatever you name is probed for the",
@@ -154,6 +163,7 @@
   "defaults": {
     "claude_bin": "claude",
     "permission_mode": "bypassPermissions",
+    "startup_warn_tokens": 40000,
     "max_turns": 80,
     "write_scope": [
       "specs/",

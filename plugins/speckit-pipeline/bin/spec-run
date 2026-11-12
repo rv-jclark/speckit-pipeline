@@ -419,9 +419,20 @@ init_cost_log() {
   [ -n "$FEATURE_DIR" ] || return 0
   COST_LOG="$FEATURE_DIR/.pipeline/cost.log"
   mkdir -p "$(dirname "$COST_LOG")"
-  [ -f "$COST_LOG" ] || \
-    printf '# started_at\tphase\tmodel\teffort\tcost_usd\tturns\tduration_ms\tcache_read\tcache_write\tinput\toutput\n' \
-      > "$COST_LOG"
+  local hdr
+  hdr=$(printf '# started_at\tphase\tmodel\teffort\tcost_usd\tturns\tduration_ms\tcache_read\tcache_write\tinput\toutput\tstartup')
+  if [ ! -f "$COST_LOG" ]; then
+    printf '%s\n' "$hdr" > "$COST_LOG"
+  elif ! head -n 1 "$COST_LOG" | grep -q "$(printf '\tstartup')\$"; then
+    # A log begun before the startup column existed. Only the HEADER is brought
+    # up to date: its rows keep their eleven fields, so their twelfth reads as
+    # absent — which is the truth — where padding them would have to invent a
+    # value. Without this the new rows would sit under a header one column short.
+    local tmp
+    tmp=$(mktmp)
+    { printf '%s\n' "$hdr"; tail -n +2 "$COST_LOG"; } > "$tmp" && cat "$tmp" > "$COST_LOG"
+    rm -f "$tmp"
+  fi
 }
 
 # Everything the phase must know that is not in the skill: which phase it is,
@@ -464,6 +475,40 @@ Finish your final message with one line of the form:
 STATUS: ok | needs_input | failed — <one sentence>
 and, if needs_input, the specific questions a human must answer.
 EOF
+}
+
+# Say so, once, when a phase starts heavy. The figure is in cost.log and the
+# token profile either way; this is for the run nobody goes back to read.
+#
+# ONCE PER RUN, on the first phase over the line. Every phase of a run loads much
+# the same context, so a warning per phase — or per implement pass, of which a
+# feature has a dozen — would be the same fact printed until it was ignored.
+#
+# It names what the context is made of because the remedy is almost never in this
+# plugin: it is the consuming project's CLAUDE.md and rules, and the plugins
+# installed on the machine. A number with nowhere to look is a number nobody acts
+# on. It changes no verdict and no exit code — a heavy start is a cost, not a
+# defect, and a phase that did its work has done its work.
+STARTUP_WARNED=0
+warn_startup_context() { # <phase_id> <startup_tokens> <turns> <cache_read> <stdout_text>
+  local id="$1" st="${2:-}" turns="${3:-}" cr="${4:-}" limit share
+  [ "$STARTUP_WARNED" -eq 0 ] || return 0
+  case "$st" in ''|*[!0-9]*) return 0;; esac
+  limit=$(jqd "$CONFIG" '.defaults.startup_warn_tokens' 40000)
+  case "$limit" in ''|*[!0-9]*) limit=40000;; esac
+  [ "$limit" -gt 0 ] || return 0
+  [ "$st" -gt "$limit" ] || return 0
+  STARTUP_WARNED=1
+  share=$(fmt_startup_share "$st" "$turns" "$cr")
+  warn "$id — started with $(fmt_tokens "$st") tokens of context loaded before any work"
+  local paid="Every turn re-reads it, so it is paid once per turn"
+  [ -n "$share" ] && paid="$paid: about $share of the cache reads in this phase"
+  say  "  $paid."
+  say  "  What the runner can see of it (sizes on disk, ~4 bytes to a token):"
+  startup_contributors "$REPO" "${5:-}"
+  say  "  Reference material a phase needs only sometimes is cheaper as a doc it reads"
+  say  "  on demand than as an instruction file it re-reads every turn."
+  dim  "  Shown once per run, over $(fmt_tokens "$limit") (defaults.startup_warn_tokens; 0 turns it off)."
 }
 
 # What the tasks phase has to know that its skill does not: who executes the
@@ -1106,7 +1151,7 @@ run_phase() { # run_phase <phase_json>
 
   local cost turns dur result unmeasured="" json="" errcap="" denials=0 denied_tools="" denial_note=""
   local cli_error="" cli_subtype=""
-  local tok_read="" tok_write="" tok_in="" tok_out=""
+  local tok_read="" tok_write="" tok_in="" tok_out="" tok_startup=""
   errcap=$(head -c 4000 "$errf" 2>/dev/null || true)
   json=$(extract_result_json "$out") || json=""
   if [ -n "$json" ]; then
@@ -1122,6 +1167,10 @@ run_phase() { # run_phase <phase_json>
     tok_write=$(jq -r '.usage.cache_creation_input_tokens // empty' <<<"$json")
     tok_in=$(jq    -r '.usage.input_tokens // empty'                <<<"$json")
     tok_out=$(jq   -r '.usage.output_tokens // empty'               <<<"$json")
+    # What the phase had loaded before its first action — see startup_tokens.
+    # Not in the envelope: its usage is a total, so this is read from the first
+    # assistant message, on stdout when streaming and in the transcript when not.
+    tok_startup=$(startup_tokens "$out" "$(_phase_transcript "$sid" 2>/dev/null || true)")
     # The runner's OWN verdict on itself. It is not a hint to be weighed against
     # the artifact: `is_error` means the phase stopped without finishing, and
     # `subtype` says how — `error_max_turns` above all.
@@ -1183,12 +1232,14 @@ run_phase() { # run_phase <phase_json>
   [ -n "$cost" ] && RUN_TOTAL=$(awk -v a="$RUN_TOTAL" -v b="$cost" 'BEGIN{printf "%.4f", a+b}')
 
   if [ -n "$COST_LOG" ]; then
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
       "$(now_iso)" "$id" "$model" "$effort" "${cost:-unmeasured}" \
       "${turns:-unmeasured}" "${dur:-unmeasured}" \
       "${tok_read:-unmeasured}" "${tok_write:-unmeasured}" \
-      "${tok_in:-unmeasured}" "${tok_out:-unmeasured}" >> "$COST_LOG"
+      "${tok_in:-unmeasured}" "${tok_out:-unmeasured}" \
+      "${tok_startup:-unmeasured}" >> "$COST_LOG"
   fi
+  warn_startup_context "$id" "$tok_startup" "$turns" "$tok_read" "$out"
 
   # A non-zero exit is evidence, not a verdict — and a zero exit is not a pass.
   # The artifact decides. But a process that died before writing anything should
@@ -1309,6 +1360,7 @@ run_phase() { # run_phase <phase_json>
   if [ -n "$STATE" ]; then
     state_phase_finish "$STATE" "$id" "$status" "$cost" "$turns" "$dur" "$sha" "$note"
     state_phase_set_usage "$STATE" "$id" "$tok_read" "$tok_write" "$tok_in" "$tok_out"
+    state_phase_set_startup "$STATE" "$id" "$tok_startup"
   fi
 
   case "$status" in

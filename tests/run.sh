@@ -1603,6 +1603,124 @@ assert_eq "$(fmt_read_per_turn 17946392 96)" "187k" "read/turn is cache reads ov
 assert_eq "$(fmt_read_per_turn 17946392 "")" "" "with no turn count it prints nothing"
 assert_eq "$(fmt_read_per_turn 17946392 0)" "" "and never divides by zero to reach a confident 0"
 
+# ------------------------------------------------ startup context is measured --
+printf '\nstartup context\n'
+# What a phase had loaded before it did any work. It is the first model turn's
+# whole input, and it is paid once per TURN, so on a repo with a large CLAUDE.md
+# it is most of the bill — measured at 35-60% of cache-read tokens across five
+# real projects. read/turn cannot show it: that is an average over the phase.
+_st_stream='{"type":"system","subtype":"init","plugins":["a","b"],"skills":["s1","s2","s3"],"tools":["Bash"],"mcp_servers":[]}
+{"type":"assistant","message":{"usage":{"cache_read_input_tokens":8000,"cache_creation_input_tokens":72000,"input_tokens":10,"output_tokens":5},"content":[]}}
+{"type":"assistant","message":{"usage":{"cache_read_input_tokens":80000,"cache_creation_input_tokens":900,"input_tokens":2,"output_tokens":5},"content":[]}}
+{"type":"result","num_turns":2,"total_cost_usd":0.5}'
+# Mutation: sum only cache_read and this reports 8000 — the cold start a fresh
+# process actually has, where nearly all of the context is a cache WRITE.
+assert_eq "$(startup_tokens "$_st_stream")" "80010" \
+  "startup context is the FIRST turn's whole input: cache read + cache write + uncached"
+assert_eq "$(startup_tokens '{"total_cost_usd":0.01,"num_turns":1,"result":"STATUS: ok"}')" "" \
+  "an envelope with no per-message usage yields nothing, not 0"
+assert_eq "$(startup_tokens 'not json at all
+{"type":"assistant","message":{"content":[]}}')" "" \
+  "and neither chatter nor an assistant message without usage is mistaken for one"
+# The default output format carries only the final envelope, so the session
+# transcript is the fallback. Without it the figure would exist only for --stream.
+_st_tx="$WORK/startup-transcript.jsonl"
+printf '%s\n' '{"type":"user","message":{"content":"x"}}' \
+  '{"type":"assistant","message":{"usage":{"cache_read_input_tokens":100,"cache_creation_input_tokens":30000,"input_tokens":5}}}' > "$_st_tx"
+assert_eq "$(startup_tokens '{"total_cost_usd":0.01}' "$_st_tx")" "30105" \
+  "a non-streamed run falls back to the session transcript"
+assert_eq "$(startup_tokens "$_st_stream" "$_st_tx")" "80010" \
+  "but the phase's own stdout wins when it has the figure"
+assert_eq "$(fmt_startup_share 80000 10 1600000)" "50%" \
+  "the share is startup x turns over cache reads"
+assert_eq "$(fmt_startup_share 80000 30 1600000)" "100%" "capped, so a rounding never reads as 150%"
+assert_eq "$(fmt_startup_share "" 10 1600000)$(fmt_startup_share 80000 "" 1600000)$(fmt_startup_share 80000 10 0)" "" \
+  "and it prints nothing when any input is missing or cache reads are zero"
+
+# End to end, with a runner that reports a heavy first turn before its envelope.
+cat > "$FAKE/claude-heavy-start" <<'FAKEEOF'
+#!/usr/bin/env bash
+[ "${1:-}" = "--help" ] && exit 0
+printf '%s\n' '{"type":"system","subtype":"init","plugins":["a","b"],"skills":["s1","s2","s3"],"tools":["Bash"],"mcp_servers":[]}'
+printf '%s\n' '{"type":"assistant","message":{"usage":{"cache_read_input_tokens":8000,"cache_creation_input_tokens":72000,"input_tokens":10,"output_tokens":5},"content":[]}}'
+exec "$(dirname "$0")/claude-eats-stdin" "$@"
+FAKEEOF
+chmod +x "$FAKE/claude-heavy-start"
+HS="$WORK/heavystart"; mkbare "$HS" main
+"$SPEC_BOOTSTRAP" "$HS" >/dev/null 2>&1
+# 6000 bytes of always-on instructions, a rule file, and a path-scoped rule that
+# must NOT be blamed: it loads only when a matching file is touched.
+head -c 6000 /dev/zero | tr '\0' 'x' > "$HS/CLAUDE.md"
+mkdir -p "$HS/.claude/rules"
+head -c 2048 /dev/zero | tr '\0' 'y' > "$HS/.claude/rules/always.md"
+printf -- '---\npaths:\n  - "src/**"\n---\nscoped\n' > "$HS/.claude/rules/scoped.md"
+git -C "$HS" add -A >/dev/null 2>&1; git -C "$HS" commit -qm bootstrap
+out=$(SPEC_RUN_CLAUDE_BIN=claude-heavy-start "$SPEC_RUN" --repo "$HS" "build the thing" 2>&1); rc=$?
+assert_eq "$rc" "0" "a heavy start changes no verdict: the run still completes"
+HSCOST="$HS/specs/001-multi/.pipeline/cost.log"
+assert_eq "$(head -1 "$HSCOST" | awk -F'\t' '{print $NF"/"NF}')" "startup/12" \
+  "cost.log carries startup as its twelfth column"
+assert_eq "$(awk -F'\t' '$2=="plan"{print $12}' "$HSCOST")" "80010" \
+  "and each attempt records what it started with"
+assert_eq "$(jq -r '.phases.review.startup_tokens' "$HS/specs/001-multi/.pipeline/state.json")" "80010" \
+  "the state file records it too"
+# Mutation: write startup into `usage` and the chunked totals — which rewrite
+# usage whole — erase it for implement, the phase with the most turns to pay it.
+assert_eq "$(jq -r '.phases.implement.startup_tokens' "$HS/specs/001-multi/.pipeline/state.json")" "80010" \
+  "and it survives a chunked phase's totals being written over its usage"
+assert_contains "$out" "STARTUP" "the token profile has a startup column"
+assert_contains "$out" "80.0k tokens of context loaded before any work" "the run says so when a phase starts heavy"
+# Mutation: drop the STARTUP_WARNED latch and this is 5 — the same fact once per
+# phase, and once per implement pass on a real feature.
+assert_eq "$(printf '%s\n' "$out" | grep -c 'tokens of context loaded before any work')" "1" \
+  "ONCE per run, not once per phase"
+assert_contains "$out" "CLAUDE.md" "naming the instruction file that is part of it"
+assert_contains "$out" "5.9 KB" "with its size on disk"
+assert_contains "$out" "(1 always-on file(s))" "counting the always-on rule file"
+assert_contains "$out" "2.0 KB" "at its size"
+assert_contains "$out" "(1 path-scoped)" "and setting the path-scoped one aside rather than blaming it"
+assert_contains "$out" "plugins 2 · skills 3 · tools 1" "and what the session's own init event says it loaded"
+# The auto-memory index is loaded into every session and lives OUTSIDE the repo,
+# so only the init event can say where it is.
+mkdir -p "$WORK/automem"; head -c 3072 /dev/zero | tr '\0' 'm' > "$WORK/automem/MEMORY.md"
+assert_contains "$(startup_contributors "$HS" "{\"type\":\"system\",\"subtype\":\"init\",\"memory_paths\":{\"auto\":\"$WORK/automem/\"}}")" \
+  "auto-memory index (MEMORY.md)         3.0 KB" "the auto-memory index is listed, found through the init event"
+
+# The threshold is configuration. 0 turns the warning off; the figure is still kept.
+HS0="$WORK/heavystart-quiet"; mkbare "$HS0" main
+"$SPEC_BOOTSTRAP" "$HS0" >/dev/null 2>&1
+git -C "$HS0" add -A >/dev/null 2>&1; git -C "$HS0" commit -qm bootstrap
+jq '.defaults.startup_warn_tokens = 0' "$PKG/lib/phases.json" > "$WORK/phases-quiet.json"
+out=$(SPEC_RUN_CLAUDE_BIN=claude-heavy-start "$SPEC_RUN" --repo "$HS0" --config "$WORK/phases-quiet.json" "build the thing" 2>&1)
+assert_not_contains "$out" "tokens of context loaded before any work" "a threshold of 0 turns the warning off"
+assert_eq "$(awk -F'\t' '$2=="plan"{print $12}' "$HS0/specs/001-multi/.pipeline/cost.log")" "80010" \
+  "while cost.log still records the figure"
+jq '.defaults.startup_warn_tokens = 90000' "$PKG/lib/phases.json" > "$WORK/phases-high.json"
+HS1="$WORK/heavystart-under"; mkbare "$HS1" main
+"$SPEC_BOOTSTRAP" "$HS1" >/dev/null 2>&1
+git -C "$HS1" add -A >/dev/null 2>&1; git -C "$HS1" commit -qm bootstrap
+out=$(SPEC_RUN_CLAUDE_BIN=claude-heavy-start "$SPEC_RUN" --repo "$HS1" --config "$WORK/phases-high.json" "build the thing" 2>&1)
+assert_not_contains "$out" "tokens of context loaded before any work" "and a start under the threshold is not remarked on"
+
+# A runner that reports no per-message usage and leaves no transcript: unmeasured.
+assert_eq "$(awk -F'\t' '$2=="plan"{print $12}' "$MPCOST")" "unmeasured" \
+  "a start that could not be measured records as unmeasured, never 0"
+assert_not_contains "$(SPEC_RUN_CLAUDE_BIN=claude-eats-stdin "$SPEC_STATUS" --repo "$MP" 2>&1 | grep -E '^  specify ')" "unmeasured" \
+  "and the profile leaves that cell blank rather than printing a failure"
+
+# A cost.log begun before the column existed gets its HEADER brought up to date
+# and its rows left alone — their twelfth field is absent, which is the truth.
+_old_hdr=$(printf '# started_at\tphase\tmodel\teffort\tcost_usd\tturns\tduration_ms\tcache_read\tcache_write\tinput\toutput')
+_old_row=$(printf '2026-09-17T12:04:14Z\ttasks\tsonnet\tmedium\t1.56\t19\t332395\t1806174\t214762\t24\t34092')
+printf '%s\n%s\n' "$_old_hdr" "$_old_row" > "$HS0/specs/001-multi/.pipeline/cost.log"
+SPEC_RUN_CLAUDE_BIN=claude-heavy-start "$SPEC_RUN" --repo "$HS0" --config "$WORK/phases-quiet.json" --only review --force >/dev/null 2>&1
+assert_eq "$(head -1 "$HS0/specs/001-multi/.pipeline/cost.log" | awk -F'\t' '{print $NF}')" "startup" \
+  "an older cost.log has its header extended"
+assert_eq "$(sed -n 2p "$HS0/specs/001-multi/.pipeline/cost.log")" "$_old_row" \
+  "its existing rows are kept exactly as they were"
+assert_eq "$(tail -1 "$HS0/specs/001-multi/.pipeline/cost.log" | awk -F'\t' '{print $2"/"$12}')" "review/80010" \
+  "and the new attempt lands under the new header"
+
 # ------------------------------------------------- a name that does not exist --
 printf '\nunknown phase names\n'
 # `--only nosuchphase` used to select nothing, run nothing, print six "not

@@ -575,6 +575,128 @@ extract_result_json() { # extract_result_json <text>
   return 1
 }
 
+# ------------------------------------------------------- startup context --
+# What a phase had loaded BEFORE it did any work: the harness's system prompt and
+# tool definitions, every installed plugin's skill listing, the project's
+# CLAUDE.md and .claude/rules, the handoff contract. It is the first model turn's
+# whole input — cache read plus cache write plus uncached — and nothing later in
+# the phase can make it smaller.
+#
+# It is worth its own figure because it is paid ONCE PER TURN, not once: every
+# turn re-reads everything before it, so a phase of T turns reads its startup
+# context T times. Measured 2026-11-12 across every cost.log on the author's
+# machine (157 features, 3,095 phase runs, 117,863 turns): startup context was
+# 31k tokens in a repo with a 240-byte CLAUDE.md, 80k in one with a 100 KB
+# CLAUDE.md and 125k in one with 78 KB of always-on .claude/rules — 35%, 46% and 60% of
+# those projects' cache-read tokens. read/turn (above) cannot show this: it is an
+# average over the whole phase and mixes the fixed part with the work.
+#
+# Two sources, because the default output format does not carry it. A streamed
+# run has every assistant message on stdout; `--output-format json` has only the
+# final envelope, whose usage is a total. The session transcript on disk has the
+# per-message usage either way, so it is the fallback. A custom runner that keeps
+# no transcript leaves the figure EMPTY — recorded `unmeasured`, never 0.
+_STARTUP_JQ='fromjson?
+  | select(type == "object" and .type == "assistant" and ((.message.usage | type) == "object"))
+  | .message.usage
+  | ((.cache_read_input_tokens // 0) + (.cache_creation_input_tokens // 0) + (.input_tokens // 0))
+  | select(. > 0)'
+startup_tokens() { # startup_tokens <stdout_text> [transcript_file]
+  local n=""
+  # head, not jq's own `first`: the stream can be megabytes and only its opening
+  # lines matter. The `|| true` is for pipefail — head closing the pipe early is
+  # how this is supposed to end, not a failure.
+  n=$(printf '%s\n' "${1:-}" | grep '"type":"assistant"' 2>/dev/null | head -n 20 \
+      | jq -R -r "$_STARTUP_JQ" 2>/dev/null | head -n 1) || true
+  if [ -z "$n" ] && [ -n "${2:-}" ] && [ -f "${2:-}" ]; then
+    n=$(grep '"type":"assistant"' "$2" 2>/dev/null | head -n 20 \
+        | jq -R -r "$_STARTUP_JQ" 2>/dev/null | head -n 1) || true
+  fi
+  case "$n" in ''|*[!0-9]*) return 0;; esac
+  printf '%s' "$n"
+}
+
+# Kept apart from state_phase_set_usage for the reason that function is kept
+# apart from state_phase_finish — and one more: a chunked phase calls
+# state_phase_set_usage again with the passes' TOTALS, which rewrites `usage`
+# whole. Startup context is not a quantity that sums, so it lives beside usage
+# rather than in it, and an unmeasured pass leaves the last measured value alone.
+state_phase_set_startup() { # <state_file> <phase> <startup_tokens>
+  local f="$1" tmp
+  [ -f "$f" ] || return 0
+  case "${3:-}" in ''|*[!0-9]*) return 0;; esac
+  tmp=$(mktmp)
+  jq --arg p "$2" --arg n "$3" '.phases[$p] += { startup_tokens: ($n|tonumber) }' \
+    "$f" > "$tmp" && mv "$tmp" "$f"
+}
+
+# The share of a phase's cache reads that was its startup context being re-read:
+# startup x turns over cache_read. Capped at 100 because turns counts tool
+# round-trips slightly differently from API calls, and "104%" would read as a
+# bug in the reader's arithmetic rather than a rounding of ours.
+fmt_startup_share() { # fmt_startup_share <startup_tokens> <turns> <cache_read_tokens>
+  local s="${1:-}" t="${2:-}" r="${3:-}"
+  case "$s" in ''|null|*[!0-9]*) return 0;; esac
+  case "$t" in ''|null|*[!0-9]*) return 0;; esac
+  case "$r" in ''|null|*[!0-9]*) return 0;; esac
+  [ "$r" -gt 0 ] || return 0
+  awk -v s="$s" -v t="$t" -v r="$r" 'BEGIN{p = 100 * s * t / r; if (p > 100) p = 100; printf "%.0f%%", p}'
+}
+
+_fmt_bytes() { # _fmt_bytes <n>
+  awk -v n="${1:-0}" 'BEGIN{ if (n >= 1048576) printf "%.1f MB", n/1048576
+                             else if (n >= 1024) printf "%.1f KB", n/1024
+                             else printf "%d B", n }'
+}
+
+# What the startup context is MADE OF, as far as the runner can see from outside.
+# Sizes on disk and counts from the session's own init event — deliberately not a
+# token split. The runner cannot see how the harness assembles its prompt, and a
+# per-item token figure it invented would be the confidently-wrong number this
+# log refuses to keep elsewhere. Bytes and counts are what was observed, and they
+# are enough to say where to look: ~4 bytes of prose is ~1 token.
+#
+# Only always-loaded files are listed. A rule file with `paths:` frontmatter
+# is scoped to matching files, so it is counted separately rather than blamed.
+startup_contributors() { # startup_contributors <repo_root> <stdout_text>
+  local root="${1:-}" f n rules=0 rules_n=0 scoped_n=0 line
+  for f in CLAUDE.md CLAUDE.local.md .claude/CLAUDE.md; do
+    if [ -f "$root/$f" ]; then
+      n=$(wc -c < "$root/$f" | tr -d ' ')
+      [ "${n:-0}" -gt 0 ] && printf '    %-34s %s\n' "$f" "$(_fmt_bytes "$n")"
+    fi
+  done
+  if [ -d "$root/.claude/rules" ]; then
+    while IFS= read -r f; do
+      [ -n "$f" ] || continue
+      if head -n 12 "$f" 2>/dev/null | grep -qE '^paths:'; then
+        scoped_n=$((scoped_n + 1)); continue
+      fi
+      n=$(wc -c < "$f" | tr -d ' ')
+      rules=$((rules + ${n:-0})); rules_n=$((rules_n + 1))
+    done < <(find "$root/.claude/rules" -type f -name '*.md' 2>/dev/null)
+    [ "$rules_n" -gt 0 ] && printf '    %-34s %s\n' ".claude/rules/ ($rules_n always-on file(s))" "$(_fmt_bytes "$rules")"
+    [ "$scoped_n" -gt 0 ] && printf '    %-34s %s\n' ".claude/rules/ ($scoped_n path-scoped)" "not counted"
+  fi
+  # The init event is the session's own account of what it loaded. Present only
+  # on a streamed run; absent, the line is simply not printed.
+  line=$(printf '%s\n' "${2:-}" | grep -m1 '"subtype":"init"' 2>/dev/null \
+         | jq -R -r 'fromjson? | select(.type == "system")
+             | "plugins \(.plugins // [] | length) · skills \(.skills // [] | length) · tools \(.tools // [] | length) · MCP servers \(.mcp_servers // [] | length)"' 2>/dev/null) || true
+  [ -n "$line" ] && printf '    %s\n' "$line"
+  # The auto-memory index is loaded into every session of the project, and it
+  # lives outside the repo, so nothing in the tree hints at it. Only the init
+  # event says where it is.
+  local mem
+  mem=$(printf '%s\n' "${2:-}" | grep -m1 '"subtype":"init"' 2>/dev/null \
+        | jq -R -r 'fromjson? | .memory_paths.auto // empty' 2>/dev/null) || true
+  if [ -n "$mem" ] && [ -f "${mem%/}/MEMORY.md" ]; then
+    n=$(wc -c < "${mem%/}/MEMORY.md" | tr -d ' ')
+    [ "${n:-0}" -gt 0 ] && printf '    %-34s %s\n' "auto-memory index (MEMORY.md)" "$(_fmt_bytes "$n")"
+  fi
+  return 0
+}
+
 state_total_cost() { jq '[.phases[].cost_usd // 0] | add // 0' "$1"; }
 
 # Where a run's tokens went, per phase. Lives here rather than in spec-run or
@@ -595,20 +717,26 @@ print_token_profile() { # print_token_profile <state_file>
   # the blank line itself would leave a stray one behind on the return above,
   # which is the common case on any state file written before these fields.
   say ""
-  say "token profile  $(dim_s "read/turn is the average resident context — the figure a shorter pass moves")"
-  printf '  %-10s %12s %12s %9s %9s %11s\n' PHASE 'CACHE READ' 'CACHE WRITE' INPUT OUTPUT 'READ/TURN'
+  say "token profile  $(dim_s "read/turn is the average resident context; startup is what was loaded before any work, and % reads is its share")"
+  printf '  %-10s %12s %12s %9s %9s %11s %9s %8s\n' PHASE 'CACHE READ' 'CACHE WRITE' INPUT OUTPUT 'READ/TURN' STARTUP '% READS'
   jq -r '.phases | to_entries[] |
          [.key,
           (.value.usage.cache_read_tokens  // "" | tostring),
           (.value.usage.cache_write_tokens // "" | tostring),
           (.value.usage.input_tokens       // "" | tostring),
           (.value.usage.output_tokens      // "" | tostring),
-          (.value.num_turns                // "" | tostring)] | @tsv' "$f" |
-    while IFS=$'\t' read -r p cr cw ti to nt; do
-      printf '  %-10s %12s %12s %9s %9s %11s\n' \
+          (.value.num_turns                // "" | tostring),
+          (.value.startup_tokens           // "" | tostring)] | @tsv' "$f" |
+    while IFS=$'\t' read -r p cr cw ti to nt st; do
+      # STARTUP is blank, not "unmeasured", when absent: every state file written
+      # before the field existed lacks it, and a column of "unmeasured" beside
+      # four measured ones reads as a failure rather than as an older run.
+      printf '  %-10s %12s %12s %9s %9s %11s %9s %8s\n' \
         "$p" "$(fmt_tokens "$cr")" "$(fmt_tokens "$cw")" \
         "$(fmt_tokens "$ti")" "$(fmt_tokens "$to")" \
-        "$(fmt_read_per_turn "$cr" "$nt")"
+        "$(fmt_read_per_turn "$cr" "$nt")" \
+        "$([ -n "$st" ] && fmt_tokens "$st")" \
+        "$(fmt_startup_share "$st" "$nt" "$cr")"
     done
   # Totals are summed over the phases that HAVE a figure, and the row says how
   # many those were. A total that silently covers four of seven phases is the
