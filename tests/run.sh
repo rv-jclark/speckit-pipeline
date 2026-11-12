@@ -1683,8 +1683,15 @@ assert_contains "$out" "plugins 2 · skills 3 · tools 1" "and what the session'
 # The auto-memory index is loaded into every session and lives OUTSIDE the repo,
 # so only the init event can say where it is.
 mkdir -p "$WORK/automem"; head -c 3072 /dev/zero | tr '\0' 'm' > "$WORK/automem/MEMORY.md"
-assert_contains "$(startup_contributors "$HS" "{\"type\":\"system\",\"subtype\":\"init\",\"memory_paths\":{\"auto\":\"$WORK/automem/\"}}")" \
-  "auto-memory index (MEMORY.md)         3.0 KB" "the auto-memory index is listed, found through the init event"
+# ⚠️ The JSON is built into a variable FIRST. Written inline — escaped quotes
+# inside "$( … )" inside double quotes — bash 3.2 (macOS) parsed the arguments as
+# EMPTY, so the assertion compared '' against '' and passed having checked
+# nothing, while bash 5 in CI parsed it properly and failed on a wrong expected
+# string. Green locally and vacuous is the worst of the two outcomes.
+_am_init=$(printf '{"type":"system","subtype":"init","memory_paths":{"auto":"%s/automem/"}}' "$WORK")
+_am_out=$(startup_contributors "$HS" "$_am_init")
+assert_contains "$_am_out" "auto-memory index (MEMORY.md)      3.0 KB" \
+  "the auto-memory index is listed, found through the init event"
 
 # The threshold is configuration. 0 turns the warning off; the figure is still kept.
 HS0="$WORK/heavystart-quiet"; mkbare "$HS0" main
